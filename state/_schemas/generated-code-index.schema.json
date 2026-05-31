@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "generated-code-index.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "module", "generators", "excludedFqcns", "excludedPackages"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "module": { "type": "string" },
+    "generators": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind"],
+        "properties": {
+          "kind": { "enum": ["openapi", "cxf", "lombok", "freebuilder", "mapstruct", "immutables", "autovalue", "other"] },
+          "spec": { "type": "string" },
+          "specExists": { "type": "boolean" },
+          "wsdl": { "type": "string" },
+          "wsdlExists": { "type": "boolean" },
+          "apiPackage": { "type": "string" },
+          "modelPackage": { "type": "string" },
+          "sourceFolder": { "type": "string" },
+          "packages": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "excludedFqcns": { "type": "array", "items": { "type": "string" } },
+    "excludedPackages": { "type": "array", "items": { "type": "string" } },
+    "blocked": { "type": "array" }
+  }
+}

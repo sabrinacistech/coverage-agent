@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "fixture-catalog.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "fixtures"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "fixtures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "strategy"],
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "type": "string" },
+          "strategy": { "enum": ["builder", "constructor", "factory", "mock"] },
+          "builderEvidence": { "type": "string" },
+          "constructorEvidence": { "type": "string" },
+          "factoryEvidence": { "type": "string" },
+          "values": { "type": "object" },
+          "variants": { "type": "array", "items": { "type": "string" } },
+          "cycleSafe": { "type": "boolean" },
+          "degraded": {
+            "type": "boolean",
+            "description": "True when the builder fell back to a best-effort mock because no valid instantiation strategy (builder/constructor/factory/legit mock) was found. Downstream consumers must treat this fixture as fragile."
+          }
+        }
+      }
+    }
+  }
+}

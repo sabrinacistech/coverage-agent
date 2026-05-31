@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "artifact-map.schema.json",
+  "title": "Artifact map — who produced what from what",
+  "description": "Static map: producer tool → produced outputs ← required inputs. Used by orchestrators to compute affected scope when an input changes.",
+  "type": "object",
+  "required": ["schemaVersion", "entries"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["producer", "outputs", "inputs"],
+        "additionalProperties": false,
+        "properties": {
+          "producer": {
+            "type": "string",
+            "description": "Tool path or step name (e.g. tools/python/pom_parser.py)."
+          },
+          "outputs": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "State files written, relative to state/."
+          },
+          "inputs": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Files read (project sources, prior state, env)."
+          }
+        }
+      }
+    }
+  }
+}

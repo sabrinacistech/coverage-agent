@@ -1,0 +1,81 @@
+# quality.rules — reparaciones determinísticas para violaciones G6-quality
+# (test_linter.py --quality-checks → skills/07-generation/test-quality-gate.md).
+#
+# Format: "kindPattern"  =>  action(args)
+#
+# kindPattern matches against `state/linter-violations.json[*].kind`. The
+# repair_rules_compiler keeps the literal pattern; repair_dispatch.py uses
+# the rule's errorCode (derived from the action via _ACTION_TO_ERROR_CODE)
+# to index rules by violation.kind. ${field} placeholders are resolved by
+# repair_dispatch from the violation record (post-audit 2026-05-28).
+#
+# Each violation carries `skill: 11-quality/NN`; if no rule matches, the
+# repair-agent escalates with the skill reference as context. See
+# repair-rules/README.md for the action vocabulary.
+#
+# ── Auto-repairable (determinístico) ─────────────────────────────────────────
+
+# Thread.sleep → Awaitility.await().atMost(...) requires the import + library;
+# safer to escalate with explicit guidance than to fabricate a timeout.
+"TQG_11_NON_DETERMINISTIC.Thread.sleep"             => escalateToLLM(11-quality/11 — replace Thread.sleep with Awaitility.await().atMost(Duration.ofSeconds(N)).until(...))
+
+# Non-deterministic time/random sources: no safe automatic rewrite without
+# knowing the production injection point — escalate with the skill citation.
+"TQG_11_NON_DETERMINISTIC.System.currentTimeMillis" => escalateToLLM(11-quality/11 — inject Clock or Supplier<Instant>; tests should pass a fixed value)
+"TQG_11_NON_DETERMINISTIC.System.nanoTime"          => escalateToLLM(11-quality/11 — inject Clock or Supplier<Long>; tests should pass a fixed value)
+"TQG_11_NON_DETERMINISTIC.Math.random"              => escalateToLLM(11-quality/11 — inject Random/RandomGenerator with seed; tests should use deterministic seed)
+"TQG_11_NON_DETERMINISTIC.LocalDate.now"            => escalateToLLM(11-quality/11 — inject Clock; assert against LocalDate.now(clock))
+"TQG_11_NON_DETERMINISTIC.LocalDateTime.now"        => escalateToLLM(11-quality/11 — inject Clock; assert against LocalDateTime.now(clock))
+"TQG_11_NON_DETERMINISTIC.Instant.now"              => escalateToLLM(11-quality/11 — inject Clock; assert against Instant.now(clock))
+"TQG_11_NON_DETERMINISTIC.UUID.randomUUID"          => escalateToLLM(11-quality/11 — inject Supplier<UUID>; tests should provide a fixed UUID)
+
+# Tautological asserts: no safe replacement — the LLM must derive the real
+# expectation from the SUT contract.
+"TQG_12_TAUTOLOGY"                                  => escalateToLLM(11-quality/12 — replace tautology with assertion against the actual return value or verified interaction)
+
+# Assert-free test: re-plan from intent — body lacks observable check.
+"TQG_12_ASSERT_FREE"                                => escalateToLLM(11-quality/12 — add assert*/verify on the return value or a collaborator interaction listed in testCase.mockSetup)
+
+# Over-mock — split into two sub-kinds at the linter level:
+#   TQG_12_OVER_MOCK_SUT  → @Mock applied to the SUT itself. Auto-repaired by
+#                           flipping the annotation to @InjectMocks; the SUT
+#                           simple name comes from violation.symbol.
+#   TQG_12_OVER_MOCK      → value-object mock (String/Optional/BigDecimal/…),
+#                           needs semantic judgement; stays as LLM escalation.
+"TQG_12_OVER_MOCK_SUT"                              => convertMockSutToInjectMocks(${symbol})
+"TQG_12_OVER_MOCK"                                  => escalateToLLM(11-quality/12 — instantiate the SUT with @InjectMocks/constructor; use a real value for value objects)
+
+# Brittle over-verification.
+"TQG_10_OVER_VERIFY"                                => escalateToLLM(11-quality/10 — remove verifyNoMoreInteractions or add `// negative scenario` marker if intentional)
+
+# Mutable static state in test class.
+"TQG_10_STATIC_STATE"                               => escalateToLLM(11-quality/10 — move static field to @BeforeEach-initialised instance field or make final)
+
+# Test order dependency.
+"TQG_10_TEST_ORDER_DEP"                             => escalateToLLM(11-quality/10 — remove @TestMethodOrder unless registered in state/batch-plan.json; each test must be independent)
+
+# Naming violation: needs semantic understanding of the scenario.
+"TQG_03_NAMING"                                     => escalateToLLM(11-quality/03 — rename to should<Behavior>_when<Condition> using testCase.scenario as source of truth)
+
+# Missing AAA separators — fully deterministic: ast_patcher inserts the
+# `// given` / `// when` / `// then` markers based on a heuristic split of
+# the method body (post-audit 2026-05-28). No semantic guessing required.
+"TQG_02_NO_AAA"                                     => insertAaaComments()
+
+# Logic in test (if/for/while/switch).
+"TQG_09_LOGIC_IN_TEST"                              => escalateToLLM(11-quality/09 — replace control flow with @ParameterizedTest or split into separate test cases per branch)
+
+# Eager test: multiple `// when` blocks.
+"TQG_11_EAGER_TEST"                                 => escalateToLLM(11-quality/11 — split into multiple test methods, one concept each)
+
+# Unused stub — deterministic: drop the `when(...).thenReturn(...)` (and
+# `doX().when()` / `given().willReturn()` equivalents) for the offending
+# method. The linter exposes the method name in `violation.method`; the
+# dispatcher substitutes ${method} from that field (post-audit 2026-05-28).
+"TQG_06_UNUSED_STUB"                                => removeUnusedStub(${method})
+
+# Swallowed exception in try/catch.
+"TQG_12_SWALLOWED"                                  => escalateToLLM(11-quality/12 — replace try/catch with assertThrows or add fail()/assert on caught exception)
+
+# Coverage accidental: target method not actually exercised.
+"TQG_08_NO_TARGET_HIT"                              => escalateToLLM(11-quality/08 — re-plan: ensure the test invokes coverage.targets[].method, not a sibling)

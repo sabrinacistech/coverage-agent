@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "batch-plan.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "cycle",
+    "mode",
+    "sizeChosen",
+    "items"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "cycle": {
+      "type": "integer"
+    },
+    "mode": {
+      "enum": [
+        "coverage",
+        "branch-coverage",
+        "mutation-hardening"
+      ]
+    },
+    "sizeChosen": {
+      "type": "integer"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "targetId",
+          "sut",
+          "method"
+        ],
+        "properties": {
+          "targetId": {
+            "type": "string"
+          },
+          "sut": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "branchId": {
+            "type": "string"
+          },
+          "mutationId": {
+            "type": "string"
+          },
+          "fixtureIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "score": {
+            "type": "integer",
+            "description": "Computed coverage priority score"
+          },
+          "template": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Recommended test template path"
+          },
+          "generatedAt": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "generatedAt": {
+      "type": "string"
+    }
+  }
+}

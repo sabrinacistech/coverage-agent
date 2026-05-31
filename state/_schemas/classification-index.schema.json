@@ -1,0 +1,119 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "classification-index.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "classes"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "generatedAt": {
+      "type": "string"
+    },
+    "classes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "fqcn",
+          "type"
+        ],
+        "properties": {
+          "fqcn": {
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "service",
+              "controller",
+              "repository",
+              "mapper",
+              "util",
+              "config",
+              "dto",
+              "generated",
+              "entity",
+              "exception",
+              "component",
+              "configuration",
+              "non-instantiable",
+              "data-carrier",
+              "enum",
+              "generated/excluded"
+            ]
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "loc": {
+            "type": "integer"
+          },
+          "publicMethods": {
+            "type": "integer"
+          },
+          "cyclomatic": {
+            "type": "integer"
+          },
+          "coverage": {
+            "type": "object",
+            "properties": {
+              "lines": {
+                "type": "number"
+              },
+              "branches": {
+                "type": "number"
+              }
+            }
+          },
+          "risk": {
+            "type": "number"
+          },
+          "score": {
+            "type": "number"
+          },
+          "testabilityRisk": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "coverageValue": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "recommendedTemplate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "module": {
+            "type": "string"
+          },
+          "generatedAt": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

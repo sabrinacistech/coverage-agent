@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "discovery-summary.schema.json",
+  "description": "Forma física del repositorio — escrito por el pre-stage determinista de Discovery (tools/python/pom_parser.py, skill 01-discovery/project-shape); consumido por tools/python/classification_analyzer.py. No es un turno LLM.",
+  "type": "object",
+  "required": ["schemaVersion", "modules"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "root": { "type": "string" },
+    "modules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name":                 { "type": "string" },
+          "path":                 { "type": "string" },
+          "packaging":            { "enum": ["jar", "war", "pom", "ear"] },
+          "sourceRoots":          { "type": "array", "items": { "type": "string" } },
+          "testRoots":            { "type": "array", "items": { "type": "string" } },
+          "generatedSourceRoots": { "type": "array", "items": { "type": "string" } },
+          "classesDir":           { "type": "string" },
+          "testClassesDir":       { "type": "string" },
+          "java":                 { "type": "string" },
+          "existingTestCount":    { "type": "integer" },
+          "conventions":          { "type": "object" }
+        }
+      }
+    },
+    "sourceRoots":          { "type": "array", "items": { "type": "string" } },
+    "testRoots":            { "type": "array", "items": { "type": "string" } },
+    "detectedDependencies": { "type": "array" },
+    "conventions":          { "type": "object" }
+  }
+}

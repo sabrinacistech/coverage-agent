@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "failure-memory.schema.json",
+  "type": "object",
+  "required": ["schemaVersion", "entries"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["hash", "errorCode", "symbolFQN", "fixId", "attempts", "lastResult"],
+        "properties": {
+          "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "sha256(errorCode + '|' + symbolFQN + '|' + fixId) — 64 hex chars" },
+          "errorCode": { "type": "string" },
+          "symbolFQN": { "type": "string" },
+          "fixId": { "type": "string" },
+          "attempts": { "type": "integer" },
+          "lastResult": { "enum": ["FAILED", "SUCCESS"] },
+          "firstSeenCycle": { "type": "integer" },
+          "lastSeenCycle": { "type": "integer" },
+          "notes": { "type": "string" }
+        }
+      }
+    }
+  }
+}

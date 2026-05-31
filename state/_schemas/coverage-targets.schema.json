@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "coverage-targets.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "mode", "targets"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "mode": { "enum": ["coverage", "branch-coverage", "mutation-hardening"] },
+    "targets": {
+      "type": "array",
+      "maxItems": 5000,
+      "items": {
+        "type": "object",
+        "required": ["id", "sut", "method"],
+        "properties": {
+          "id": { "type": "string" },
+          "sut": { "type": "string" },
+          "method": { "type": "string" },
+          "missedLines": { "type": "integer" },
+          "missedBranches": { "type": "integer" },
+          "cxty": { "type": "integer" },
+          "risk": { "type": "number" },
+          "score": { "type": "number" },
+          "hasContract": { "type": "boolean" },
+          "hasFixtures": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}

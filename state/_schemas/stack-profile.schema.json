@@ -1,0 +1,156 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "stack-profile.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "java",
+    "buildTool",
+    "modules"
+  ],
+  "properties": {
+    "java": {
+      "type": "string"
+    },
+    "buildTool": {
+      "enum": [
+        "maven",
+        "gradle"
+      ]
+    },
+    "modules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "test",
+          "mock"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "test": {
+            "type": "object",
+            "required": [
+              "framework",
+              "version"
+            ],
+            "properties": {
+              "framework": {
+                "enum": [
+                  "junit4",
+                  "junit5"
+                ]
+              },
+              "version": {
+                "type": "string"
+              }
+            }
+          },
+          "mock": {
+            "type": "object",
+            "required": [
+              "framework",
+              "version"
+            ],
+            "properties": {
+              "framework": {
+                "enum": [
+                  "mockito"
+                ]
+              },
+              "version": {
+                "type": "string"
+              },
+              "features": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "assert": {
+            "type": "object",
+            "properties": {
+              "framework": {
+                "enum": [
+                  "assertj",
+                  "hamcrest",
+                  "junit-builtin"
+                ]
+              },
+              "version": {
+                "type": "string"
+              }
+            }
+          },
+          "di": {
+            "type": "object",
+            "properties": {
+              "spring": {
+                "type": "boolean"
+              },
+              "springBoot": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "slices": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "annotationProcessors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "generatedSources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "namespace": {
+            "type": "string",
+            "enum": [
+              "javax",
+              "jakarta",
+              "unknown"
+            ],
+            "description": "Base import namespace: javax.* (Spring Boot < 3) or jakarta.* (Spring Boot >= 3)"
+          },
+          "testcontainers": {
+            "type": "boolean",
+            "description": "True if org.testcontainers is in the test classpath"
+          }
+        }
+      }
+    },
+    "presets": {
+      "type": "object",
+      "properties": {
+        "imports.allowed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "imports.forbidden": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

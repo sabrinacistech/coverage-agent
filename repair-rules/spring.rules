@@ -1,0 +1,26 @@
+# spring.rules — deterministic repair (Phase 6)
+# Format: <errorPattern>  =>  <action>(<args>)
+
+# Bean wiring
+"NoSuchBeanDefinitionException: .*"                     => addMockBean(<symbol>)
+"UnsatisfiedDependencyException"                        => addMockBean(<symbol>)
+"BeanCreationException"                                 => escalateToLLM("bean-creation")
+
+# Test slices
+"WebMvcTest .* requires .*"                             => addMockBean(<symbol>)
+"DataJpaTest .* repository not found"                   => escalateToLLM("datajpa-misconfig")
+
+# Context loading
+"Failed to load ApplicationContext"                     => escalateToLLM("context-load-failure")
+"IllegalStateException: Failed to load ApplicationContext" => escalateToLLM("context-load-failure")
+
+# Profiles
+"No active profile set"                                 => addAnnotation(<testClass>, @ActiveProfiles("test"))
+
+# MockMvc
+"No qualifying bean of type 'MockMvc'"                  => addAnnotation(<testClass>, @AutoConfigureMockMvc)
+"Status expected:<200> but was:<404>"                   => escalateToLLM("route-mismatch")
+
+# Common configuration imports
+"cannot find symbol.*AutoConfigureMockMvc"              => addImport(org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc)
+"cannot find symbol.*TestConfiguration"                 => addImport(org.springframework.boot.test.context.TestConfiguration)

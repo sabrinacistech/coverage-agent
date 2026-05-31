@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "telemetry.schema.json",
+  "title": "Telemetry — repair engine + LLM accounting",
+  "description": "Running counters for the deterministic-vs-LLM split. Updated atomically by tools/python/repair_telemetry.py. rulesHitRate = repairsByRule / max(1, repairsByRule + repairsByLLM).",
+  "type": "object",
+  "required": ["schemaVersion", "repairsByRule", "repairsByLLM", "llmCallsAvoidedByTemplate", "tokensIn", "tokensOut", "rulesHitRate"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion":             { "const": 1 },
+    "repairsByRule":             { "type": "integer", "minimum": 0 },
+    "repairsByLLM":              { "type": "integer", "minimum": 0 },
+    "llmCallsAvoidedByTemplate": { "type": "integer", "minimum": 0 },
+    "tokensIn":                  { "type": "integer", "minimum": 0 },
+    "tokensOut":                 { "type": "integer", "minimum": 0 },
+    "rulesHitRate":              { "type": "number", "minimum": 0, "maximum": 1 },
+    "updatedAt":                 { "type": "string", "format": "date-time" }
+  }
+}

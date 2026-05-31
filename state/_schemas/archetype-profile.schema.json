@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "archetype-profile.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "modules"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "modules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "archetype", "implies"],
+        "properties": {
+          "path": { "type": "string" },
+          "parent": {
+            "type": "object",
+            "properties": {
+              "groupId": { "type": "string" },
+              "artifactId": { "type": "string" },
+              "version": { "type": "string" }
+            }
+          },
+          "archetype": { "enum": ["java-8", "java-21", "common", "unknown"] },
+          "implies": {
+            "type": "object",
+            "properties": {
+              "java": { "type": "string" },
+              "springBoot": { "type": "string" },
+              "namespace": { "enum": ["javax", "jakarta", "none"] },
+              "jacoco": { "enum": ["inherited", "manual", "absent"] },
+              "junit": { "enum": ["4", "5"] }
+            }
+          },
+          "changelog": { "type": ["string", "null"] },
+          "rulesApplied": { "type": "array", "items": { "type": "string" } },
+          "discrepancies": { "type": "array" }
+        }
+      }
+    }
+  }
+}

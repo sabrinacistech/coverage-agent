@@ -1,0 +1,101 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "context-pack-compact.schema.json",
+  "title": "Context Pack — Compact LLM-bound form",
+  "description": "Minified, token-optimised projection of context-pack.schema.json. Lives in state/context-packs-compact/<fqcn>.json. Planner-only fields are stripped. forbidden[] is omitted because enforcement lives in system prompt + gate_runner + patcher + linter.",
+  "type": "object",
+  "definitions": {
+    "evidenceId": {
+      "type": "string",
+      "pattern": "^(sym|ctor|builder):[A-Za-z0-9_.$#<>]+:[0-9a-f]{8}$"
+    }
+  },
+  "required": ["v", "sut", "m", "stk", "cov", "ctor", "meth", "deps", "fx", "imp", "eid"],
+  "additionalProperties": false,
+  "properties": {
+    "v": { "const": 1 },
+    "sut": { "type": "string" },
+    "m": { "enum": ["coverage", "branch-coverage", "mutation-hardening"] },
+    "blk": { "type": "boolean" },
+    "br": { "type": ["string", "null"] },
+    "stk": {
+      "type": "array",
+      "description": "Positional stack tuple: [javaVersion, testFramework, mockFramework, assertFramework, springEnabled, namespaceStyle, testVersion?, mockVersion?, springBootVersion?]",
+      "minItems": 6
+    },
+    "cov": {
+      "type": "array",
+      "description": "Coverage rows: [[targetId, method, missedLines, missedBranches, branchId|null], ...]",
+      "items": { "type": "array" }
+    },
+    "ctor": {
+      "type": "array",
+      "description": "Constructors as [evidenceIndex, [[paramType, paramName?], ...]]",
+      "items": { "type": "array" }
+    },
+    "meth": {
+      "type": "array",
+      "description": "Methods as [evidenceIndex, name, returnType, [paramTypes...]]",
+      "items": { "type": "array" }
+    },
+    "deps": {
+      "type": "array",
+      "description": "Dependencies as [name, fqcn, injection, instantiationStrategy]",
+      "items": { "type": "array" }
+    },
+    "fx": {
+      "type": "array",
+      "description": "Fixtures as [id, fqcn, strategy]",
+      "items": { "type": "array" }
+    },
+    "imp": {
+      "description": "Allowed imports. Either a prefix-compressed object or a flat array (when <3 prefix hits).",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["prefixes", "leaves"],
+          "additionalProperties": false,
+          "properties": {
+            "prefixes": { "type": "array", "items": { "type": "string" } },
+            "leaves": {
+              "type": "object",
+              "additionalProperties": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        { "type": "array", "items": { "type": "string" } }
+      ]
+    },
+    "cls": {
+      "type": "array",
+      "description": "[bucket, subtype?] — bucket is a reduced classification bucket derived locally.",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": { "type": "string" }
+    },
+    "spr": {
+      "type": "array",
+      "description": "Optional Spring strategy tuple [slice, [mockBeans...]]"
+    },
+    "eid": {
+      "type": "array",
+      "description": "Evidence id pool referenced by ctor[*][0] and meth[*][0].",
+      "items": { "$ref": "#/definitions/evidenceId" }
+    },
+    "tr": {
+      "type": "array",
+      "description": "Truncated field names (e.g. [\"imp\"]) when budget enforcement clipped the pack.",
+      "items": { "type": "string" }
+    },
+    "fm": {
+      "type": "array",
+      "description": "P3.d: failure-memory projection. Each row is the positional tuple [hash, errorCode, symbolFQN, fixId, attempts, lastResult, lastSeenCycle?].",
+      "maxItems": 4,
+      "items": {
+        "type": "array",
+        "minItems": 6,
+        "maxItems": 7
+      }
+    }
+  }
+}

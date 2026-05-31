@@ -1,0 +1,27 @@
+# mockito.rules — deterministic repair (Phase 6)
+# Format: <errorPattern>  =>  <action>(<args>)
+
+# Strict stubbing
+"PotentialStubbingProblem"                              => wrapWith(lenient)
+"UnnecessaryStubbingException"                          => removeStub(<symbol>)
+"MissingMethodInvocationException"                      => escalateToLLM("missing-invocation")
+
+# Mock vs real type confusion
+"cannot mock .* final class"                            => useMockMaker(mock-maker-inline)
+"Cannot instantiate @InjectMocks field"                 => escalateToLLM("inject-mocks-ambiguous")
+
+# Argument matchers
+"InvalidUseOfMatchersException"                         => normalizeMatchers()
+"Misplaced or misused argument matcher"                 => normalizeMatchers()
+
+# Spies
+"NotAMockException"                                     => escalateToLLM("spy-target-not-mock")
+
+# Verification
+"TooFewActualInvocations"                               => escalateToLLM("verify-count-mismatch")
+"TooManyActualInvocations"                              => escalateToLLM("verify-count-mismatch")
+"NoInteractionsWanted"                                  => escalateToLLM("verify-no-interactions")
+
+# Common stub-shape mistakes
+"when\\(.*\\)\\.thenReturn\\(.*\\) on void"             => replaceCall(when(..).thenReturn(..), doNothing().when(..))
+"thenThrow.* on void method"                            => replaceCall(when(..).thenThrow(..), doThrow(..).when(..))

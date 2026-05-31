@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "coverage-delta.schema.json",
+  "type": "object",
+  "required": ["schemaVersion", "cycle", "mode", "totals", "perClass"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "cycle": { "type": "integer" },
+    "mode": { "type": "string" },
+    "totals": {
+      "type": "object",
+      "properties": {
+        "lines": { "type": "object", "required": ["before","after","delta"] },
+        "branches": { "type": "object", "required": ["before","after","delta"] },
+        "instructions": { "type": "object" },
+        "methods": { "type": "object" }
+      }
+    },
+    "perClass": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["fqcn"],
+        "properties": {
+          "fqcn": { "type": "string" },
+          "lines": { "type": "object" },
+          "branches": { "type": "object" },
+          "attributedTests": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "regressions": { "type": "array" }
+  }
+}

@@ -1,0 +1,29 @@
+# Python bytecode cache — regenerable, no debe versionarse
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Estado generado por el pipeline ahora vive FUERA del repo (en ../.agent-state/),
+# así que normalmente no hay nada que ignorar acá. Mantenemos las reglas siguientes
+# por si alguien corre el pipeline con --out state/ (override manual) o ejecuta
+# un script legacy: nunca queremos commitear outputs.
+state/*.json
+state/_patches/
+state/_summaries/*.json
+state/_summaries/*.log
+state/context-packs/
+state/context-packs-compact/
+state/symbol-contracts/
+state/symbol-contracts.json
+state/generated-code-index/
+state/generated-code-index.json
+state/import-whitelist/
+state/import-whitelist.json
+state/index/*.json
+state/_cache/
+
+# Entornos virtuales locales
+.venv/
+venv/
+env/

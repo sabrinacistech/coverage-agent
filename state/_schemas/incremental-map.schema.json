@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "incremental-map.schema.json",
+  "type": "object",
+  "required": ["version", "since", "changedFiles", "affectedClasses", "affectedTests"],
+  "properties": {
+    "$schemaRef": { "type": "string" },
+    "version": { "const": 1 },
+    "generatedAt": { "type": ["string", "null"] },
+    "since": {
+      "type": "object",
+      "required": ["git"],
+      "properties": {
+        "git": { "type": ["string", "null"] },
+        "head": { "type": ["string", "null"] },
+        "fingerprint": { "type": ["string", "null"] }
+      }
+    },
+    "changedFiles": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "affectedClasses": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "affectedTests": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "affectedModules": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "coverageDeltaScope": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "_meta": {
+      "type": "object",
+      "properties": {
+        "totalChangedFiles": { "type": "integer" },
+        "seedFqcns": { "type": "array", "items": { "type": "string" } },
+        "reverseDepth": { "type": "integer" },
+        "depIndexSource": { "type": "string" }
+      }
+    }
+  }
+}

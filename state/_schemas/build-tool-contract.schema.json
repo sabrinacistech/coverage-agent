@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "build-tool-contract.schema.json",
+  "type": "object",
+  "required": ["schemaVersion", "tool", "modules", "java", "jacoco"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "tool": { "enum": ["maven", "gradle"] },
+    "rootPom": { "type": "string" },
+    "wrapper": { "type": "string" },
+    "modules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "path"],
+        "properties": {
+          "name": { "type": "string" },
+          "path": { "type": "string" },
+          "packaging": { "enum": ["jar", "war", "pom", "ear"] }
+        }
+      }
+    },
+    "java": { "type": "string" },
+    "jacoco": {
+      "type": "object",
+      "required": ["configured"],
+      "properties": {
+        "configured": { "type": "boolean" },
+        "reportXml": { "type": "string" },
+        "execFile": { "type": "string" },
+        "excludes": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  },
+  "additionalProperties": false
+}

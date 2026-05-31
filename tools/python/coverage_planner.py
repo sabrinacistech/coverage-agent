@@ -1,0 +1,379 @@
+"""coverage_planner.py — deterministic test-batch prioritisation.
+
+Reads (produced by prior pipeline steps):
+  - state/coverage-targets.json    — per-method coverage gaps (missedLines, missedBranches)
+  - state/classification-index.json — SUT type → testabilityRisk + recommendedTemplate
+  - state/dependency-graph.json    — fixture IDs available per SUT
+  - state/failure-memory.json      — previous fix attempts per symbol (penalty)
+  - state/incremental-map.json     — git-diff affected classes (boost)
+
+Scoring formula (per coverage target / method)
+----------------------------------------------
+
+  score = (missedLines   * W_LINES)
+        + (missedBranches * W_BRANCHES)
+        + (missedMethod   * W_METHOD)   # 1 if any miss exists, 0 if fully covered
+        - riskPenalty                   # high=30, medium=10, low=0
+        - failurePenalty                # sum(attempts * 5) for FAILED entries in memory
+        + incrementalBoost              # +20 if SUT is in incremental affectedClasses
+
+  Constants: W_LINES=3, W_BRANCHES=5, W_METHOD=2  (per spec)
+
+  Targets with score <= 0 (fully covered, high-penalty failures, zero miss) are excluded.
+
+Batch plan output
+-----------------
+  Items are sorted descending by score, capped at `--batch-size` (default 10).
+  Each item carries:
+    - targetId, sut, method         — from coverage-targets
+    - score                          — computed above (informational)
+    - template                       — recommendedTemplate from classification-index
+    - fixtureIds                     — fixture IDs from fixture-catalog that match the SUT
+    - branchId / mutationId          — set only in branch-coverage / mutation-hardening modes
+
+  The cycle counter is read from the existing batch-plan.json and incremented by 1
+  (or starts at 1 on first run).
+
+CLI:
+    python tools/python/coverage_planner.py --out state
+    python tools/python/coverage_planner.py --out state --batch-size 5 --mode branch-coverage
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+from common import SCHEMAS_DIR, atomic_write_json, load_json, validate
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scoring constants
+# ─────────────────────────────────────────────────────────────────────────────
+
+W_LINES    = 3
+W_BRANCHES = 5
+W_METHOD   = 2
+
+_RISK_PENALTY: dict[str, int] = {
+    "high":   30,
+    "medium": 10,
+    "low":    0,
+}
+
+_INCREMENTAL_BOOST = 20
+_FAILURE_PENALTY_PER_ATTEMPT = 5
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _safe_load(path: Path, default=None):
+    if not path.exists():
+        return default
+    try:
+        return load_json(path)
+    except Exception as exc:
+        print(f"[WARN] cannot load {path}: {exc}", file=sys.stderr)
+        return default
+
+
+def _build_failure_penalties(failure_memory: dict) -> dict[str, int]:
+    """Return {symbolFQN_prefix: total_penalty} for FAILED entries."""
+    penalties: dict[str, int] = {}
+    for entry in failure_memory.get("entries", []):
+        if entry.get("lastResult") != "FAILED":
+            continue
+        symbol = entry.get("symbolFQN", "")
+        # symbolFQN may be "com.acme.FooService#methodName" — use the class part
+        fqcn = symbol.split("#")[0] if "#" in symbol else symbol
+        attempts = int(entry.get("attempts", 0))
+        penalties[fqcn] = penalties.get(fqcn, 0) + attempts * _FAILURE_PENALTY_PER_ATTEMPT
+    return penalties
+
+
+def _build_incremental_set(incremental_map: dict) -> frozenset[str]:
+    """Return the set of FQCNs that are in the incremental affectedClasses list."""
+    return frozenset(incremental_map.get("affectedClasses", []))
+
+
+def _build_risk_map(classification_index: dict) -> dict[str, tuple[str, str | None]]:
+    """Return {fqcn: (testabilityRisk, recommendedTemplate)}."""
+    result: dict[str, tuple[str, str | None]] = {}
+    for cls in classification_index.get("classes", []):
+        fqcn = cls.get("fqcn", "")
+        risk = cls.get("testabilityRisk", "medium")
+        template = cls.get("recommendedTemplate")
+        result[fqcn] = (risk, template)
+    return result
+
+
+def _build_fixture_ids_map(fixture_catalog: dict) -> dict[str, list[str]]:
+    """Return {fqcn: [fixture_id, ...]} grouping fixtures by their type FQCN."""
+    result: dict[str, list[str]] = {}
+    for f in fixture_catalog.get("fixtures", []):
+        ftype = f.get("type", f.get("id", ""))
+        fid   = f.get("id", "")
+        if ftype:
+            result.setdefault(ftype, []).append(fid)
+    return result
+
+
+def _compute_score(
+    target: dict,
+    risk: str,
+    failure_penalty: int,
+    incremental_boost: int,
+) -> int:
+    missed_lines    = int(target.get("missedLines",    0) or 0)
+    missed_branches = int(target.get("missedBranches", 0) or 0)
+    missed_method   = 1 if (missed_lines > 0 or missed_branches > 0) else 0
+
+    raw = (
+        missed_lines    * W_LINES
+        + missed_branches * W_BRANCHES
+        + missed_method   * W_METHOD
+    )
+    return raw - _RISK_PENALTY.get(risk, 10) - failure_penalty + incremental_boost
+
+
+def _next_cycle(existing_plan: dict) -> int:
+    return int(existing_plan.get("cycle", 0)) + 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Planner
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plan(
+    state_dir: Path,
+    batch_size: int = 10,
+    mode: str = "coverage",
+    sut_filter: list[str] | None = None,
+    incremental_only: bool = False,
+) -> dict:
+    """Compute and return the batch-plan dict.
+
+    When ``sut_filter`` is supplied, only targets whose ``sut`` field matches
+    one of the listed FQCNs are scored — keeps batch-plan.json scoped to the
+    user-requested subset when --sut is propagated from run_pipeline.
+    """
+
+    cov_targets     = _safe_load(state_dir / "coverage-targets.json",     {"targets": []})
+    classification  = _safe_load(state_dir / "classification-index.json", {"classes": []})
+    dep_graph       = _safe_load(state_dir / "dependency-graph.json",     {"graphs":  []})
+    failure_memory  = _safe_load(state_dir / "failure-memory.json",       {"entries": []})
+    incremental_map = _safe_load(state_dir / "incremental-map.json",      {"affectedClasses": []})
+    fixture_catalog = _safe_load(state_dir / "fixture-catalog.json",      {"fixtures": []})
+    existing_plan   = _safe_load(state_dir / "batch-plan.json",           {"cycle":    0})
+
+    penalties     = _build_failure_penalties(failure_memory)
+    incremental   = _build_incremental_set(incremental_map)
+    risk_map      = _build_risk_map(classification)
+    fixture_ids   = _build_fixture_ids_map(fixture_catalog)
+
+    targets: list[dict] = cov_targets.get("targets", [])
+    if sut_filter:
+        allow = set(sut_filter)
+        before = len(targets)
+        targets = [t for t in targets if t.get("sut") in allow]
+        print(f"[INFO] --sut filter active: {len(targets)}/{before} targets retained for {sorted(allow)}")
+    # Post-audit 2026-05-28: when --since was passed and --incremental-only is
+    # set, narrow the batch to SUTs flagged as affected by the git diff. The
+    # boost-only policy was leaking unaffected SUTs into the LLM context.
+    if incremental_only and incremental:
+        before = len(targets)
+        targets = [t for t in targets if t.get("sut") in incremental]
+        print(
+            f"[INFO] --incremental-only filter active: "
+            f"{len(targets)}/{before} targets retained "
+            f"({len(incremental)} affected SUTs from incremental-map.json)"
+        )
+    if not targets:
+        print("[INFO] no coverage targets; batch-plan will be empty")
+
+    # ── Score every target ────────────────────────────────────────────────────
+    scored: list[tuple[int, dict]] = []
+    for tgt in targets:
+        sut    = tgt.get("sut", "")
+        risk, template = risk_map.get(sut, ("medium", None))
+        penalty = penalties.get(sut, 0)
+        boost   = _INCREMENTAL_BOOST if sut in incremental else 0
+        score   = _compute_score(tgt, risk, penalty, boost)
+
+        # Skip targets with no missed coverage (already fully covered)
+        if score <= 0 and int(tgt.get("missedLines", 0) or 0) == 0 and int(tgt.get("missedBranches", 0) or 0) == 0:
+            continue
+
+        scored.append((score, tgt, template, sut))
+
+    # Sort descending by score, then alphabetically for determinism
+    scored.sort(key=lambda x: (-x[0], x[3]))
+
+    # ── Build batch items ─────────────────────────────────────────────────────
+    items: list[dict] = []
+    for score, tgt, template, sut in scored[:batch_size]:
+        target_id = tgt.get("id", "")
+        method    = tgt.get("method", "")
+
+        # Fixture IDs: prioritise fixtures for the SUT itself, then its dependencies
+        fids: list[str] = list(fixture_ids.get(sut, []))
+
+        item: dict = {
+            "targetId":   target_id,
+            "sut":        sut,
+            "method":     method,
+            "score":      score,
+            "template":   template,
+            "fixtureIds": fids,
+        }
+
+        # Mode-specific fields
+        if mode == "branch-coverage" and tgt.get("missedBranches", 0):
+            item["branchId"] = f"{target_id}:branch"
+        elif mode == "mutation-hardening":
+            item["mutationId"] = f"{target_id}:mutation"
+
+        items.append(item)
+
+    cycle = _next_cycle(existing_plan)
+    size  = len(items)
+
+    return {
+        "schemaVersion": 1,
+        "cycle":         cycle,
+        "mode":          mode,
+        "sizeChosen":    size,
+        "generatedAt":   datetime.now(timezone.utc).isoformat(),
+        "reason":        (
+            f"Top {size} targets ranked by "
+            f"missedLines×{W_LINES} + missedBranches×{W_BRANCHES} + missedMethod×{W_METHOD} "
+            f"- riskPenalty - failurePenalty + incrementalBoost({_INCREMENTAL_BOOST})"
+            if size > 0
+            else "no uncovered targets found"
+        ),
+        "items": items,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Schema update — add optional `score` and `template` to batch-plan items
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _update_schema(schema_path: Path) -> None:
+    if not schema_path.exists():
+        return
+    try:
+        schema = load_json(schema_path)
+    except Exception as exc:
+        print(f"[WARN] cannot load schema for update: {exc}", file=sys.stderr)
+        return
+
+    item_props: dict = (
+        schema.get("properties", {})
+        .get("items", {})
+        .get("items", {})
+        .get("properties", {})
+    )
+    changed = False
+
+    for field, defn in [
+        ("score",      {"type": "integer", "description": "Computed coverage priority score"}),
+        ("template",   {"type": ["string", "null"], "description": "Recommended test template path"}),
+        ("generatedAt",{"type": "string"}),
+    ]:
+        if field not in item_props:
+            item_props[field] = defn
+            changed = True
+
+    # Also add generatedAt at top-level
+    top_props: dict = schema.get("properties", {})
+    if "generatedAt" not in top_props:
+        top_props["generatedAt"] = {"type": "string"}
+        changed = True
+
+    if changed:
+        atomic_write_json(schema_path, schema)
+        print(f"[INFO] updated schema: {schema_path.name}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=(
+            "Compute a prioritised test-batch plan from coverage gaps.\n\n"
+            "Scoring formula per target:\n"
+            f"  score = (missedLines × {W_LINES})\n"
+            f"        + (missedBranches × {W_BRANCHES})\n"
+            f"        + (missedMethod × {W_METHOD})   # 1 if any miss, 0 if covered\n"
+            "        - riskPenalty   (high=30, medium=10, low=0)\n"
+            f"        - failurePenalty  (FAILED attempts × {_FAILURE_PENALTY_PER_ATTEMPT})\n"
+            f"        + incrementalBoost (affectedClasses: +{_INCREMENTAL_BOOST})\n\n"
+            "Writes state/batch-plan.json."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument("--out", required=True, help="State directory (e.g. state/)")
+    ap.add_argument(
+        "--batch-size",
+        type=int,
+        default=10,
+        help="Maximum number of targets in the batch (default: 10)",
+    )
+    ap.add_argument(
+        "--mode",
+        default="coverage",
+        choices=["coverage", "branch-coverage", "mutation-hardening"],
+        help="Coverage mode (default: coverage)",
+    )
+    ap.add_argument(
+        "--sut",
+        action="append",
+        default=None,
+        metavar="FQCN",
+        help=(
+            "P3.a: restrict planning to one or more SUT FQCNs. Repeat for "
+            "multiple. Targets whose `sut` field is not in this list are "
+            "dropped before scoring."
+        ),
+    )
+    ap.add_argument(
+        "--incremental-only",
+        action="store_true",
+        help=(
+            "Post-audit 2026-05-28: when state/incremental-map.json is "
+            "non-empty, restrict the batch-plan to SUTs in affectedClasses "
+            "(instead of merely boosting them). Use this when run_pipeline "
+            "was invoked with --since to keep the LLM context narrow."
+        ),
+    )
+    args = ap.parse_args()
+
+    state_dir = Path(args.out).resolve()
+
+    _update_schema(SCHEMAS_DIR / "batch-plan.schema.json")
+
+    result = plan(
+        state_dir,
+        batch_size=args.batch_size,
+        mode=args.mode,
+        sut_filter=args.sut,
+        incremental_only=args.incremental_only,
+    )
+    validate("batch-plan", result)
+    atomic_write_json(state_dir / "batch-plan.json", result)
+
+    n = result["sizeChosen"]
+    cycle = result["cycle"]
+    scores = [it.get("score", 0) for it in result["items"]]
+    score_range = f"scores=[{min(scores)}..{max(scores)}]" if scores else "scores=[]"
+    print(f"[OK] state/batch-plan.json  cycle={cycle}  items={n}  {score_range}  mode={args.mode}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

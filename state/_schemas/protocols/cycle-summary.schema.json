@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "cycle-summary.schema.json",
+  "title": "Cycle summary — minimal compact form",
+  "description": "Per-cycle record consumed by the Orchestrator for context-budget control. Replaces raw cycle state in subsequent prompts.",
+  "type": "object",
+  "required": ["schemaVersion", "cycle", "mode", "generated", "discarded", "coverageDelta", "gatesEvaluated", "durationMs"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "cycle":         { "type": "integer", "minimum": 1 },
+    "mode":          { "enum": ["coverage", "branch-coverage", "mutation-hardening"] },
+    "generated": {
+      "type": "array",
+      "description": "List of generated tests (patchId or fqcn). Empty if none.",
+      "items": { "type": "string" }
+    },
+    "discarded": {
+      "type": "array",
+      "description": "Discard records [{patchId, reason}]. Reason MUST match gate-failure.schema.json#/properties/reason.",
+      "items": {
+        "type": "object",
+        "required": ["patchId", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "patchId": { "type": "string" },
+          "reason":  { "type": "string" }
+        }
+      }
+    },
+    "coverageDelta": {
+      "type": "object",
+      "required": ["lines", "branches"],
+      "additionalProperties": false,
+      "properties": {
+        "lines":        { "type": "integer", "minimum": 0 },
+        "branches":     { "type": "integer", "minimum": 0 },
+        "instructions": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "gatesEvaluated": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^G[0-9]+$" }
+    },
+    "durationMs": { "type": "integer", "minimum": 0 },
+    "ts":         { "type": "string", "format": "date-time" }
+  }
+}

@@ -1,0 +1,17 @@
+# string-literals.rules — deterministic repair for string literal errors (Phase 6)
+# Format: <errorPattern>  =>  <action>(<args>)
+#
+# Root cause: test_patch_applier.py::sanitize_java_body may expand \n/\r/\t escape
+# sequences that appear inside Java string literals, turning valid Java escape
+# sequences into real control characters and producing unclosed string literals.
+# Fixed in sanitize_java_body (state-machine pass), but repair rules handle any
+# residual cases surfaced during validation.
+
+# Unclosed string literal — escape sequences written as real control chars
+"unclosed string literal"                                => regeneratePatchBody("string-literal-escape")
+
+# Illegal escape character inside string literal (e.g. \p, \q not valid in Java)
+"illegal escape character"                               => regeneratePatchBody("illegal-escape")
+
+# String constant too long (over 65535 bytes in constant pool)
+"constant string too long"                               => escalateToLLM("string-too-long")

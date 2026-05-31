@@ -1,0 +1,320 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "context-pack.schema.json",
+  "title": "LLM Context Pack — minimal per-SUT bundle consumed by LLM agents",
+  "description": "The ONLY JSON artifact an LLM agent may read. No source code, POM, or JaCoCo XML allowed.",
+  "type": "object",
+  "definitions": {
+    "evidenceId": {
+      "type": "string",
+      "pattern": "^(sym|ctor|builder):[A-Za-z0-9_.$#<>]+:[0-9a-f]{8}$"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "sut",
+    "mode",
+    "stack",
+    "coverage",
+    "constructors",
+    "methods",
+    "dependencies",
+    "fixtures",
+    "allowedImports",
+    "forbidden"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "sut": {
+      "description": "FQCN of the system under test. Accepts a string OR an object {fqcn: string} for back-compat with agents that emit a structured form.",
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        {
+          "type": "object",
+          "required": ["fqcn"],
+          "additionalProperties": true,
+          "properties": {
+            "fqcn": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    },
+    "mode": {
+      "enum": ["coverage", "branch-coverage", "mutation-hardening"]
+    },
+    "blocked": {
+      "type": "boolean",
+      "description": "True when this context-pack is blocked due to a fallen profile; agent must not generate tests"
+    },
+    "blockReason": {
+      "type": ["string", "null"],
+      "description": "Human-readable reason why this context-pack is blocked; null when not blocked"
+    },
+    "classification": {
+      "type": "object",
+      "description": "Classification metadata from classification-index.json",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "controller",
+            "service",
+            "repository",
+            "component",
+            "configuration",
+            "mapper",
+            "non-instantiable",
+            "data-carrier",
+            "enum",
+            "generated/excluded",
+            "util",
+            "config",
+            "dto",
+            "generated",
+            "entity",
+            "exception"
+          ]
+        },
+        "testabilityRisk": { "enum": ["low", "medium", "high"] },
+        "coverageValue":   { "enum": ["low", "medium", "high"] },
+        "recommendedTemplate": { "type": ["string", "null"] },
+        "reasons": { "type": "array", "items": { "type": "string" } },
+        "tags":    { "type": "array", "items": { "type": "string" } },
+        "loc":          { "type": "integer" },
+        "publicMethods": { "type": "integer" },
+        "cyclomatic":   { "type": "integer" },
+        "coverage":     { "type": "object" },
+        "risk":  { "type": "number" },
+        "score": { "type": "number" }
+      }
+    },
+    "stack": {
+      "type": "object",
+      "description": "Minimal stack metadata needed to write syntactically correct tests",
+      "required": ["javaVersion", "testFramework", "mockFramework"],
+      "additionalProperties": false,
+      "properties": {
+        "javaVersion":    { "type": "string" },
+        "testFramework":  { "enum": ["junit4", "junit5", "unknown"] },
+        "testVersion":    { "type": "string" },
+        "mockFramework":  { "enum": ["mockito", "none", "unknown"] },
+        "mockVersion":    { "type": "string" },
+        "assertFramework": { "enum": ["assertj", "hamcrest", "junit-builtin", "none", "unknown"] },
+        "springEnabled":     { "type": "boolean" },
+        "springBootVersion": { "type": ["string", "null"] },
+        "springSlices":      { "type": "array", "items": { "type": "string" } },
+        "namespaceStyle": { "enum": ["javax", "jakarta", "none", "unknown"] },
+        "annotationProcessors": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "description": "Exact missed-line and missed-branch data for this SUT",
+      "required": ["totalMissedLines", "totalMissedBranches", "targets"],
+      "additionalProperties": false,
+      "properties": {
+        "totalMissedLines":    { "type": "integer", "minimum": 0 },
+        "totalMissedBranches": { "type": "integer", "minimum": 0 },
+        "targets": {
+          "type": "array",
+          "maxItems": 40,
+          "items": {
+            "type": "object",
+            "required": ["targetId", "method", "missedLines", "missedBranches"],
+            "additionalProperties": false,
+            "properties": {
+              "targetId":      { "type": "string" },
+              "method":        { "type": "string" },
+              "missedLines":   { "type": "integer", "minimum": 0 },
+              "missedBranches":{ "type": "integer", "minimum": 0 },
+              "branchId":      { "type": ["string", "null"] },
+              "score":         { "type": "number" }
+            }
+          }
+        }
+      }
+    },
+    "constructors": {
+      "type": "array",
+      "maxItems": 16,
+      "description": "Evidenced constructor signatures — never invent beyond this list",
+      "items": {
+        "type": "object",
+        "required": ["evidenceId", "visibility", "params"],
+        "additionalProperties": false,
+        "properties": {
+          "evidenceId": { "$ref": "#/definitions/evidenceId" },
+          "visibility": { "enum": ["public", "protected", "package", "private"] },
+          "params": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["type"],
+              "additionalProperties": false,
+              "properties": {
+                "type": { "type": "string" },
+                "name": { "type": "string" }
+              }
+            }
+          },
+          "throws": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "methods": {
+      "type": "array",
+      "maxItems": 80,
+      "description": "Public/protected usable methods of the SUT — never call unlisted methods",
+      "items": {
+        "type": "object",
+        "required": ["evidenceId", "name", "returnType", "params", "usable"],
+        "additionalProperties": false,
+        "properties": {
+          "evidenceId": { "$ref": "#/definitions/evidenceId" },
+          "name":       { "type": "string" },
+          "returnType": { "type": "string" },
+          "params": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["type"],
+              "additionalProperties": false,
+              "properties": {
+                "type": { "type": "string" },
+                "name": { "type": "string" }
+              }
+            }
+          },
+          "throws": { "type": "array", "items": { "type": "string" } },
+          "usable":   { "type": "boolean" }
+        }
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "maxItems": 24,
+      "description": "Constructor/field/setter dependencies with their injection strategy",
+      "items": {
+        "type": "object",
+        "required": ["name", "type", "injection"],
+        "additionalProperties": false,
+        "properties": {
+          "name":      { "type": "string" },
+          "type":      { "type": "string" },
+          "injection": { "enum": ["constructor", "field", "setter"] },
+          "final":     { "type": "boolean" },
+          "instantiationStrategy": {
+            "enum": ["constructor", "builder", "factory", "mock", "concrete", "anonymous", "none"]
+          }
+        }
+      }
+    },
+    "collaboratorUsage": {
+      "type": "array",
+      "maxItems": 24,
+      "description": "Exact methods called on each collaborator — use only these for mock setup",
+      "items": {
+        "type": "object",
+        "required": ["field", "type", "methods"],
+        "additionalProperties": false,
+        "properties": {
+          "field": { "type": "string" },
+          "type":  { "type": "string" },
+          "methods": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["evidenceId", "name", "params", "returnType"],
+              "additionalProperties": false,
+              "properties": {
+                "evidenceId": { "$ref": "#/definitions/evidenceId" },
+                "name":       { "type": "string" },
+                "params":     { "type": "array", "items": { "type": "string" } },
+                "returnType": { "type": "string" },
+                "throws":     { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          }
+        }
+      }
+    },
+    "springStrategy": {
+      "type": "object",
+      "description": "Spring slice and mock-bean strategy (only when springEnabled=true)",
+      "additionalProperties": false,
+      "properties": {
+        "slice":     { "enum": ["WebMvcTest", "DataJpaTest", "none"] },
+        "mockBeans": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "fixtures": {
+      "type": "array",
+      "maxItems": 60,
+      "description": "Evidenced fixture entries for dependencies and test data",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "strategy"],
+        "additionalProperties": false,
+        "properties": {
+          "id":       { "type": "string" },
+          "type":     { "type": "string" },
+          "strategy": { "enum": ["builder", "constructor", "factory", "mock"] },
+          "builderEvidence":     { "type": ["string", "null"] },
+          "constructorEvidence": { "type": ["string", "null"] },
+          "factoryEvidence":     { "type": ["string", "null"] },
+          "values":   { "type": "object" },
+          "variants": { "type": "array", "items": { "type": "string" } },
+          "cycleSafe": { "type": "boolean" }
+        }
+      }
+    },
+    "allowedImports": {
+      "type": "array",
+      "maxItems": 200,
+      "description": "Exhaustive whitelist of FQCNs the agent may use in import statements",
+      "items": { "type": "string" }
+    },
+    "forbidden": {
+      "type": "array",
+      "description": "Explicit list of prohibited actions — any agent output violating these is invalid",
+      "items": {
+        "type": "string",
+        "enum": [
+          "READ_SOURCE_CODE",
+          "READ_POM",
+          "READ_JACOCO_XML",
+          "READ_CLASSPATH",
+          "READ_BYTECODE",
+          "INVENT_SYMBOL",
+          "INVENT_IMPORT",
+          "RETURN_RAW_JAVA",
+          "CALL_UNLISTED_METHOD",
+          "INSTANTIATE_UNLISTED_TYPE"
+        ]
+      },
+      "minItems": 5
+    },
+    "failureMemory": {
+      "type": "array",
+      "description": "P3.d: top-N most recent FAILED entries from state/failure-memory.json scoped to this SUT (N=2). Carried so the repair-agent honours G7 without re-reading the full memory file.",
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "required": ["hash", "errorCode", "symbolFQN", "fixId", "lastResult"],
+        "additionalProperties": false,
+        "properties": {
+          "hash":           { "type": "string" },
+          "errorCode":      { "type": "string" },
+          "symbolFQN":      { "type": "string" },
+          "fixId":          { "type": "string" },
+          "attempts":       { "type": "integer" },
+          "lastResult":     { "enum": ["FAILED", "SUCCESS"] },
+          "firstSeenCycle": { "type": "integer" },
+          "lastSeenCycle":  { "type": "integer" },
+          "testCaseId":     { "type": "string" }
+        }
+      }
+    }
+  }
+}

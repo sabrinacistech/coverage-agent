@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "import-whitelist.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "module", "packages", "classes"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "_meta": { "type": "object", "description": "Provenance/metadata emitted by classpath_resolver.py (resolver version, timestamps)." },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "module": { "type": "string" },
+    "packages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "origin"],
+        "properties": {
+          "name": { "type": "string" },
+          "origin": { "enum": ["jdk", "dep", "source", "generated"] }
+        }
+      }
+    },
+    "classes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["fqcn", "origin"],
+        "properties": {
+          "fqcn": { "type": "string" },
+          "origin": { "enum": ["jdk", "dep", "source", "generated"] },
+          "jar": { "type": "string" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "gate-failure.schema.json",
+  "title": "Gate failure — canonical reason codes",
+  "description": "Single record emitted by gate_runner.py / pipeline orchestrators when a gate fails or blocks. Reason enum is closed: only the codes below are honoured downstream.",
+  "type": "object",
+  "required": ["schemaVersion", "gate", "status", "reason"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "gate": {
+      "type": "string",
+      "description": "Gate id (e.g. G1, G2, G5, G6, PRE).",
+      "pattern": "^(G[0-9]+|PRE|POST|STAGE)$"
+    },
+    "status": {
+      "enum": ["FAIL", "BLOCKED"]
+    },
+    "reason": {
+      "enum": [
+        "G1_IMPORT_NOT_WHITELISTED",
+        "G2_METHOD_NOT_IN_CONTRACT",
+        "G5_STACK_UNKNOWN",
+        "G6_LINTER_FAIL",
+        "BLOCKED_PRE_STAGE_MISSING",
+        "FORBIDDEN_JAVA_STRUCTURE_IN_BODY"
+      ]
+    },
+    "sut":      { "type": "string" },
+    "patchId":  { "type": "string" },
+    "evidence": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Symbol-contract evidence-id values that justify the failure."
+    },
+    "offenders": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Concrete offending tokens (imports, method names, structures) detected."
+    },
+    "message":  { "type": "string" },
+    "ts":       { "type": "string", "format": "date-time" }
+  }
+}

@@ -1,0 +1,86 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "patch-descriptor.schema.json",
+  "description": "Patch descriptor canónico producido por test-body-agent y repair-agent. Materializado por tools/python/test_patch_applier.py. Ver docs/agent-json-protocol.md.",
+  "oneOf": [
+    { "$ref": "#/definitions/patch" },
+    { "$ref": "#/definitions/blocked" }
+  ],
+  "definitions": {
+    "evidenceId": {
+      "type": "string",
+      "pattern": "^(sym|ctor|builder):[A-Za-z0-9_.$#<>]+:[0-9a-f]{8}$"
+    },
+    "blocked": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "status", "blockReason"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "status":        { "const": "BLOCKED" },
+        "blockReason":   { "type": "string", "minLength": 1 }
+      }
+    },
+    "patch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "patchId", "sut", "testClass"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "patchId":       { "type": "string", "pattern": "^(patch|repair):[0-9a-fA-F]{6,}$" },
+        "cycle":         { "type": "integer", "minimum": 1 },
+        "sut":           { "type": "string", "minLength": 1 },
+        "testClass":     { "type": "string", "minLength": 1 },
+        "testPackage":   { "type": "string" },
+        "template":      { "type": "string" },
+        "targetModule":  { "type": ["string", "null"] },
+        "targetDir":     { "type": "string" },
+        "repairOf":      { "type": "string", "pattern": "^(patch|repair):[0-9a-fA-F]{6,}$" },
+        "errorCode":     { "type": "string" },
+        "allowedImports": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "fields": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/field" }
+        },
+        "methods": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/method" }
+        }
+      }
+    },
+    "field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type"],
+      "properties": {
+        "name":       { "type": "string", "minLength": 1 },
+        "type":       { "type": "string", "minLength": 1 },
+        "annotation": {
+          "type": ["string", "null"],
+          "enum": ["@Mock", "@Spy", "@Captor", "@InjectMocks", "@MockBean", "@Autowired", null]
+        }
+      }
+    },
+    "method": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "body", "evidenceIds"],
+      "properties": {
+        "name":         { "type": "string", "minLength": 1 },
+        "annotations":  {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "body":         { "type": "string" },
+        "evidenceIds":  {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/evidenceId" }
+        }
+      }
+    }
+  }
+}

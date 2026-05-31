@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "compile-error-index.schema.json",
+  "type": "object",
+  "required": ["schemaVersion", "runId", "errors"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "runId": { "type": "string" },
+    "format": { "type": "string" },
+    "truncated": {
+      "type": "object",
+      "required": ["total", "kept"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "kept":  { "type": "integer", "minimum": 0 }
+      }
+    },
+    "errors": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "required": ["id", "code", "file", "line", "message"],
+        "properties": {
+          "id": { "type": "string" },
+          "code": {
+            "enum": [
+              "E_IMPORT_UNRESOLVED",
+              "E_PACKAGE_UNRESOLVED",
+              "E_METHOD_UNRESOLVED",
+              "E_CONSTRUCTOR_UNRESOLVED",
+              "E_INTERFACE_INSTANTIATION",
+              "E_TYPE_MISMATCH",
+              "E_GENERIC_INFERENCE",
+              "E_VARARGS",
+              "E_OVERRIDE",
+              "E_ACCESS",
+              "E_OTHER"
+            ]
+          },
+          "file": { "type": "string" },
+          "line": { "type": "integer" },
+          "col": { "type": "integer" },
+          "message": { "type": "string" },
+          "symbolFQN": { "type": "string" },
+          "raw": { "type": "string" }
+        }
+      }
+    }
+  }
+}

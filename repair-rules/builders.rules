@@ -1,0 +1,28 @@
+# builders.rules — deterministic repair (Phase 6)
+# Covers FreeBuilder, Lombok @Builder, and ad-hoc generated builders.
+# Format: <errorPattern>  =>  <action>(<args>)
+
+# FreeBuilder: cannot instantiate abstract type
+"<.*> is abstract; cannot be instantiated"              => useBuilder(<symbol>)
+"cannot find symbol.*new .*_Builder"                    => useBuilder(<symbol>)
+
+# Lombok @Builder
+"cannot find symbol.*\\.builder\\(\\)"                  => escalateToLLM("lombok-builder-missing-source")
+"method .*build\\(\\) .*non-static"                     => useBuilder(<symbol>)
+
+# Required fields in builders (FreeBuilder)
+"java.lang.IllegalStateException: Not set: \\[(.*)\\]"  => setBuilderRequiredFields($1)
+
+# Generated source not on classpath
+"package .*\\._.* does not exist"                       => triggerAnnotationProcessing()
+"cannot find symbol.*_Builder"                          => triggerAnnotationProcessing()
+
+# Common API confusion
+"method setX in class .* cannot be applied"             => escalateToLLM("builder-setter-shape")
+"clear is not abstract and does not override"           => escalateToLLM("builder-clear-overload")
+
+# VS Code / Eclipse JDT diagnostics
+"Cannot instantiate the type (.*)"                    => applyInstantiationStrategy($1)
+"The constructor (.*) is undefined"                   => applyInstantiationStrategy($1)
+"The method (.*) is undefined for the type (.*)"      => replaceWithContractMethod($2,$1)
+"new ([A-Za-z0-9_]+_Builder)"                         => replaceWithDeclaredBuilderOrBlock($1)

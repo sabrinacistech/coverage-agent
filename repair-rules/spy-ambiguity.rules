@@ -1,0 +1,17 @@
+# spy-ambiguity.rules — deterministic Mockito spy/InjectMocks fixes (Phase 6)
+# Format: <errorPattern>  =>  <action>(<args>)
+
+# Spy target is a real object built with new — wrap correctly
+"NotAMockException.*Argument should be a mock"    => replaceCall(spy(new (.*)\(.*\)), spy(.*))
+
+# @InjectMocks on interface — interfaces can't host injected fields
+"Cannot instantiate @InjectMocks field.*interface" => escalateToLLM("inject-mocks-on-interface")
+
+# @InjectMocks ambiguity (multiple constructors) — escalate with context
+"Cannot instantiate @InjectMocks field.*constructor" => escalateToLLM("inject-mocks-ambiguous-ctor")
+
+# @InjectMocks with no @Mock for a required dep → addMockBean if Spring, else escalate
+"Cannot instantiate @InjectMocks field.*no.*mock for" => escalateToLLM("inject-mocks-missing-dep")
+
+# spy(null) is invalid by construction
+"spy\\(null\\)"                                   => escalateToLLM("spy-null-target")

@@ -1,0 +1,51 @@
+# imports.rules — deterministic repair (Phase 6)
+# Format: <errorPattern>  =>  <action>(<args>)
+# Patterns match against state/compile-error-index.json[*].{code,message,symbol}.
+# Imports added MUST validate against state/import-whitelist.json (G1).
+
+# JUnit 5
+"cannot find symbol.*MockitoExtension"            => addImport(org.mockito.junit.jupiter.MockitoExtension)
+"cannot find symbol.*ExtendWith"                  => addImport(org.junit.jupiter.api.extension.ExtendWith)
+"cannot find symbol.*\\bTest\\b"                  => addImport(org.junit.jupiter.api.Test)
+"cannot find symbol.*BeforeEach"                  => addImport(org.junit.jupiter.api.BeforeEach)
+"cannot find symbol.*AfterEach"                   => addImport(org.junit.jupiter.api.AfterEach)
+"cannot find symbol.*DisplayName"                 => addImport(org.junit.jupiter.api.DisplayName)
+"cannot find symbol.*ParameterizedTest"           => addImport(org.junit.jupiter.params.ParameterizedTest)
+"cannot find symbol.*ValueSource"                 => addImport(org.junit.jupiter.params.provider.ValueSource)
+
+# Mockito
+"cannot find symbol.*\\bMock\\b"                  => addImport(org.mockito.Mock)
+"cannot find symbol.*InjectMocks"                 => addImport(org.mockito.InjectMocks)
+"cannot find symbol.*\\bSpy\\b"                   => addImport(org.mockito.Spy)
+"cannot find symbol.*\\bwhen\\b"                  => addImport(static org.mockito.Mockito.when)
+"cannot find symbol.*\\bverify\\b"                => addImport(static org.mockito.Mockito.verify)
+"cannot find symbol.*\\bany\\b\\("                => addImport(static org.mockito.ArgumentMatchers.any)
+"cannot find symbol.*\\beq\\b\\("                 => addImport(static org.mockito.ArgumentMatchers.eq)
+"cannot find symbol.*\\btimes\\b\\("              => addImport(static org.mockito.Mockito.times)
+"cannot find symbol.*\\bnever\\b\\("              => addImport(static org.mockito.Mockito.never)
+"cannot find symbol.*\\blenient\\b"               => addImport(static org.mockito.Mockito.lenient)
+
+# AssertJ
+"cannot find symbol.*assertThat\\b"               => addImport(static org.assertj.core.api.Assertions.assertThat)
+"cannot find symbol.*assertThatThrownBy"          => addImport(static org.assertj.core.api.Assertions.assertThatThrownBy)
+
+# Spring test
+"cannot find symbol.*SpringBootTest"              => addImport(org.springframework.boot.test.context.SpringBootTest)
+"cannot find symbol.*MockBean"                    => addImport(org.springframework.boot.test.mock.mockito.MockBean)
+"cannot find symbol.*WebMvcTest"                  => addImport(org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest)
+"cannot find symbol.*MockMvc\\b"                  => addImport(org.springframework.test.web.servlet.MockMvc)
+"cannot find symbol.*ActiveProfiles"              => addImport(org.springframework.test.context.ActiveProfiles)
+
+# Reactor
+"cannot find symbol.*StepVerifier"                => addImport(reactor.test.StepVerifier)
+"cannot find symbol.*\\bMono\\b"                  => addImport(reactor.core.publisher.Mono)
+"cannot find symbol.*\\bFlux\\b"                  => addImport(reactor.core.publisher.Flux)
+
+# Ambiguous imports → escalate (cannot pick deterministically)
+"reference to .* is ambiguous"                    => escalateToLLM("ambiguous-symbol")
+
+# VS Code / Eclipse JDT diagnostics
+"The import (.*) cannot be resolved"                 => removeImport($1)
+"(.*) cannot be resolved to a type"                   => resolveUniqueImportFromWhitelist($1)
+"The type (.*) is not visible"                        => removeUsageAndEscalate("non-public-type")
+"The method .* refers to the missing type .*"         => escalateToLLM("missing-type-in-classpath")

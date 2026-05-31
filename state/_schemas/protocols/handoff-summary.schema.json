@@ -1,0 +1,78 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "handoff-summary.schema.json",
+  "description": "Compact pre-generation handoff emitted by tools/python/validate_handoff.py to state/_summaries/handoff-summary.json. The LLM consumes ONLY this file + context-packs-compact/<safe_fqcn>.json — never the nine underlying Phase-0 JSONs. Three shapes share a common header: READY (carries the derived facts) and two BLOCKED variants.",
+  "type": "object",
+  "required": ["schemaVersion", "generatedAt", "phase", "status"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "generatedAt": { "type": "string" },
+    "phase": { "type": "string" },
+    "status": {
+      "enum": ["READY", "BLOCKED_PRE_STAGE_MISSING", "BLOCKED_PRE_STAGE_INVALID"]
+    },
+    "missing": { "type": "array", "items": { "type": "string" } },
+    "invalid": { "type": "array", "items": { "type": "string" } },
+    "buildTool": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string" },
+        "groupId": { "type": "string" },
+        "javaVersion": { "type": "string" }
+      }
+    },
+    "archetype": {
+      "type": "object",
+      "properties": {
+        "parent": { "type": "string" },
+        "namespace": { "type": "string" }
+      }
+    },
+    "stack": {
+      "type": "object",
+      "properties": {
+        "testFramework": { "type": "string" },
+        "mockingLib": { "type": "string" },
+        "assertionLib": { "type": "string" },
+        "diFramework": { "type": "string" },
+        "springBoot": {},
+        "blocked": { "type": "boolean" }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "properties": {
+        "symbolContracts": { "type": "integer" },
+        "contextPacks": { "type": "integer" },
+        "fixtures": { "type": "integer" },
+        "dependencyGraphs": { "type": "integer" },
+        "classes": { "type": "integer" }
+      }
+    },
+    "classification": { "type": "object" },
+    "batchPlan": {
+      "type": "object",
+      "properties": {
+        "cycle": { "type": "integer" },
+        "mode": { "type": "string" },
+        "size": { "type": "integer" },
+        "topSuts": { "type": "array" }
+      }
+    },
+    "llmInstructions": { "type": "array", "items": { "type": "string" } }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "READY" } }, "required": ["status"] },
+      "then": { "required": ["buildTool", "stack", "counts", "batchPlan", "llmInstructions"] }
+    },
+    {
+      "if": { "properties": { "status": { "const": "BLOCKED_PRE_STAGE_MISSING" } }, "required": ["status"] },
+      "then": { "required": ["missing"] }
+    },
+    {
+      "if": { "properties": { "status": { "const": "BLOCKED_PRE_STAGE_INVALID" } }, "required": ["status"] },
+      "then": { "required": ["invalid"] }
+    }
+  ]
+}

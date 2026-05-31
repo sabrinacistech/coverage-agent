@@ -1,0 +1,25 @@
+# junit.rules — deterministic repair (Phase 6)
+# Format: <errorPattern>  =>  <action>(<args>)
+
+# Runner / Extension mismatch
+"No tests found .*JUnit 4"                              => migrateToJUnit5(<testClass>)
+"@RunWith not applicable .*Jupiter"                     => replaceAnnotation(@RunWith(MockitoJUnitRunner), @ExtendWith(MockitoExtension))
+"cannot find symbol.*RunWith"                           => escalateToLLM("junit-version-mix")
+
+# Lifecycle
+"@Before is not applicable"                             => replaceAnnotation(@Before, @BeforeEach)
+"@After is not applicable"                              => replaceAnnotation(@After, @AfterEach)
+"@BeforeClass .*static"                                 => replaceAnnotation(@BeforeClass, @BeforeAll)
+
+# Assertions migration
+"org.junit.Assert"                                      => replaceImport(org.junit.Assert, org.junit.jupiter.api.Assertions)
+"Assert\\.assertEquals"                                 => replaceCall(Assert.assertEquals, org.junit.jupiter.api.Assertions.assertEquals)
+
+# Visibility
+"Test method must be public"                            => escalateToLLM("junit5-package-private")  # JUnit 5 allows package-private
+
+# Parameterized
+"@ParameterizedTest .*no source"                        => escalateToLLM("parameterized-no-source")
+
+# Exception assertions
+"expected .* but was .*Exception"                       => escalateToLLM("exception-assert-shape")

@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "mutation-intelligence.schema.json",
+  "type": "object",
+  "required": ["schemaVersion", "runId", "module", "survivors"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "runId": { "type": "string" },
+    "module": { "type": "string" },
+    "survivors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["class", "method", "line", "mutator"],
+        "properties": {
+          "class": { "type": "string" },
+          "method": { "type": "string" },
+          "line": { "type": "integer" },
+          "mutator": { "type": "string" },
+          "description": { "type": "string" },
+          "suggestedAssertion": { "type": "string" }
+        }
+      }
+    },
+    "blocked": { "type": "array" }
+  }
+}

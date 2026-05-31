@@ -1,0 +1,162 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "semantic-index.schema.json",
+  "title": "Semantic Index — state/index/*",
+  "description": "Schema for all five files produced by semantic_index_writer.py into state/index/. Files are written to the execution folder (java-test-coverage-architecture_execution_<project>_<date>/state/index/) and reference this schema via a relative $schema field.",
+  "definitions": {
+
+    "evidenceId": {
+      "type": "string",
+      "pattern": "^(sym|ctor|builder):[A-Za-z0-9_.$#<>]+:[0-9a-f]{8}$"
+    },
+
+    "classEntry": {
+      "type": "object",
+      "description": "Per-FQCN class descriptor written to classes.json",
+      "required": ["kind"],
+      "properties": {
+        "kind":         { "type": "string", "enum": ["class", "interface", "enum", "annotation", "abstract"] },
+        "modifiers":    { "type": "array", "items": { "type": "string" } },
+        "annotations":  { "type": "array", "items": { "type": "string" } },
+        "parents": {
+          "type": "object",
+          "properties": {
+            "extends":    { "type": ["string", "null"] },
+            "implements": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "instantiation": { "type": ["string", "null"], "description": "constructor | builder | factory | null" },
+        "source":        { "type": ["string", "null"], "description": "Relative path to the .java source file" }
+      }
+    },
+
+    "methodEntry": {
+      "type": "object",
+      "description": "Single method/constructor descriptor written to methods.json",
+      "required": ["kind", "name", "params", "returnType"],
+      "properties": {
+        "kind":       { "type": "string", "enum": ["method", "constructor"] },
+        "name":       { "type": "string" },
+        "params":     { "type": "array", "items": { "type": "string" } },
+        "returnType": { "type": "string" },
+        "modifiers":  { "type": "array", "items": { "type": "string" } },
+        "throws":     { "type": "array", "items": { "type": "string" } },
+        "evidenceId": { "$ref": "#/definitions/evidenceId", "description": "Stable hash-based ID for cross-referencing" }
+      }
+    },
+
+    "dependencyEntry": {
+      "type": "object",
+      "description": "Per-FQCN dependency descriptor written to dependencies.json",
+      "properties": {
+        "uses":         { "type": "array", "items": { "type": "string" } },
+        "implements":   { "type": "array", "items": { "type": "string" } },
+        "extends":      { "type": ["string", "null"] },
+        "injects":      { "type": "array", "items": { "type": "string" } },
+        "repositories": { "type": "array", "items": { "type": "string" } },
+        "clients":      { "type": "array", "items": { "type": "string" } },
+        "exceptions":   { "type": "array", "items": { "type": "string" } }
+      }
+    },
+
+    "classesFile": {
+      "type": "object",
+      "description": "state/index/classes.json — FQCN → class descriptor",
+      "required": ["version", "generatedAt", "count", "classes"],
+      "properties": {
+        "$schema":     { "type": "string" },
+        "version":     { "type": "integer", "const": 1 },
+        "generatedAt": { "type": "string", "format": "date-time" },
+        "count":       { "type": "integer", "minimum": 0 },
+        "classes": {
+          "type": "object",
+          "description": "Keys are fully-qualified class names",
+          "additionalProperties": { "$ref": "#/definitions/classEntry" }
+        }
+      }
+    },
+
+    "methodsFile": {
+      "type": "object",
+      "description": "state/index/methods.json — FQCN → [method descriptors]",
+      "required": ["version", "generatedAt", "count", "methods"],
+      "properties": {
+        "$schema":     { "type": "string" },
+        "version":     { "type": "integer", "const": 1 },
+        "generatedAt": { "type": "string", "format": "date-time" },
+        "count":       { "type": "integer", "minimum": 0 },
+        "methods": {
+          "type": "object",
+          "description": "Keys are fully-qualified class names",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/methodEntry" }
+          }
+        }
+      }
+    },
+
+    "importsFile": {
+      "type": "object",
+      "description": "state/index/imports.json — resolved classpath packages and classes",
+      "required": ["version", "generatedAt"],
+      "properties": {
+        "$schema":      { "type": "string" },
+        "version":      { "type": "integer", "const": 1 },
+        "generatedAt":  { "type": "string", "format": "date-time" },
+        "module":       { "type": "string" },
+        "packageCount": { "type": "integer", "minimum": 0 },
+        "classCount":   { "type": "integer", "minimum": 0 },
+        "packages": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "All packages visible on the compile classpath"
+        }
+      }
+    },
+
+    "dependenciesFile": {
+      "type": "object",
+      "description": "state/index/dependencies.json — FQCN → dependency descriptor",
+      "required": ["version", "generatedAt", "count", "classes"],
+      "properties": {
+        "$schema":     { "type": "string" },
+        "version":     { "type": "integer", "const": 1 },
+        "generatedAt": { "type": "string", "format": "date-time" },
+        "count":       { "type": "integer", "minimum": 0 },
+        "classes": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/dependencyEntry" }
+        }
+      }
+    },
+
+    "annotationsFile": {
+      "type": "object",
+      "description": "state/index/annotations.json — annotations per class and method",
+      "required": ["version", "generatedAt"],
+      "properties": {
+        "$schema":     { "type": "string" },
+        "version":     { "type": "integer", "const": 1 },
+        "generatedAt": { "type": "string", "format": "date-time" },
+        "classCount":  { "type": "integer", "minimum": 0 },
+        "methodCount": { "type": "integer", "minimum": 0 },
+        "classes": {
+          "type": "object",
+          "description": "FQCN → [annotation simple names]",
+          "additionalProperties": { "type": "array", "items": { "type": "string" } }
+        },
+        "methods": {
+          "type": "object",
+          "description": "FQCN#methodName → [annotation simple names]",
+          "additionalProperties": { "type": "array", "items": { "type": "string" } }
+        },
+        "_fingerprints": {
+          "type": "object",
+          "description": "Input file hashes used for incremental detection",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    }
+  }
+}

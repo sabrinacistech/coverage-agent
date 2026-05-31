@@ -1,0 +1,118 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "symbol-contract.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "definitions": {
+    "evidenceId": {
+      "type": "string",
+      "pattern": "^(sym|ctor|builder):[A-Za-z0-9_.$#<>]+:[0-9a-f]{8}$"
+    }
+  },
+  "required": ["schemaVersion", "fqcn", "kind", "instantiation"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "fqcn": { "type": "string" },
+    "kind": { "enum": ["class", "interface", "abstract", "enum", "record", "annotation"] },
+    "modifiers": { "type": "array", "items": { "type": "string" } },
+    "annotations": { "type": "array", "items": { "type": "string" } },
+    "instantiation": {
+      "type": "object",
+      "required": ["allowed", "strategy"],
+      "properties": {
+        "allowed": { "type": "boolean" },
+        "strategy": { "enum": ["constructor", "builder", "factory", "mock", "concrete", "anonymous", "none"] },
+        "preferred": { "type": ["string", "null"] },
+        "fallbacks": { "type": "array", "items": { "type": "string" } },
+        "reason": { "type": "string" }
+      }
+    },
+    "constructors": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "required": ["evidenceId", "visibility", "params"],
+        "properties": {
+          "evidenceId": { "$ref": "#/definitions/evidenceId" },
+          "visibility": { "enum": ["public", "protected", "package", "private"] },
+          "params": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["type"],
+              "properties": {
+                "type": { "type": "string" },
+                "name": { "type": "string" }
+              }
+            }
+          },
+          "throws": { "type": "array", "items": { "type": "string" } },
+          "source": { "type": "string" }
+        }
+      }
+    },
+    "methods": {
+      "type": "array",
+      "maxItems": 80,
+      "items": {
+        "type": "object",
+        "required": ["evidenceId", "name", "returnType", "params", "usable"],
+        "properties": {
+          "evidenceId": { "$ref": "#/definitions/evidenceId" },
+          "name": { "type": "string" },
+          "modifiers": { "type": "array", "items": { "type": "string" } },
+          "returnType": { "type": "string" },
+          "params": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["type"],
+              "properties": {
+                "type": { "type": "string" },
+                "name": { "type": "string" }
+              }
+            }
+          },
+          "throws": { "type": "array", "items": { "type": "string" } },
+          "generics": {
+            "type": "object",
+            "properties": {
+              "typeParams": { "type": "array", "items": { "type": "string" } },
+              "signature": { "type": ["string", "null"] }
+            }
+          },
+          "usable": { "type": "boolean" },
+          "source": { "type": "string" }
+        }
+      }
+    },
+    "builders": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "required": ["evidenceId", "kind", "entry", "build", "setters"],
+        "properties": {
+          "evidenceId": { "$ref": "#/definitions/evidenceId" },
+          "kind": { "enum": ["lombok", "freebuilder", "immutables", "autovalue", "manual"] },
+          "entry": { "type": "string" },
+          "build": { "type": "string" },
+          "setters": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "type", "required"],
+              "properties": {
+                "name": { "type": "string" },
+                "type": { "type": "string" },
+                "required": { "type": "boolean" }
+              }
+            }
+          },
+          "source": { "type": "string" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "llm-budget.schema.json",
+  "title": "LLM budget — context pack size accounting",
+  "description": "Aggregate per-SUT accounting of the compact context packs handed to the LLM, written by tools/python/context_pack_builder.py to state/_summaries/llm-budget.json. Each entry estimates input tokens and flags packs that exceed the declared Body-Agent input budget (overBudget = estimatedTokensIn > maxTokensIn).",
+  "type": "object",
+  "required": ["schemaVersion", "tokensPerByte", "totals", "entries"],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "tokensPerByte": { "type": "number", "exclusiveMinimum": 0 },
+    "totals": {
+      "type": "object",
+      "required": ["suts", "compactPackBytes", "estimatedTokensIn"],
+      "properties": {
+        "suts":              { "type": "integer", "minimum": 0 },
+        "compactPackBytes":  { "type": "integer", "minimum": 0 },
+        "estimatedTokensIn": { "type": "integer", "minimum": 0 },
+        "maxTokensIn":       { "type": "integer", "minimum": 0 },
+        "overBudgetCount":   { "type": "integer", "minimum": 0 }
+      }
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["sut", "contextPackBytes", "compactPackBytes", "estimatedTokensIn"],
+        "properties": {
+          "sut":               { "type": "string", "minLength": 1 },
+          "contextPackBytes":  { "type": "integer", "minimum": 0 },
+          "compactPackBytes":  { "type": "integer", "minimum": 0 },
+          "estimatedTokensIn": { "type": "integer", "minimum": 0 },
+          "maxTokensIn":       { "type": "integer", "minimum": 0 },
+          "overBudget":        { "type": "boolean" },
+          "truncatedFields":   { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,18 @@
+# verify-count.rules — deterministic Mockito verification fixes (Phase 6)
+# Reduce LLM escalations from mockito.rules by handling common count patterns.
+# Format: <errorPattern>  =>  <action>(<args>)
+
+# "Wanted N times but was X times" — strip explicit times() to default(1)
+"Wanted ([0-9]+) times.*but was ([0-9]+) times"  => replaceCall(verify(.., times($1)), verify(.., times($2)))
+
+# Wanted but never invoked → likely stale verify; escalate (genuine bug)
+"Wanted but not invoked"                          => escalateToLLM("verify-target-never-called")
+
+# Never wanted but invoked → switch to verifyNoInteractions
+"Never wanted but invoked"                        => replaceCall(verify(.., never()), verifyNoInteractions(..))
+
+# verifyNoMoreInteractions failing on lenient mock → drop the verify
+"No interactions wanted here.*lenient"            => removeStub("verifyNoMoreInteractions")
+
+# atLeastOnce wanted but zero invocations → escalate
+"Wanted at least 1 time.*was 0 times"             => escalateToLLM("verify-atleast-zero")

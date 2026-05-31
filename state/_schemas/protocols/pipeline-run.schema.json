@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "pipeline-run.schema.json",
+  "title": "Pipeline run — orchestrator timeline",
+  "description": "Single run of run_pipeline.py, summarising every step that fired (or was skipped). nextAction guides the LLM orchestrator on what to do next.",
+  "type": "object",
+  "required": ["schemaVersion", "runId", "steps"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "runId":         { "type": "string", "minLength": 1 },
+    "startedAt":     { "type": "string", "format": "date-time" },
+    "finishedAt":    { "type": "string", "format": "date-time" },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["step", "name", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "step":   { "type": "integer", "minimum": 0 },
+          "name":   { "type": "string" },
+          "status": { "enum": ["OK", "FAIL", "SKIP", "CACHED"] },
+          "ms":     { "type": "integer", "minimum": 0 },
+          "out": {
+            "type": "array",
+            "description": "Artefacts written by this step.",
+            "items": { "type": "string" }
+          },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    "nextAction": {
+      "type": "string",
+      "description": "Suggested next action: e.g. CALL_LLM_GENERATION, RERUN_REPAIR, STOP."
+    }
+  }
+}

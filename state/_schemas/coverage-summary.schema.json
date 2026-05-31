@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "coverage-summary.schema.json",
+  "description": "Resumen JaCoCo del batch actual — escrito por tools/python/narrow_test_runner.py (+ jacoco_parser.py); consumido por el pipeline determinista (cycle_loop.py y, en modo mutation-hardening, mutation_runner.py). No es un turno LLM.",
+  "type": "object",
+  "required": ["schemaVersion", "classes"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "cycle": { "type": "integer" },
+    "runId": { "type": "string" },
+    "lineCoverage": { "type": ["number", "null"] },
+    "branchCoverage": { "type": ["number", "null"] },
+    "instructionCoverage": { "type": ["number", "null"] },
+    "methodCoverage": { "type": ["number", "null"] },
+    "classes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["fqcn"],
+        "properties": {
+          "fqcn": { "type": "string" },
+          "lineCoverage": { "type": ["number", "null"] },
+          "branchCoverage": { "type": ["number", "null"] }
+        }
+      }
+    }
+  }
+}

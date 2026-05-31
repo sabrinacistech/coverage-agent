@@ -1,0 +1,32 @@
+# Files Copilot must NOT index — they are deprecated or LLM-prohibited inputs.
+
+# Deprecated agents (Phases 1-7 ahora son Python, ver MASTER_PROMPT.md "Post-audit 2026-05-28")
+agents/_archive/**
+
+# Deprecated docs / artefactos de migración
+docs/_archive/**
+
+# Skills archivados
+skills/_archive/**
+
+# Estados runtime — el LLM solo lee context-packs (la única autorizada).
+# Estos archivos son grandes y cambian por ciclo; cargarlos en contexto rompe la premisa.
+state/index/**
+state/_patches/**
+state/_summaries/**
+state/symbol-contracts/**
+state/context-packs/**
+state/import-whitelist.json
+state/dependency-graph.json
+state/coverage-targets.json
+state/batch-plan.json
+state/jacoco*.xml
+
+# Artefactos del repo Java analizado (si conviven en el mismo workspace)
+**/target/**
+**/build/**
+**/*.class
+
+# Outputs del pipeline Python
+tools/python/__pycache__/**
+tools/python/tests/**

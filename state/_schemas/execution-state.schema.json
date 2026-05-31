@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "execution-state.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "mode", "cycle", "phase", "budget", "checkpoints"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "mode": { "enum": ["coverage", "branch-coverage", "mutation-hardening"] },
+    "cycle": { "type": "integer" },
+    "phase": {
+      "enum": [
+        "discovery","stack-profile","classification","symbol-contract",
+        "dependency-graph","fixtures","planning","generation",
+        "validation","repair","reporting"
+      ]
+    },
+    "budget": {
+      "type": "object",
+      "properties": {
+        "maxCycles": { "type": "integer" },
+        "maxMinutesPerCycle": { "type": "integer" }
+      }
+    },
+    "consecutiveZeroDeltaCycles": { "type": "integer" },
+    "compileFailRateWindow": { "type": "array", "items": { "type": "number" } },
+    "cycleStartedAt": { "type": "number", "description": "Epoch seconds stamped by budget_enforcer.tick at cycle entry; cleared by reset. Transient." },
+    "checkpoints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["file", "sha256", "cycle", "phase"],
+        "properties": {
+          "file": { "type": "string" },
+          "sha256": { "type": "string" },
+          "cycle": { "type": "integer" },
+          "phase": { "type": "string" }
+        }
+      }
+    },
+    "lastGoodCheckpoint": {
+      "type": "object",
+      "properties": {
+        "cycle": { "type": "integer" },
+        "phase": { "type": "string" }
+      }
+    }
+  }
+}
