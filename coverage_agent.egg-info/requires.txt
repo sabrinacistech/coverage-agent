@@ -1,0 +1,15 @@
+jsonschema<5,>=4.21
+litellm<2,>=1.55
+langgraph<0.3,>=0.2.50
+langchain-core<0.4,>=0.3.20
+python-dotenv<2,>=1.0
+
+[api]
+fastapi<0.116,>=0.115
+uvicorn[standard]<0.33,>=0.32
+
+[dev]
+pytest<9,>=8.0
+
+[observability]
+langfuse<3,>=2.50

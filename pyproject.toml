@@ -9,7 +9,11 @@ license = { text = "Proprietary" }
 # El núcleo determinista (tools/python) no requiere dependencias externas más allá
 # de jsonschema. La capa de orquestación v2 agrega LiteLLM / LangChain / LangGraph.
 dependencies = [
+    # Núcleo determinista (tools/python) — antes en tools/python/requirements.txt.
     "jsonschema>=4.21,<5",
+    "lxml>=5.1",
+    "javalang>=0.13",
+    # Capa de orquestación v2.
     "litellm>=1.55,<2",
     "langgraph>=0.2.50,<0.3",
     "langchain-core>=0.3.20,<0.4",

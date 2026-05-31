@@ -1,0 +1,8 @@
+README.md
+pyproject.toml
+coverage_agent.egg-info/PKG-INFO
+coverage_agent.egg-info/SOURCES.txt
+coverage_agent.egg-info/dependency_links.txt
+coverage_agent.egg-info/requires.txt
+coverage_agent.egg-info/top_level.txt
+orchestrator/__init__.py
