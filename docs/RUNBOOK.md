@@ -1,0 +1,255 @@
+# Runbook — coverage-agent (etapa 1: LLM vía VS Code + Claude Code, sin API key)
+
+Guía paso a paso para correr el agente de cobertura **desde cero** contra un
+repositorio Java, generando tests con la ayuda de un LLM accedido desde **VS Code
+(Claude Code o GitHub Copilot)** — sin necesidad de una API key.
+
+> Audiencia: cualquier equipo que quiera usar el agente. No asume conocimiento
+> previo del sistema.
+
+---
+
+## 1. Qué hace y cómo (en 1 minuto)
+
+El sistema analiza un proyecto Java, decide qué clases/métodos faltan cubrir, y
+**genera tests unitarios** para subir la cobertura. El núcleo es **determinista**
+(Python): arma el contexto, aplica compuertas de calidad anti-alucinación
+(**gates G1–G8**) y controla un **presupuesto** de ciclos/tiempo/tokens. La parte
+creativa —escribir el cuerpo del test— la pone un **LLM**.
+
+En **etapa 1** ese LLM es **Claude Code (o Copilot) dentro de VS Code**: el agente
+**no llama a ninguna API**. Cuando necesita un test, deja un *pedido* en un archivo
+y **espera**; vos le pedís a Claude Code que lo resuelva y escriba la respuesta en
+otro archivo (el "handoff"). El agente valida esa respuesta contra un schema y la
+aplica solo si pasa los gates.
+
+```
+Fase 0 (análisis)  →  ciclo:  [genera pedido] → (Claude Code responde) → aplica+compila+mide  → repite
+                                     handoff por archivo                gates G1–G8 + presupuesto
+```
+
+---
+
+## 2. Prerrequisitos
+
+| Herramienta | Versión | Para qué |
+|---|---|---|
+| **Python** | **3.11 o 3.12** (no 3.14) | el agente; LangChain/LangGraph no soportan 3.14 |
+| **JDK** | 17+ (21 ok) | compilar/analizar el repo Java (`javap`) |
+| **Maven** | 3.9+ | build, tests y reporte JaCoCo del repo objetivo |
+| **VS Code + Claude Code** | actual | resolver el handoff (el "LLM" de etapa 1) |
+| **git** | actual | clonar repos / versionar |
+
+El repo Java objetivo debe tener el **plugin JaCoCo** configurado en su `pom.xml`
+(para producir `jacoco.xml`).
+
+---
+
+## 3. Modelo mental: 3 ubicaciones distintas
+
+| | Qué es | Ejemplo |
+|---|---|---|
+| **Repo del agente** | este proyecto (`coverage-agent`) | `C:\repo\coverage-agent` |
+| **Repo objetivo** | el proyecto Java al que se le generan tests | `C:\repo\multi-clusters\cluster-status-service` |
+| **state-dir** | carpeta de trabajo del agente (análisis, handoff, métricas) | `C:\repo\agent-state-<proyecto>` |
+
+> **Elegí el state-dir FUERA de ambos repos** para no ensuciar git.
+
+### ¿Dónde queda cada salida?
+
+| Salida | Ubicación | ¿Se versiona? |
+|---|---|---|
+| **Tests generados** (suben la cobertura) | `<repo-objetivo>\src\test\java\...` | **Sí**, en el repo objetivo |
+| Reporte JaCoCo | `<repo-objetivo>\target\site\jacoco\jacoco.xml` | No (target/) |
+| Métricas/deltas | `<state-dir>\coverage-delta.json`, `coverage-targets.json`, `_summaries\` | No |
+| Handoff con el IDE | `<state-dir>\_llm\` (`request-*.md/.json`, `response-*.json`, `_done\`) | No |
+| Estado del pipeline | `<state-dir>\` (`batch-plan.json`, `context-packs[-compact]\`, `execution-state.json`) | No |
+
+**En resumen:** los **tests** quedan dentro del **repo objetivo** (los commiteás
+ahí); las **mediciones y el estado** quedan en el **state-dir**.
+
+---
+
+## 4. Puesta a punto (una vez)
+
+```powershell
+# 4.1 Clonar el agente
+git clone https://github.com/sabrinacistech/coverage-agent.git
+cd coverage-agent
+
+# 4.2 Crear el entorno Python 3.12 e instalar dependencias (incluye la API)
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -e ".[dev,api]"
+
+# 4.3 (opcional) Verificar que todo está sano
+.\.venv\Scripts\python.exe -m pytest tests\orchestrator tools\python\tests -q
+```
+
+> Todos los comandos del agente se corren **desde la raíz de `coverage-agent`**
+> (para que resuelva el paquete `orchestrator`).
+
+---
+
+## 5. Correr contra un repo Java — paso a paso
+
+Ejemplo con `multi-clusters` (módulo `cluster-status-service`). Adaptá las rutas.
+
+### 5.1 Preparar el repo objetivo (build + JaCoCo)
+
+El planner necesita datos de cobertura para saber **qué falta cubrir**. Generalos
+corriendo los tests con JaCoCo en el repo objetivo:
+
+```powershell
+git clone https://github.com/sabrinacistech/multi-clusters.git C:\repo\multi-clusters
+cd C:\repo\multi-clusters\cluster-status-service
+mvn -q clean test          # produce target\classes y target\site\jacoco\jacoco.xml
+```
+
+> Si no hay `jacoco.xml`, la Fase 0 produce un `batch-plan` vacío
+> ("no uncovered targets") y no hay nada que generar. Ver Troubleshooting.
+
+### 5.2 Fase 0 — análisis (desde la raíz de `coverage-agent`)
+
+```powershell
+cd C:\repo\coverage-agent
+.\.venv\Scripts\python.exe tools\python\run_pipeline.py `
+  --repo C:\repo\multi-clusters\cluster-status-service `
+  --out  C:\repo\agent-state-multiclusters `
+  --jacoco-xml C:\repo\multi-clusters\cluster-status-service\target\site\jacoco\jacoco.xml `
+  --coverage-mode coverage
+```
+
+Esto deja en el state-dir: `batch-plan.json`, `context-packs-compact\`,
+`_summaries\llm-budget.json`, etc.
+
+### 5.3 (opcional) Fijar el presupuesto
+
+Si no creás `execution-state.json`, se crea solo con presupuesto por defecto
+(**maxCycles=20**, **maxMinutesPerCycle=10**). Para fijarlo (p.ej. una prueba corta
+de 3 ciclos), creá `C:\repo\agent-state-multiclusters\execution-state.json`:
+
+```json
+{
+  "schemaVersion": 1, "cycle": 0, "phase": "generation",
+  "budget": { "maxCycles": 3, "maxMinutesPerCycle": 10 },
+  "consecutiveZeroDeltaCycles": 0, "compileFailRateWindow": [], "checkpoints": []
+}
+```
+
+### 5.4 Arrancar el ciclo
+
+El proveedor de LLM por defecto es **`ide`** (handoff a Claude Code). Para dejarlo
+explícito: `$env:COVAGENT_LLM_PROVIDER = "ide"`.
+
+**Opción A — CLI (recomendada para empezar):**
+
+```powershell
+$env:COVAGENT_LLM_PROVIDER = "ide"
+.\.venv\Scripts\python.exe tools\python\cycle_loop.py `
+  --state     C:\repo\agent-state-multiclusters\execution-state.json `
+  --state-dir C:\repo\agent-state-multiclusters `
+  -- .\.venv\Scripts\python.exe -m orchestrator.one_cycle `
+       --state-dir C:\repo\agent-state-multiclusters `
+       --repo C:\repo\multi-clusters\cluster-status-service
+```
+
+**Opción B — API FastAPI (arranque manual):**
+
+```powershell
+$env:COVAGENT_LLM_PROVIDER = "ide"
+.\.venv\Scripts\python.exe -m uvicorn app.main:app
+# en otra terminal:
+#   POST http://127.0.0.1:8000/runs   body: {"repo":"C:\\repo\\multi-clusters\\cluster-status-service","state_dir":"C:\\repo\\agent-state-multiclusters"}
+#   GET  http://127.0.0.1:8000/runs/<runId>   → status + coverageDelta + pendingIdeRequest
+```
+
+### 5.5 Resolver el handoff con Claude Code
+
+Cuando el agente necesita un test, **se pausa** e imprime (o expone en
+`GET /runs/{id}` como `pendingIdeRequest`) la ruta de un archivo:
+
+```
+<state-dir>\_llm\request-<cycle>-<rol>.md      ← instrucciones + responsePath
+<state-dir>\_llm\request-<cycle>-<rol>.json    ← el prompt (system + contexto compacto)
+```
+
+En el chat de **Claude Code** (en VS Code), pedile:
+
+> **"Leé `<state-dir>\_llm\request-<...>.md` y su `.json` hermano. Generá el
+> patch-descriptor (JSON que valida contra
+> `state/_schemas/protocols/patch-descriptor.schema.json`) y escribí **solo el
+> JSON** en el `responsePath` que indica el request. Sin markdown ni texto extra."**
+
+El agente detecta la respuesta, la **valida contra el schema**, y si pasa:
+aplica el test (gates G1–G8 + presupuesto), compila, lo corre y recalcula
+`coverage-delta.json`. Luego sigue con el próximo objetivo. Repite hasta terminar.
+
+### 5.6 Fin del run
+
+El ciclo para con un código de salida:
+
+| rc | Significado |
+|---|---|
+| **0** | DONE — no quedan objetivos por cubrir |
+| **2** | Presupuesto agotado (maxCycles / minutos / tokens) |
+| **5** | G8 — convergencia estancada (sin progreso o demasiados fallos de compilación) |
+
+### 5.7 Revisar y commitear los resultados
+
+- **Cobertura nueva** → revisá los tests generados en
+  `C:\repo\multi-clusters\cluster-status-service\src\test\java\...`, corré
+  `mvn test` y commiteálos **en el repo `multi-clusters`** (idealmente en una rama).
+- **Mediciones** → `C:\repo\agent-state-multiclusters\coverage-delta.json` y
+  `_summaries\`.
+
+---
+
+## 6. Garantías (por qué es seguro dejar que un LLM genere tests)
+
+El LLM **solo propone** un patch; **nunca decide** si entra. Antes de tocar disco,
+el escritor sancionado (`test_patch_applier.py`) aplica de forma determinista:
+
+- **G1** imports ⊆ whitelist del context-pack · **G2** todo símbolo citado existe
+  (anti-alucinación) · **G5** stack conocido · **G6** linter de calidad
+  (post-escritura, con rollback) · **G7** anti-loop de reparación · **G8**
+  finitud/convergencia. Más el **presupuesto** (maxCycles / minutos / tokens).
+
+Un patch que falla un gate **no se escribe** (exit 3); fuera de presupuesto, **no
+se llama al LLM** (exit 2).
+
+---
+
+## 7. Configuración (variables de entorno)
+
+| Variable | Default | Qué hace |
+|---|---|---|
+| `COVAGENT_LLM_PROVIDER` | `ide` | `ide` (handoff Claude Code/Copilot) · `litellm` (API, etapa 2) |
+| `COVAGENT_IDE_TIMEOUT` | `1800` | segundos que el agente espera la respuesta del IDE |
+| `COVAGENT_IDE_DIR` | `<state>\_llm` | carpeta del handoff |
+| `COVAGENT_MODEL_GENERATION` / `_REPAIR` | (Claude) | modelo por rol (solo aplica con `litellm`) |
+
+Presupuesto: en `execution-state.json` (ver 5.3).
+
+---
+
+## 8. Troubleshooting
+
+| Síntoma | Causa / solución |
+|---|---|
+| `batch-plan` vacío, "no uncovered targets" | Falta JaCoCo. Corré `mvn clean test` en el repo objetivo y pasá `--jacoco-xml` a la Fase 0. |
+| `Python 3.9+ not found` / errores de langgraph | Usá **Python 3.12** para el venv (`py -3.12 -m venv .venv`). |
+| `Maven not found` | Agregá Maven al PATH (o `mvn.cmd` en Windows). |
+| El ciclo "se cuelga" | Está esperando el **handoff**: resolvé el `request-*.md` con Claude Code, o subí/ bajá `COVAGENT_IDE_TIMEOUT`. |
+| `[BLOCKED] G1_NO_PERIMETER` | Falta el context-pack; re-corré la Fase 0 (genera `context-packs\`). |
+| Patch rechazado (exit 3) | El test propuesto viola un gate (import no permitido, símbolo inexistente, lint). Pedile a Claude Code que corrija según el `blockReason`. |
+| `target\classes` no existe | Construí el repo objetivo: `mvn -DskipTests package` (o `mvn test`). |
+
+---
+
+## 9. Etapa 2 (futuro): camino autónomo sin humano
+
+Cambiando `COVAGENT_LLM_PROVIDER=litellm` y configurando credenciales del modelo
+(Anthropic API, o Amazon Bedrock / Google Vertex vía LiteLLM), el mismo flujo corre
+**sin handoff**: el agente llama al modelo por su cuenta. El resto (gates,
+presupuesto, LangGraph, FastAPI) no cambia.

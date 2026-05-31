@@ -5,6 +5,9 @@
 > **Langfuse** opcional) sobre el núcleo determinista descrito abajo, **sin
 > reescribirlo**. Ver [`docs/v2-architecture.md`](docs/v2-architecture.md). El
 > baseline determinista previo está etiquetado como **`v0-legacy`**.
+>
+> 🚀 **¿Cómo correrlo desde cero?** → [`docs/RUNBOOK.md`](docs/RUNBOOK.md)
+> (guía para equipos: VS Code + Claude Code, sin API key).
 
 ---
 
