@@ -41,15 +41,48 @@ reimplementa lógica de gates/budget (una sola definición de cada cosa).
 - `tools/python/repair_dispatch.py` + `ast_patcher.py` — repair determinista (10a).
 - `tools/python/run_pipeline.py` — fase 0 (pre-stage, 16 pasos).
 
-## Milestones
+## Milestones (etapa 1 — LLM por IDE, sin API key)
 
-- **M0** — repo + backup `v0-legacy` + scaffolding. ✅
-- **M1** — driver LLM autónomo: `llm_gateway` + `one_cycle`, orquestado por `cycle_loop`.
-- **M2** — grafo LangGraph (recursión gobernada por budget + G8).
-- **M3** — fachada FastAPI.
-- **M4** — Langfuse (opcional).
+- **E0** — repo + backup `v0-legacy` + scaffolding. ✅
+- **E1.1** — gateway con proveedores: `ide` (handoff por archivo a Claude Code/Copilot,
+  default) + `litellm` (autónomo, dormido). ✅
+- **E1.2** — LangGraph orquestador; recursión gobernada por budget + G8 reusando las
+  funciones de `cycle_loop` (paridad probada). ✅
+- **E1.3** — LangChain: mínimo (ver nota abajo). ✅
+- **E1.4** — fachada FastAPI de arranque manual. ✅
+- **E1.5** — Langfuse (opcional, detrás de `LANGFUSE_ENABLED`). pendiente.
+
+### Nota LangChain (E1.3)
+En etapa 1 los prompts se arman con **dicts planos** (`prompts.py`) y funcionan; no se
+introduce acoplamiento a `ChatPromptTemplate`/tools de LangChain hasta que aporte valor
+real (p.ej. multi-tool en el camino autónomo). Evita inconsistencia "core vs uso real".
+
+## Cómo se accede al LLM en etapa 1 (handoff IDE, sin key)
+
+`COVAGENT_LLM_PROVIDER=ide` (default). En la fase de generación el sistema:
+1. Escribe `state/_llm/request-<cycle>-<rol>.md` (+ `.json` con el prompt y el compact-pack).
+2. **Queda esperando** (polling, timeout `COVAGENT_IDE_TIMEOUT`).
+3. En VS Code le pedís a **Claude Code / GitHub Copilot** que resuelva ese request y
+   escriba el JSON del patch en `state/_llm/response-<...>.json`.
+4. El sistema valida la respuesta contra el schema y sigue; el patcher aplica con gates +
+   presupuesto por construcción. El request/response consumidos se archivan en `_llm/_done/`.
+
+## Uso (arranque manual)
+
+```bash
+# 1) Fase 0 (con JaCoCo para tener targets):
+python tools/python/run_pipeline.py --repo <java> --out <state> --jacoco-xml <xml> --coverage-mode coverage
+
+# 2a) Vía CLI (cycle_loop conduce one_cycle):
+python tools/python/cycle_loop.py --state <state>/execution-state.json --state-dir <state> \
+    -- python -m orchestrator.one_cycle --state-dir <state> --repo <java>
+
+# 2b) Vía grafo + API (FastAPI, arranque manual):
+uvicorn app.main:app           # luego: POST /runs {repo, state_dir}; GET /runs/{id}
+```
 
 ## Entorno
 
 Python **3.11–3.12** (LangChain/LangGraph aún no soportan 3.14). Crear venv con
-`py -3.12`. Dependencias en `pyproject.toml`. Secretos por `.env` (ver `.env.example`).
+`py -3.12`. Dependencias en `pyproject.toml` (extras: `api` para FastAPI, `observability`
+para Langfuse). Secretos por `.env` (ver `.env.example`).
