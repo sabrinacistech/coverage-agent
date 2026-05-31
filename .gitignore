@@ -36,3 +36,8 @@ env/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+# Artefactos de build / editable install
+*.egg-info/
+build/
+dist/
