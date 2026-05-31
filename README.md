@@ -1,4 +1,14 @@
-# Java Test Coverage Agent Architecture
+# Coverage Agent
+
+> **v2 en construcción** — se está montando una capa de orquestación autónoma
+> (**LiteLLM** gateway + **LangChain** prompts/tools + **LangGraph** workflow,
+> **Langfuse** opcional) sobre el núcleo determinista descrito abajo, **sin
+> reescribirlo**. Ver [`docs/v2-architecture.md`](docs/v2-architecture.md). El
+> baseline determinista previo está etiquetado como **`v0-legacy`**.
+
+---
+
+## Núcleo determinista (v1)
 
 Arquitectura de agentes y skills para generar tests unitarios en microservicios Java con **cero invención de paquetes/clases**, soportando Java 8+, Maven/Gradle, JUnit 4/5, Mockito, AssertJ, JaCoCo y proyectos con FreeBuilder/Lombok/MapStruct/Immutables/AutoValue.
 

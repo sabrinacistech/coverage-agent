@@ -27,3 +27,12 @@ state/_cache/
 .venv/
 venv/
 env/
+
+# v2: secretos y estado de ejecución (nunca versionar)
+.env
+.agent-state/
+
+# Caches de herramientas
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
