@@ -78,9 +78,23 @@ def select_next_target(state_dir: Path) -> dict | None:
 
 
 def load_context_pack(state_dir: Path, sut: str) -> dict:
-    """Pack completo (context-packs/<sut>.json) — lo consume tanto el LLM como
-    el perímetro del patcher (allowedImports / sut)."""
+    """Pack COMPLETO (context-packs/<sut>.json) — lo consume el perímetro del
+    patcher (allowedImports / sut). NO se manda al modelo: puede pesar cientos de
+    KB; para eso está el compacto."""
     return _load_json(state_dir / "context-packs" / f"{sut}.json")
+
+
+def load_context_pack_compact(state_dir: Path, sut: str) -> dict:
+    """Pack COMPACTO (context-packs-compact/<sut>.json) — proyección minificada
+    que se manda al modelo (minimización de tokens). Si no existe (estado viejo),
+    cae al completo con aviso: peor en tokens pero no rompe el ciclo."""
+    compact = state_dir / "context-packs-compact" / f"{sut}.json"
+    if compact.exists():
+        return _load_json(compact)
+    print(f"[one_cycle] WARN: sin compact-pack para {sut}; uso el completo "
+          "(re-corré la fase 0 para generar context-packs-compact y bajar tokens).",
+          file=sys.stderr)
+    return load_context_pack(state_dir, sut)
 
 
 def testcase_from_target(item: dict) -> dict:
@@ -157,11 +171,12 @@ def run_one_cycle(state_dir: Path, repo: Path) -> int:
     sut = target["sut"]
     target_id = target.get("targetId", sut)
     pack_path = state_dir / "context-packs" / f"{sut}.json"
-    pack = load_context_pack(state_dir, sut)
+    pack_compact = load_context_pack_compact(state_dir, sut)  # → al modelo (pocos tokens)
 
     # Fase 8 — generación (el gateway aplica el token-budget antes de llamar).
+    # Al modelo va el pack COMPACTO; el COMPLETO queda para el perímetro del patcher.
     patch = generation.generate_patch(
-        state_dir=state_dir, context_pack=pack, test_case=testcase_from_target(target),
+        state_dir=state_dir, context_pack=pack_compact, test_case=testcase_from_target(target),
     )
 
     if str(patch.get("status", "")).upper() == "BLOCKED":
