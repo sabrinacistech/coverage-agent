@@ -45,26 +45,20 @@ def complete(
     *,
     role: str,
     state_dir: Path | str,
-    temperature: float = 0.0,
-    max_tokens: int | None = None,
     **kwargs,
 ) -> str:
-    """Llama al modelo del rol dado y devuelve el texto de la respuesta.
+    """Devuelve el texto de la respuesta del proveedor de LLM activo.
 
-    `state_dir` se usa para el chequeo de presupuesto de tokens previo al
-    dispatch. Levanta BudgetExceeded si algún pack está sobre el techo.
+    Firma pública ESTABLE (generation/tests/verify dependen de ella). El control
+    de costo/tokens se aplica acá, ANTES de despachar a cualquier proveedor, así
+    ningún pack sobre presupuesto llega al modelo ni al handoff del IDE.
+
+    El proveedor concreto (IDE en etapa 1, LiteLLM luego) se elige por
+    config.llm_provider(); ver orchestrator/providers.py.
     """
     _assert_within_token_budget(Path(state_dir))
 
-    model = config.model_for_role(role)
+    from . import providers  # import perezoso: evita ciclo en import-time
 
-    import litellm  # import perezoso: aísla a litellm del path de test mockeado
-
-    resp = litellm.completion(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        **kwargs,
-    )
-    return resp.choices[0].message.content or ""
+    provider = providers.get_provider()
+    return provider.complete(messages, role=role, state_dir=Path(state_dir), **kwargs)

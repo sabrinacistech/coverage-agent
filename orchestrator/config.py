@@ -49,3 +49,31 @@ def model_for_role(role: str) -> str:
 def langfuse_enabled() -> bool:
     """True solo si LANGFUSE_ENABLED=1 (M4). Por defecto todo es no-op."""
     return os.environ.get("LANGFUSE_ENABLED", "0") == "1"
+
+
+# ── Proveedor de LLM (E1.1) ───────────────────────────────────────────────────
+# El gateway despacha al proveedor activo. En etapa 1 el default es `ide`: el LLM
+# lo pone Claude Code / GitHub Copilot vía handoff por archivo (sin API key). El
+# camino autónomo `litellm` queda dormido hasta una etapa posterior.
+_DEFAULT_PROVIDER = "ide"
+
+
+def llm_provider() -> str:
+    """Proveedor activo: 'ide' (handoff a Claude Code/Copilot) | 'litellm' (API)."""
+    return (os.environ.get("COVAGENT_LLM_PROVIDER") or _DEFAULT_PROVIDER).strip().lower()
+
+
+def ide_dir(state_dir) -> Path:
+    """Carpeta del handoff IDE. Default <state>/_llm; override COVAGENT_IDE_DIR."""
+    override = os.environ.get("COVAGENT_IDE_DIR")
+    return Path(override) if override else Path(state_dir) / "_llm"
+
+
+def ide_timeout() -> float:
+    """Segundos máximos que el proveedor IDE espera la respuesta del IDE."""
+    return float(os.environ.get("COVAGENT_IDE_TIMEOUT") or "1800")
+
+
+def ide_poll_seconds() -> float:
+    """Intervalo de polling del archivo de respuesta (testeable)."""
+    return float(os.environ.get("COVAGENT_IDE_POLL_SECONDS") or "2")

@@ -52,6 +52,8 @@ def test_gateway_blocks_over_budget_before_calling_model(tmp_path, monkeypatch):
 
 def test_gateway_calls_model_when_within_budget(tmp_path, monkeypatch):
     # Sin llm-budget.json → check_token_budget devuelve OK (nada que aplicar).
+    # Probamos explícitamente el proveedor litellm (el default de etapa 1 es 'ide').
+    monkeypatch.setenv("COVAGENT_LLM_PROVIDER", "litellm")
     import litellm
     monkeypatch.setattr(litellm, "completion", _fake_completion("RESPUESTA"))
     out = llm_gateway.complete([{"role": "user", "content": "hi"}],

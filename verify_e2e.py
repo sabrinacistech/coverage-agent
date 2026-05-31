@@ -92,9 +92,11 @@ print("\n=== A5. Llamada REAL al modelo (solo si hay ANTHROPIC_API_KEY) ===")
 if not os.environ.get("ANTHROPIC_API_KEY"):
     print("  [SKIP] ANTHROPIC_API_KEY no seteada — saltando la llamada real al modelo.")
 else:
-    # Restaura el gateway real (A4 lo había mockeado) y genera de verdad.
+    # Restaura el gateway real (A4 lo había mockeado) y fuerza el proveedor
+    # autónomo (litellm), ya que el default de etapa 1 es el handoff IDE.
     llm_gateway.complete = _REAL_COMPLETE
     generation.llm_gateway.complete = _REAL_COMPLETE
+    os.environ["COVAGENT_LLM_PROVIDER"] = "litellm"
     tgt = one_cycle.select_next_target(state_dir)
     if tgt is None:
         print("  [SKIP] no quedan targets sin procesar para la llamada real.")
