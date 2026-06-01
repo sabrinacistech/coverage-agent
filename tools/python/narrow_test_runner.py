@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -37,7 +38,14 @@ from common import _TimedRun  # noqa: E402
 
 
 def _resolve_tool() -> str | None:
-    return shutil.which("mvnd") or shutil.which("mvn")
+    # En Windows mvn/mvnd son scripts `.cmd`; preferir esas variantes para no
+    # resolver un script sin extensión que CreateProcess no puede ejecutar (WinError 193).
+    names = ["mvnd.cmd", "mvn.cmd", "mvnd", "mvn"] if os.name == "nt" else ["mvnd", "mvn"]
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
 
 
 def _simple_name(fqcn: str) -> str:
@@ -161,12 +169,17 @@ def main() -> int:
     summaries.mkdir(parents=True, exist_ok=True)
     log_path = summaries / "build-output.log"
 
+    # Windows: un `.cmd`/`.bat` no es un ejecutable Win32 directo → invocar vía `cmd /c`.
+    popen_cmd = cmd
+    if os.name == "nt" and tool.lower().endswith((".cmd", ".bat")):
+        popen_cmd = ["cmd", "/c", *cmd]
+
     print(f"[INFO] tool={Path(tool).name} module={module or '<root>'} test={simple}")
     t0 = time.perf_counter()
     try:
         with log_path.open("w", encoding="utf-8", errors="replace") as fh:
             proc = subprocess.Popen(
-                cmd,
+                popen_cmd,
                 cwd=str(repo),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,

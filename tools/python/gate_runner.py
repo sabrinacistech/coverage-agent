@@ -117,17 +117,27 @@ def _context_pack_imports(pack: dict) -> list[str]:
 
 
 def _context_pack_stack(pack: dict) -> tuple[list[str], bool]:
-    """Return (stack_value_strings, blocked_flag)."""
+    """Return (stack_value_strings, blocked_flag).
+
+    G5 valida la IDENTIDAD de los frameworks (testFramework / mockFramework /
+    assertFramework / namespaceStyle / springEnabled), NO las VERSIONES exactas.
+    Una versión `unknown` es informativa (suele venir gestionada por el parent/BOM
+    y el detector no siempre la fija) y no debe bloquear la generación. Por eso se
+    excluyen los campos de versión del chequeo de `unknown`.
+    """
     blocked = bool(pack.get("blocked", False) or pack.get("blk", False))
     stack_values: list[str] = []
     if isinstance(pack.get("stack"), dict):
-        for v in pack["stack"].values():
-            if v is None:
+        for k, v in pack["stack"].items():
+            if v is None or str(k).lower().endswith("version"):
                 continue
             stack_values.append(str(v))
     elif isinstance(pack.get("stk"), list):
-        for v in pack["stk"]:
-            if v is None:
+        # Tupla posicional (context-pack-compact). Índices de versión:
+        # 0=javaVersion, 6=testVersion, 7=mockVersion, 8=springBootVersion.
+        _VERSION_IDX = {0, 6, 7, 8}
+        for i, v in enumerate(pack["stk"]):
+            if v is None or i in _VERSION_IDX:
                 continue
             stack_values.append(str(v))
     return stack_values, blocked
