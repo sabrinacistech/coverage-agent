@@ -132,8 +132,10 @@ def main() -> int:
     )
     ap.add_argument(
         "--module",
-        default=None,
-        help="Maven module name. Inferred from state/build-tool-contract.json if absent.",
+        default=".",
+        help="Módulo Maven para -pl. Default '.' (repo mono-módulo apunta al módulo). "
+             "Para multi-módulo con --repo en el parent, pasar el nombre del submódulo. "
+             "Pasar '' para forzar la inferencia desde state/build-tool-contract.json.",
     )
     args = ap.parse_args()
 
