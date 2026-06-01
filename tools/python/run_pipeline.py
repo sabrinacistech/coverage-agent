@@ -382,8 +382,10 @@ def main() -> int:
     )
     ap.add_argument(
         "--module",
-        default=None,
-        help="Restrict bytecode scan and classpath resolution to one module name",
+        default=".",
+        help="Module name for bytecode scan / classpath resolution. Default '.' (repo "
+             "apunta al módulo). Sin esto los symbol-contracts quedan vacíos y el handoff "
+             "se BLOQUEA. Para multi-módulo con --repo en el parent, pasar el nombre del módulo.",
     )
     ap.add_argument(
         "--include-fqcn",

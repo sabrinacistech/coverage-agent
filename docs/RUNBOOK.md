@@ -157,12 +157,22 @@ cd C:\repo\coverage-agent
 .\.venv\Scripts\python.exe tools\python\run_pipeline.py `
   --repo C:\repo\multi-clusters\cluster-status-service `
   --out  C:\repo\agent-state-multiclusters `
+  --module . `
   --jacoco-xml C:\repo\multi-clusters\cluster-status-service\target\site\jacoco\jacoco.xml `
   --coverage-mode coverage
 ```
 
-Esto deja en el state-dir: `batch-plan.json`, `context-packs-compact\`,
-`_summaries\llm-budget.json`, etc.
+> `--module .` (repo apunta al módulo) es **necesario**: sin él, los
+> `symbol-contracts/` quedan vacíos y el handoff se **BLOQUEA**. Para multi-módulo
+> con `--repo` en el parent, pasá el nombre del módulo.
+
+Esto deja en el state-dir: `symbol-contracts/` (poblado), `batch-plan.json`,
+`context-packs-compact/`, `_summaries/llm-budget.json`, etc.
+
+**Verificá antes de seguir:** la salida termina en `[OK] handoff ready: N contracts…`
+y el comando sale con código 0. Si dice `BLOCKED_PRE_STAGE_MISSING` (p.ej.
+`symbol-contracts/ (empty)`), la Fase 0 falló — **no arranques el ciclo** hasta
+resolverlo (lo más común: faltó `--module .` o `target/classes`).
 
 ### 5.3 (opcional) Fijar el presupuesto
 
