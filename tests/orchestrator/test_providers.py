@@ -27,6 +27,7 @@ def test_provider_selection(monkeypatch):
 
 def test_ide_provider_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setenv("COVAGENT_LLM_PROVIDER", "ide")
+    monkeypatch.setenv("COVAGENT_IDE_INTERACTIVE", "0")  # polling determinista en test
     monkeypatch.setenv("COVAGENT_IDE_TIMEOUT", "10")
     monkeypatch.setenv("COVAGENT_IDE_POLL_SECONDS", "0.05")
 
@@ -75,8 +76,39 @@ def test_ide_provider_roundtrip(tmp_path, monkeypatch):
 
 def test_ide_provider_times_out(tmp_path, monkeypatch):
     monkeypatch.setenv("COVAGENT_LLM_PROVIDER", "ide")
+    monkeypatch.setenv("COVAGENT_IDE_INTERACTIVE", "0")  # polling determinista en test
     monkeypatch.setenv("COVAGENT_IDE_TIMEOUT", "0.2")
     monkeypatch.setenv("COVAGENT_IDE_POLL_SECONDS", "0.05")
     with pytest.raises(providers.IDETimeout):
         llm_gateway.complete([{"role": "user", "content": "x"}],
                              role="generation", state_dir=tmp_path)
+
+
+def test_ide_provider_interactive_skip(tmp_path, monkeypatch):
+    # ENTER 'skip' desde la terminal → el target se salta (contrato BLOCKED).
+    monkeypatch.setenv("COVAGENT_LLM_PROVIDER", "ide")
+    monkeypatch.setenv("COVAGENT_IDE_INTERACTIVE", "1")
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "skip")
+    out = json.loads(llm_gateway.complete(
+        [{"role": "user", "content": "x"}], role="generation", state_dir=tmp_path))
+    assert out["status"] == "BLOCKED"
+
+
+def test_ide_provider_interactive_enter_continues(tmp_path, monkeypatch):
+    # El usuario deja la respuesta y presiona ENTER → continúa con ese patch.
+    monkeypatch.setenv("COVAGENT_LLM_PROVIDER", "ide")
+    monkeypatch.setenv("COVAGENT_IDE_INTERACTIVE", "1")
+    ide = config.ide_dir(tmp_path)
+
+    def fake_input(*a, **k):
+        req = list(ide.glob("request-*.json"))[0]
+        resp = Path(json.loads(req.read_text(encoding="utf-8"))["responsePath"])
+        resp.write_text(json.dumps(
+            {"schemaVersion": 1, "status": "BLOCKED", "blockReason": "enter"}), encoding="utf-8")
+        return ""  # ENTER
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    out = json.loads(llm_gateway.complete(
+        [{"role": "user", "content": "x"}], role="generation", state_dir=tmp_path))
+    assert out["status"] == "BLOCKED"
+    assert list((ide / "_done").glob("response-*.json"))

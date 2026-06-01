@@ -225,16 +225,29 @@ Cuando el agente necesita un test, **se pausa** e imprime (o expone en
 <state-dir>\_llm\request-<cycle>-<rol>.json    ← el prompt (system + contexto compacto)
 ```
 
-En el chat de **Claude Code** (en VS Code), pedile:
+**El paso lo manejás VOS desde la terminal** (no se congela en silencio). Al
+pausarse, la terminal imprime instrucciones y queda esperando con un prompt:
 
-> **"Leé `<state-dir>\_llm\request-<...>.md` y su `.json` hermano. Generá el
-> patch-descriptor (JSON que valida contra
-> `state/_schemas/protocols/patch-descriptor.schema.json`) y escribí **solo el
-> JSON** en el `responsePath` que indica el request. Sin markdown ni texto extra."**
+```
+[handoff] ENTER = ya dejé la respuesta · 'skip' = saltar este target · Ctrl+C = cortar todo >
+```
 
-El agente detecta la respuesta, la **valida contra el schema**, y si pasa:
-aplica el test (gates G1–G8 + presupuesto), compila, lo corre y recalcula
-`coverage-delta.json`. Luego sigue con el próximo objetivo. Repite hasta terminar.
+Procedimiento:
+1. En el chat de **Claude Code** (VS Code), pedile:
+   > *"Leé `<state-dir>\_llm\request-<...>.md` y su `.json` hermano. Generá el
+   > patch-descriptor (valida contra `patch-descriptor.schema.json`) y escribí
+   > **solo el JSON** en el `responsePath` que indica el request."*
+2. Volvé a la terminal y presioná **ENTER**. El agente valida la respuesta contra
+   el schema y, si pasa, aplica el test (gates G1–G8 + presupuesto), compila, lo
+   corre y recalcula `coverage-delta.json`; luego sigue con el próximo target.
+   - Si el JSON es inválido, te avisa y volvés a presionar ENTER tras corregir.
+   - **`skip`** salta ese target (lo marca BLOCKED) y avanza.
+   - **Ctrl+C** corta todo el run.
+
+> **Regla de UX (etapa 1):** cada paso es **interventable por el usuario desde la
+> terminal** — el agente no continúa solo ni se queda mudo. En modo API/background
+> (sin TTY) el handoff usa polling con latido + timeout (`COVAGENT_IDE_TIMEOUT`) y
+> se resuelve dejando el `response-*.json` (o vía el endpoint de resume).
 
 ### 5.6 Fin del run
 

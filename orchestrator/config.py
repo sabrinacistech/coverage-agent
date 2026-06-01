@@ -77,3 +77,17 @@ def ide_timeout() -> float:
 def ide_poll_seconds() -> float:
     """Intervalo de polling del archivo de respuesta (testeable)."""
     return float(os.environ.get("COVAGENT_IDE_POLL_SECONDS") or "2")
+
+
+def ide_interactive() -> bool:
+    """Handoff interactivo (el usuario presiona ENTER en la terminal para
+    continuar) vs polling silencioso (API/background). COVAGENT_IDE_INTERACTIVE
+    fuerza 1/0; por defecto se autodetecta según si stdin es una TTY."""
+    ov = os.environ.get("COVAGENT_IDE_INTERACTIVE")
+    if ov is not None:
+        return ov.strip() == "1"
+    try:
+        import sys
+        return bool(sys.stdin) and sys.stdin.isatty()
+    except Exception:
+        return False

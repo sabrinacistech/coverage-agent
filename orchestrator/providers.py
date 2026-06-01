@@ -22,6 +22,8 @@ from typing import Protocol
 
 from . import config
 
+_SKIP_PATCH = {"schemaVersion": 1, "status": "BLOCKED", "blockReason": "skipped by user from terminal"}
+
 
 class ProviderError(RuntimeError):
     """Error del proveedor de LLM (timeout, respuesta ausente, etc.)."""
@@ -38,23 +40,28 @@ class Provider(Protocol):
 
 # ── Proveedor IDE (Claude Code / GitHub Copilot) ──────────────────────────────
 
-_INSTRUCTIONS = (
-    "# Handoff al IDE (Claude Code / GitHub Copilot)\n\n"
-    "Resolvé el pedido de abajo y escribí **solo** el JSON del patch-descriptor "
-    "(sin markdown, sin texto extra) en:\n\n    {response_path}\n\n"
-    "El JSON debe validar contra `state/_schemas/protocols/patch-descriptor.schema.json` "
-    "(un patch, o el contrato BLOCKED). El system prompt y el contexto están en el `.json` "
-    "hermano de este archivo.\n\n"
-    "Rol: **{role}**  ·  cycle: {cycle}\n"
-)
+def _banner(req_json: Path, resp: Path, role: str, cycle: int) -> str:
+    return (
+        "\n" + "=" * 70 + "\n"
+        f"[HANDOFF] Falta generar UN test (rol={role}, cycle={cycle}).\n"
+        "  El test lo genera Claude Code — vos NO escribís JSON.\n\n"
+        "  1) En el chat de Claude Code (VS Code) pedile:\n"
+        f"       \"Resolvé el handoff: leé\n          {req_json}\n"
+        f"        y escribí el patch-descriptor en\n          {resp}\"\n"
+        "  2) Cuando Claude Code deje ese archivo, volvé acá y presioná ENTER.\n"
+        + "=" * 70
+    )
 
 
 class IDEProvider:
-    """Handoff por archivo, bloqueante. Sin API."""
+    """Handoff por archivo, manejado por el USUARIO desde la terminal.
+
+    Interactivo (TTY): muestra instrucciones y espera que el usuario presione
+    ENTER cuando dejó la respuesta (o 'skip' para saltar el target). No se congela
+    en silencio. No-interactivo (API/background): polling con latido + timeout.
+    """
 
     def complete(self, messages: list[dict], *, role: str, state_dir, **kwargs) -> str:
-        from . import generation  # import perezoso: evita ciclo providers↔generation
-
         ide = config.ide_dir(state_dir)
         done = ide / "_done"
         ide.mkdir(parents=True, exist_ok=True)
@@ -74,27 +81,74 @@ class IDEProvider:
             "schema": "state/_schemas/protocols/patch-descriptor.schema.json",
         }, ensure_ascii=False, indent=2), encoding="utf-8")
         req_md.write_text(
-            _INSTRUCTIONS.format(response_path=resp, role=role, cycle=cycle),
+            "# Handoff al IDE (Claude Code / GitHub Copilot)\n\n"
+            f"Resolvé el pedido y escribí **solo** el JSON del patch-descriptor en:\n\n    {resp}\n\n"
+            "Debe validar contra `state/_schemas/protocols/patch-descriptor.schema.json` "
+            "(un patch, o el contrato BLOCKED). El system prompt y el contexto están en el "
+            f"`.json` hermano.\n\nRol: **{role}**  ·  cycle: {cycle}\n",
             encoding="utf-8")
 
-        print(f"\n[IDE-HANDOFF] Pedido para el IDE en:\n  {req_md}\n"
-              f"  Dejá la respuesta (JSON) en:\n  {resp}\n"
-              f"  Esperando hasta {config.ide_timeout():.0f}s...\n",
-              flush=True)
+        print(_banner(req_json, resp, role, cycle), flush=True)
 
-        deadline = time.time() + config.ide_timeout()
+        if config.ide_interactive():
+            return self._await_interactive(req_json, req_md, resp, done)
+        return self._await_polling(req_json, req_md, resp, done)
+
+    # — modo interactivo: el usuario maneja cada paso desde la terminal —
+    def _await_interactive(self, req_json, req_md, resp, done) -> str:
+        while True:
+            try:
+                ans = input(
+                    "[handoff] ENTER = Claude Code ya dejó la respuesta · 'skip' = "
+                    "saltar este target · Ctrl+C = cortar todo > "
+                ).strip().lower()
+            except EOFError:
+                # sin stdin real → caer a polling para no romper
+                return self._await_polling(req_json, req_md, resp, done)
+
+            if ans in ("skip", "s"):
+                print("[handoff] target saltado por el usuario.", flush=True)
+                return json.dumps(_SKIP_PATCH, ensure_ascii=False)
+
+            if not resp.exists():
+                print(f"[handoff] No encuentro la respuesta en:\n  {resp}\n"
+                      "  Creala (el JSON del patch) y volvé a presionar ENTER.", flush=True)
+                continue
+            ok, out = self._try_consume(resp, req_json, req_md, done)
+            if ok:
+                return out
+            print(f"[handoff] La respuesta no es un patch válido: {out}\n"
+                  "  Corregí el JSON y presioná ENTER de nuevo.", flush=True)
+
+    # — modo no-interactivo (API/background): polling con latido + timeout —
+    def _await_polling(self, req_json, req_md, resp, done) -> str:
+        timeout = config.ide_timeout()
         poll = config.ide_poll_seconds()
+        print(f"[handoff] (no-interactivo) esperando {resp.name} hasta {timeout:.0f}s "
+              "(Ctrl+C para cortar)...", flush=True)
+        deadline = time.time() + timeout
+        last_hb = time.time()
         while time.time() < deadline:
             if resp.exists():
-                text = resp.read_text(encoding="utf-8")
-                # Valida ANTES de devolver; deja el rastro archivado.
-                patch = generation.validate_patch(generation.extract_json(text))
-                _archive(done, req_json, req_md, resp)
-                return json.dumps(patch, ensure_ascii=False)
+                ok, out = self._try_consume(resp, req_json, req_md, done)
+                if ok:
+                    return out
+                raise ProviderError(f"respuesta inválida del IDE: {out}")
+            if time.time() - last_hb >= 30:
+                print(f"[handoff] sigo esperando {resp.name}... (Ctrl+C para cortar)", flush=True)
+                last_hb = time.time()
             time.sleep(poll)
+        raise IDETimeout(f"sin respuesta del IDE en {timeout:.0f}s para {req_md.name}")
 
-        raise IDETimeout(
-            f"sin respuesta del IDE en {config.ide_timeout():.0f}s para {req_md.name}")
+    @staticmethod
+    def _try_consume(resp: Path, req_json: Path, req_md: Path, done: Path) -> tuple[bool, str]:
+        from . import generation  # import perezoso: evita ciclo providers↔generation
+        try:
+            patch = generation.validate_patch(generation.extract_json(resp.read_text(encoding="utf-8")))
+        except Exception as exc:  # noqa: BLE001 — devolver el error para re-prompt
+            return False, str(exc)
+        _archive(done, req_json, req_md, resp)
+        return True, json.dumps(patch, ensure_ascii=False)
 
 
 def _read_cycle(state_dir: Path) -> int:
