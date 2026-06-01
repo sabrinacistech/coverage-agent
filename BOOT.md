@@ -209,7 +209,7 @@ Para CADA fase LLM (solo Generation y Repair):
 
 ### Salida final
 
-Reporte generado **determinísticamente** por `tools/python/cycle_report_builder.py` (ex-`reporting-agent`, migrado a Python — no requiere turno LLM). El archivo queda en `state/_summaries/cycle-<N>-report.json` y contiene:
+Reporte generado **determinísticamente** por `tools/python/cycle_report_builder.py` (Python determinista — no requiere turno LLM). El archivo queda en `state/_summaries/cycle-<N>-report.json` y contiene:
 
 - cobertura before/after por clase (derivada de XML),
 - lista de tests generados con sus `evidence-ids`,

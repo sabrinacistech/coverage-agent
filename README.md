@@ -112,6 +112,6 @@ Para ejecutar desde Visual Studio Code, usar la guía [`docs/vscode-copilot-exec
 4. Ejecutar Orchestrator con `mode` y `budget` pegando `BOOT.md` en el chat (o cargándolo desde el agente).
 5. Validar cada test generado con `tools/python/test_linter.py` antes de compilar.
 6. Inspeccionar `state/execution-state.json` y los `state/_summaries/cycle-*.json` para progreso.
-7. Reporte final emitido determinísticamente por `tools/python/cycle_report_builder.py` (migrado desde el ex-`reporting-agent`; no requiere turno LLM).
+7. Reporte final emitido determinísticamente por `tools/python/cycle_report_builder.py` (Python determinista; no requiere turno LLM).
 
 Para detalles operativos del día a día, ver [`docs/developer-guide.md`](docs/developer-guide.md).

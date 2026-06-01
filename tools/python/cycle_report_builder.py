@@ -1,8 +1,8 @@
 """cycle_report_builder.py — deterministic cycle report builder.
 
-Sustituye al ex-agente LLM `reporting-agent.md`. Calcula métricas exactas
-(summary, sutReports, gateStatus, recommendations) a partir de los estados
-de ejecución del ciclo, sin invocar al LLM.
+Calcula métricas exactas (summary, sutReports, gateStatus, recommendations) a
+partir de los estados de ejecución del ciclo, sin invocar al LLM (reporting es
+una fase determinista, no un turno LLM).
 
 Reglas implementadas (idénticas a las del prompt original):
 
@@ -268,8 +268,8 @@ def _load_context_packs(packs_dir: Path | None) -> dict[str, dict]:
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=(
-            "Deterministic cycle report builder. Replaces the LLM reporting-agent. "
-            "Reads sut-results + coverage-delta and emits the cycle report JSON."
+            "Deterministic cycle report builder (reporting is a deterministic phase, "
+            "not an LLM turn). Reads sut-results + coverage-delta and emits the cycle report JSON."
         )
     )
     ap.add_argument("--sut-results", required=True, metavar="PATH",

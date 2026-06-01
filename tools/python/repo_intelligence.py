@@ -1,8 +1,8 @@
 """repo_intelligence.py — deterministic repository intelligence orchestrator.
 
-Sustituye al ex-agente LLM `repository-intelligence-agent.md`. Invoca en orden
-las 5 tools Python determinísticas que materializan la inteligencia estructural
-del repo: stack profile, contratos de símbolos, índice semántico, classification
+Invoca en orden las 5 tools Python determinísticas (fase determinista, no un turno
+LLM) que materializan la inteligencia estructural del repo: stack profile,
+contratos de símbolos, índice semántico, classification
 y dependency graph. Termina validando el state y persistiendo un manifest con
 los hashes de los outputs.
 
@@ -112,8 +112,8 @@ def _write_manifest(state_dir: Path, steps_run: list[dict]) -> Path:
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=(
-            "Deterministic repository intelligence orchestrator. Replaces the "
-            "LLM repository-intelligence-agent. Runs the 5 Python tools that "
+            "Deterministic repository intelligence orchestrator (deterministic "
+            "phase, not an LLM turn). Runs the 5 Python tools that "
             "materialise structural intelligence: stack profile, symbol "
             "contracts, semantic index, classification and dependency graph."
         )

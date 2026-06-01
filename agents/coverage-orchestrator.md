@@ -18,7 +18,7 @@ Coordinar el flujo completo, validar gates G1–G9 entre fases y mantener `state
 ## Salidas
 - `state/execution-state.json`
 - `state/_summaries/cycle-<n>.json`
-- Reporte final delegado a `tools/python/cycle_report_builder.py` (ex-`reporting-agent`, migrado a Python determinístico).
+- Reporte final delegado a `tools/python/cycle_report_builder.py` (Python determinístico).
 
 ## Reglas
 1. El LLM ejecuta **únicamente** los turnos Generation (Phase 8) y Repair-LLM
@@ -108,10 +108,9 @@ Todos los códigos de parada los devuelve `cycle_loop.py` (dueño único del loo
 
 ## Phase → Tool → State
 
-Tabla canónica del trabajo determinista que antes vivía en agentes degradados
-(`planning-agent`, `fixture-agent`, `validation-agent`). Cada fila describe la
-fase, la herramienta Python que la materializa y el estado que produce. El
-orquestador invoca las herramientas; no hay agente LLM intermedio.
+Tabla canónica del trabajo determinista (fases que NO son turnos LLM). Cada fila
+describe la fase, la herramienta Python que la materializa y el estado que produce.
+El orquestador invoca las herramientas; no hay agente LLM intermedio.
 
 | Phase                | Tool (`tools/python/`)            | State producido                                                  |
 |----------------------|-----------------------------------|------------------------------------------------------------------|
@@ -140,8 +139,8 @@ orquestador invoca las herramientas; no hay agente LLM intermedio.
 | Cycle reporting      | `cycle_report_builder.py`         | `state/_summaries/cycle-<N>-report.json` (summary, sutReports, gateStatus, recommendations) |
 | Cycle summary        | `cycle_summarizer.py`             | `state/_summaries/cycle-<N>.json`                                |
 
-Reglas heredadas (antes vivían en los stubs `planning-agent` / `fixture-agent`
-/ `validation-agent`):
+Reglas de planning / fixtures / validation que el orquestador centraliza (hoy en
+Python determinista, sin turnos LLM intermedios):
 
 - **Planning**: excluir targets sin `hasContract` o `hasFixtures`; ordenar por
   ROI (`skills/06-planning/coverage-roi-planning.md`); batch dinámico por

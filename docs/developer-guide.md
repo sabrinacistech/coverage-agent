@@ -137,7 +137,7 @@ Responder en el chat con `ok` (o ajustes) para avanzar. A partir del segundo cic
 
 ## 8. Lectura del reporte final
 
-`cycle_report_builder.py` (ex-`reporting-agent`, Python determinístico) deja:
+`cycle_report_builder.py` (Python determinístico) deja:
 - `state/_summaries/cycle-<n>.json` por ciclo.
 - Reporte final con cobertura antes/después (derivada de los XML JaCoCo reales).
 - Lista de tests generados con sus `evidence-id`.

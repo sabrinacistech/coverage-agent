@@ -5,7 +5,7 @@ ciclo en la que actúan. Las fases puramente deterministas (discovery,
 classification, dependency graph, symbol contract, stack profile, planning,
 fixtures, validation, repo intelligence, mutation hardening, reporting)
 **no tienen agente LLM**: el orquestador invoca directamente `tools/python/*`
-y consume `state/*.json`. Los stubs históricos viven en `_archive/`.
+y consume `state/*.json`.
 
 ## Mapa de fases
 
@@ -44,25 +44,5 @@ y consume `state/*.json`. Los stubs históricos viven en `_archive/`.
 | `test-body-agent.md`               | LLM      | Emite JSON-only patch descriptor. Prompt mínimo (≤80 líneas tras P3).                  |
 | `repair-agent.md`                  | LLM (sólo escalados) | Razonamiento sobre el subset escalado por el driver. No carga ni matchea reglas — eso lo hace `repair_rules_compiler.py` + `ast_patcher.py`. |
 
-## `_archive/`
-
-Stubs DEPRECATED. Sus responsabilidades fueron absorbidas por el pre-stage
-Python (`run_pipeline.py` + wrappers determinísticos). Conservados solo para
-trazabilidad histórica; no invocar.
-
-| Stub archivado                       | Reemplazo activo                                                |
-|--------------------------------------|------------------------------------------------------------------|
-| Discovery stub                       | `tools/python/run_pipeline.py` (steps 1–3)                       |
-| Classification stub                  | `tools/python/classification_analyzer.py`                        |
-| Dependency graph stub                | `tools/python/dependency_graph_extractor.py`                     |
-| Symbol contract stub                 | `tools/python/bytecode_scanner.py` + `source_symbol_enricher.py` |
-| Stack profile stub                   | `tools/python/stack_profile_detector.py`                         |
-| Planning stub                        | `tools/python/coverage_planner.py` + sección "Phase → Tool → State" en `coverage-orchestrator.md` |
-| Fixture stub                         | `tools/python/fixture_catalog_builder.py`                        |
-| Validation stub                      | `tools/python/narrow_test_runner.py` + `compile_error_parser.py` |
-| `repository-intelligence-agent.md`   | `tools/python/repo_intelligence.py` (wrapper de los 5 sub-pasos determinísticos) |
-| `mutation-agent.md`                  | `tools/python/mutation_runner.py` (PIT runner determinístico, sin LLM) |
-| `reporting-agent.md`                 | `tools/python/cycle_report_builder.py` (cálculo aritmético + plantillas, sin LLM) |
-
-> Los archivos físicos correspondientes están en `agents/_archive/` con el
-> nombre histórico `<phase>-agent.md`.
+> El trabajo de las fases deterministas lo hacen los módulos `tools/python/*`
+> listados en la tabla "Mapa de fases"; no hay agentes LLM para esas fases.

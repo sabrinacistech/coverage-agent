@@ -1,8 +1,8 @@
 """mutation_runner.py — deterministic PIT mutation runner.
 
-Sustituye al ex-agente LLM `mutation-agent.md`. Solo se invoca cuando el ciclo
-arranca en modo `mutation-hardening`. Cero síntesis: verificación de plugin,
-ejecución del goal de Maven, parseo de XML y agregación por método.
+Solo se invoca cuando el ciclo arranca en modo `mutation-hardening` (fase
+determinista, no un turno LLM). Cero síntesis: verificación de plugin, ejecución
+del goal de Maven, parseo de XML y agregación por método.
 
 Procedimiento (idéntico al prompt original):
 
@@ -214,7 +214,7 @@ def build_intelligence(
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=(
-            "Deterministic PIT mutation runner. Replaces the LLM mutation-agent. "
+            "Deterministic PIT mutation runner (deterministic phase, not an LLM turn). "
             "Verifies pitest-maven, runs PIT narrow, parses mutations.xml and "
             "emits state/mutation-intelligence.json with SURVIVED mutants "
             "grouped by method."
@@ -250,7 +250,7 @@ def main() -> int:
                 "reason": "BLOCKED_NO_PIT",
                 "detail": (
                     f"org.pitest:pitest-maven not declared in {pom_path}. "
-                    "Aborting per mutation-agent contract (no auto-add)."
+                    "Aborting per the no-auto-add policy (PIT plugin must be present)."
                 ),
             }],
         }
