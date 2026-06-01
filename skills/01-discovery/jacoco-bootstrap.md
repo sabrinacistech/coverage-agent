@@ -1,19 +1,24 @@
 # JaCoCo Bootstrap
 
 ## Objetivo
-Garantizar que existe un reporte JaCoCo XML utilizable sin modificar el `pom.xml`/`build.gradle` salvo instrucción explícita.
+Garantizar dos cosas distintas (ver `docs/archetype-policy.md` §"dos propósitos"):
+1. **Medición del agente:** un `jacoco.xml` utilizable en cada ciclo, idealmente
+   **sin modificar** el `pom.xml` (bootstrap CLI).
+2. **Gate de despliegue (OpenShift):** que JaCoCo quede **en el build committeado**
+   (heredado o plugin en POM) para que el pipeline gatee **branch ≥ 80%**. El
+   bootstrap CLI NO cubre esto.
 
 ## Decisión
 
 Dado `state/archetype-profile.json` y `state/build-tool-contract.json`:
 
-| Caso | Acción |
-|------|--------|
-| JaCoCo ya configurado en POM/Gradle | Usar configuración existente. NO duplicar. |
-| `archetype: java-21` (BGBA) | NO agregar plugin; el parent lo provee. Usar `mvn jacoco:report` o `mvn test` según binding. |
-| `archetype: java-8` (BGBA) sin JaCoCo | Bootstrap CLI: ejecutar agente y reporte sin tocar POM. |
-| Parent no BGBA, sin JaCoCo | Bootstrap CLI. |
-| Reporte XML inaccesible tras build | Marcar `BLOCKED_NO_COVERAGE` y abortar el ciclo. |
+| Caso | Medición del agente | Gate de despliegue (POM) |
+|------|---------------------|--------------------------|
+| JaCoCo ya configurado en POM/Gradle | Usar la config existente. NO duplicar. | Ya cubierto. |
+| `archetype: java-21` (BGBA) | Heredado (`mvn jacoco:report` / `mvn test`); si **no** se detecta, **bootstrap CLI** (medir es mandatorio). | **Heredado del parent — NO agregar plugin** (ni aunque no se detecte). |
+| `archetype: java-8` (BGBA) sin JaCoCo | Bootstrap CLI (sin tocar POM). | **Agregar el plugin al POM (REQUERIDO)** — bloque canónico de `docs/archetype-policy.md`. |
+| Parent no BGBA, sin JaCoCo | Bootstrap CLI. | Agregar el plugin al POM (bloque canónico) para poder desplegar. |
+| Reporte XML inaccesible tras build | Marcar `BLOCKED_NO_COVERAGE` y abortar el ciclo. | — |
 
 ## Bootstrap CLI (sin modificar POM)
 
@@ -39,9 +44,13 @@ Gradle equivalente:
 ```
 
 ## Reglas
-- Nunca modificar el POM/Gradle salvo instrucción explícita del usuario.
-- Si el archetype es `java-21`, prohibido agregar `jacoco-maven-plugin` (ya viene heredado).
-- Si el archetype es `java-8` y el usuario aprueba modificar POM, agregar bloque mínimo (ver `archetype-policy.md`).
+- El agente **nunca** toca `src/main`. La **única** modificación permitida en la app
+  es agregar el `jacoco-maven-plugin` al POM cuando el arquetipo lo requiere (abajo).
+- `archetype: java-21` ⇒ **prohibido** agregar `jacoco-maven-plugin` (heredado del parent).
+- `archetype: java-8` (o parent no-BGBA) **sin** JaCoCo ⇒ **agregar el plugin al POM
+  (requerido para el gate de OpenShift)** usando el **bloque canónico** de
+  `docs/archetype-policy.md` (versión 0.8.13 + `check` branch ≥ 0.80). El bootstrap
+  CLI cubre solo la medición local del agente, no el despliegue.
 - Capturar la ruta del XML en `state/build-tool-contract.json#jacoco.reportXml` para que `coverage-delta-analysis` la consuma.
 
 ## Validación

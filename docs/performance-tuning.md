@@ -36,7 +36,7 @@ Esto produce `build-tool-contract.json`, `archetype-profile.json`, `generated-co
 - `clean` solo si se cambian dependencias.
 
 ### 3. Batches reales
-Tamaños por tipo de SUT (ver `skills/06-planning/batch-planning.md`):
+Tamaños por tipo de SUT (ver `skills/06-planning/dynamic-batch-sizing.md`):
 
 | Tipo | Batch máx. |
 |------|------------|

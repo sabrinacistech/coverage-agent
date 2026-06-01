@@ -1,5 +1,10 @@
 # Narrow Test Runner
 
+> **DETERMINISTA — no es un turno del LLM.** Esta fase la ejecuta el pipeline
+> Python (`tools/python/narrow_test_runner.py`); este skill documenta el comportamiento, el
+> LLM no lo corre. Ver `skills/00-runtime/02-phase-contracts.md`.
+
+
 ## Objetivo
 Ejecutar el menor scope necesario para validar el batch actual y producir delta de cobertura.
 

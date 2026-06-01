@@ -1,5 +1,10 @@
 # Coverage Tool Detection
 
+> **DETERMINISTA — no es un turno del LLM.** Esta fase la ejecuta el pipeline
+> Python (`tools/python/pom_parser.py / jacoco_parser.py`); este skill documenta el comportamiento, el
+> LLM no lo corre. Ver `skills/00-runtime/02-phase-contracts.md`.
+
+
 ## Procedimiento
 1. Buscar `org.jacoco:jacoco-maven-plugin` en POM (raíz o módulo) o `jacoco` plugin en Gradle.
 2. Si configurado: registrar `reportXml` (default `target/site/jacoco/jacoco.xml`) y `execFile`.

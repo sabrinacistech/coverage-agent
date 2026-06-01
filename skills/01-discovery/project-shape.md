@@ -1,5 +1,10 @@
 # Project Shape
 
+> **DETERMINISTA — no es un turno del LLM.** Esta fase la ejecuta el pipeline
+> Python (`tools/python/pom_parser.py`); este skill documenta el comportamiento, el
+> LLM no lo corre. Ver `skills/00-runtime/02-phase-contracts.md`.
+
+
 ## Objetivo
 Inventariar la forma física del repo: módulos, raíces de source/test, sources generadas y outputs de build.
 

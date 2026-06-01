@@ -1,5 +1,10 @@
 # Retry Policy
 
+> **DETERMINISTA — no es un turno del LLM.** Esta fase la ejecuta el pipeline
+> Python (`tools/python/gate_runner.py (G7/G8)`); este skill documenta el comportamiento, el
+> LLM no lo corre. Ver `skills/00-runtime/02-phase-contracts.md`.
+
+
 Los thresholds están codificados en
 [`tools/python/gate_runner.py`](../../tools/python/gate_runner.py) — esta doc
 sólo explica el "por qué". Cualquier cambio numérico se hace en el código.

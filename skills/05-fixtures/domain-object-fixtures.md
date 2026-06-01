@@ -1,5 +1,10 @@
 # Domain Object Fixtures
 
+> **DETERMINISTA — no es un turno del LLM.** Esta fase la ejecuta el pipeline
+> Python (`tools/python/fixture_catalog_builder.py`); este skill documenta el comportamiento, el
+> LLM no lo corre. Ver `skills/00-runtime/02-phase-contracts.md`.
+
+
 ## Objetivo
 Fixtures para entidades/agregados con invariantes (no DTOs).
 

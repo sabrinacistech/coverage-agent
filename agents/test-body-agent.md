@@ -76,6 +76,10 @@ Adicionalmente, específicas de este agente (constraints estructurales del patch
 `assertThrows`); no duplicar los del template. `fields`: SUT con `@InjectMocks`
 cuando aplique; cada dependencia `instantiationStrategy == mock` → `@Mock`.
 
+Para la selección de API de Mockito (runner JUnit 4/5, `@InjectMocks` vs
+instanciación explícita, stubbing de `void`, `ArgumentCaptor`, `any(Type.class)`)
+seguir [`skills/07-generation/mockito-strategy.md`](../skills/07-generation/mockito-strategy.md).
+
 ## Estándares de calidad (skills/11-quality) — bloqueantes
 
 Cada `methods[]` debe cumplir los siguientes contratos. Una violación implica

@@ -40,8 +40,13 @@ Fase 0 (análisis)  →  ciclo:  [genera pedido] → (Claude Code responde) → 
 | **VS Code + Claude Code** | actual | resolver el handoff (el "LLM" de etapa 1) |
 | **git** | actual | clonar repos / versionar |
 
-El repo Java objetivo debe tener el **plugin JaCoCo** configurado en su `pom.xml`
-(para producir `jacoco.xml`).
+El repo Java objetivo necesita JaCoCo con **dos propósitos**: la *medición* del
+agente (por línea de comandos, sin tocar el POM) y el *gate de despliegue* (JaCoCo
+en el build → según arquetipo: heredado en java-21, **plugin en POM requerido** en
+java-8). Gobernado por
+[`docs/archetype-policy.md`](archetype-policy.md) y
+[`skills/01-discovery/jacoco-bootstrap.md`](../skills/01-discovery/jacoco-bootstrap.md)
+(ver paso 5.1).
 
 ---
 
@@ -97,14 +102,50 @@ Ejemplo con `multi-clusters` (módulo `cluster-status-service`). Adaptá las rut
 
 ### 5.1 Preparar el repo objetivo (build + JaCoCo)
 
-El planner necesita datos de cobertura para saber **qué falta cubrir**. Generalos
-corriendo los tests con JaCoCo en el repo objetivo:
+JaCoCo cumple **dos propósitos distintos** (ver
+[`docs/archetype-policy.md`](archetype-policy.md) §"dos propósitos"):
+
+1. **Medición del agente:** el `jacoco.xml` que la Fase 0 usa para saber qué falta
+   cubrir. Se genera por **línea de comandos sin tocar el POM** (opción b).
+2. **Gate de despliegue (OpenShift):** el pipeline corre JaCoCo y **bloquea el deploy
+   si el branch coverage < 80%**. Para eso JaCoCo debe estar **en el build
+   committeado** → según el arquetipo (opción c).
+
+> ⚠️ El agente **nunca** toca `src/main`. La **única** modificación permitida en la
+> app es agregar el plugin de JaCoCo al `pom.xml` cuando el arquetipo lo requiere.
+
+**a) Clonar el repo objetivo**
 
 ```powershell
 git clone https://github.com/sabrinacistech/multi-clusters.git C:\repo\multi-clusters
 cd C:\repo\multi-clusters\cluster-status-service
-mvn -q clean test          # produce target\classes y target\site\jacoco\jacoco.xml
 ```
+
+**b) Generar el `jacoco.xml` para el agente, SIN tocar el POM** — corré el plugin por
+línea de comandos (bootstrap CLI). Sirve para la **medición** de la Fase 0:
+
+```powershell
+mvn -q -DfailIfNoTests=false `
+  org.jacoco:jacoco-maven-plugin:0.8.13:prepare-agent `
+  test `
+  org.jacoco:jacoco-maven-plugin:0.8.13:report
+# → target\site\jacoco\jacoco.xml (sin cambios en el pom.xml)
+```
+
+(Para Gradle, ver el equivalente en `skills/01-discovery/jacoco-bootstrap.md`.)
+
+**c) Asegurar JaCoCo en el POM para el despliegue — SEGÚN EL ARQUETIPO** (ver
+[`skills/01-discovery/archetype-detection.md`](../skills/01-discovery/archetype-detection.md)):
+
+| Arquetipo | Acción en el POM |
+|---|---|
+| **java-21** (`bgba-parent-paas-java-21`) | **Nada** — JaCoCo heredado del parent; prohibido agregarlo. |
+| **java-8** (`bgba-parent-paas-java-8`) / sin herencia | **Agregar el plugin (requerido)** para pasar el gate de OpenShift. |
+
+Para el caso java-8, usá el **bloque canónico** (versión 0.8.13 + `report` + `check`
+de branch ≥ 0.80) definido —fuente única— en
+[`docs/archetype-policy.md`](archetype-policy.md) §"Bloque JaCoCo canónico". Es la
+**única** modificación permitida en la app; commiteala en el repo objetivo.
 
 > Si no hay `jacoco.xml`, la Fase 0 produce un `batch-plan` vacío
 > ("no uncovered targets") y no hay nada que generar. Ver Troubleshooting.
@@ -237,7 +278,7 @@ Presupuesto: en `execution-state.json` (ver 5.3).
 
 | Síntoma | Causa / solución |
 |---|---|
-| `batch-plan` vacío, "no uncovered targets" | Falta JaCoCo. Corré `mvn clean test` en el repo objetivo y pasá `--jacoco-xml` a la Fase 0. |
+| `batch-plan` vacío, "no uncovered targets" | Falta `jacoco.xml`. Generalo por CLI sin tocar el POM (paso 5.1b) y pasá `--jacoco-xml` a la Fase 0. Ver `skills/01-discovery/jacoco-bootstrap.md`. |
 | `Python 3.9+ not found` / errores de langgraph | Usá **Python 3.12** para el venv (`py -3.12 -m venv .venv`). |
 | `Maven not found` | Agregá Maven al PATH (o `mvn.cmd` en Windows). |
 | El ciclo "se cuelga" | Está esperando el **handoff**: resolvé el `request-*.md` con Claude Code, o subí/ bajá `COVAGENT_IDE_TIMEOUT`. |

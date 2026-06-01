@@ -59,12 +59,16 @@ void should_throw_when_coupon_is_null() {
 La cobertura de ramas (branch coverage) es más valiosa que la de líneas.
 Un `if/else` sin cubrir ambas ramas da false security.
 
+> El bloque **canónico** del POM (versión + `report` + `check` 0.80) vive en
+> [`docs/archetype-policy.md`](../../docs/archetype-policy.md) §"Bloque JaCoCo
+> canónico". Usá ese; el de abajo es ilustrativo del umbral de branch coverage.
+
 ```xml
 <!-- pom.xml: configurar JaCoCo con umbral de branch coverage -->
 <plugin>
     <groupId>org.jacoco</groupId>
     <artifactId>jacoco-maven-plugin</artifactId>
-    <version>0.8.11</version>
+    <version>0.8.13</version>
     <executions>
         <execution>
             <id>prepare-agent</id>

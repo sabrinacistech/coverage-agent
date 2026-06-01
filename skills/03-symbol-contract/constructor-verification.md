@@ -1,5 +1,10 @@
 # Constructor Verification
 
+> **DETERMINISTA — no es un turno del LLM.** Esta fase la ejecuta el pipeline
+> Python (`tools/python/bytecode_scanner.py + source_symbol_enricher.py`); este skill documenta el comportamiento, el
+> LLM no lo corre. Ver `skills/00-runtime/02-phase-contracts.md`.
+
+
 ## Objetivo
 Registrar constructores reales de cada tipo usado por el test. Soporta gate **G2**.
 

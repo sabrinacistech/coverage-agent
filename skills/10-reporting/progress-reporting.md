@@ -1,5 +1,10 @@
 # Progress Reporting
 
+> **DETERMINISTA — no es un turno del LLM.** Esta fase la ejecuta el pipeline
+> Python (`tools/python/cycle_summarizer.py`); este skill documenta el comportamiento, el
+> LLM no lo corre. Ver `skills/00-runtime/02-phase-contracts.md`.
+
+
 ## Frecuencia
 Al final de cada ciclo el Orchestrator emite un snapshot.
 

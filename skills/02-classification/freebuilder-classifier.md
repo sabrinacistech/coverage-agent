@@ -1,5 +1,10 @@
 # FreeBuilder Classifier
 
+> **DETERMINISTA — no es un turno del LLM.** Esta fase la ejecuta el pipeline
+> Python (`tools/python/classification_analyzer.py`); este skill documenta el comportamiento, el
+> LLM no lo corre. Ver `skills/00-runtime/02-phase-contracts.md`.
+
+
 ## Objetivo
 Marcar tipos FreeBuilder y su estrategia de instanciación admisible para el contrato.
 

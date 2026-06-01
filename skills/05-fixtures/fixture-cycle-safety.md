@@ -1,5 +1,10 @@
 # Fixture Cycle Safety (Skill — Phase 5)
 
+> **DETERMINISTA — no es un turno del LLM.** Esta fase la ejecuta el pipeline
+> Python (`tools/python/fixture_catalog_builder.py`); este skill documenta el comportamiento, el
+> LLM no lo corre. Ver `skills/00-runtime/02-phase-contracts.md`.
+
+
 ## Objetivo
 
 Detectar y resolver dependencias circulares en la construcción de fixtures antes

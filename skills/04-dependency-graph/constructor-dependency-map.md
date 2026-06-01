@@ -1,5 +1,10 @@
 # Constructor Dependency Map
 
+> **DETERMINISTA — no es un turno del LLM.** Esta fase la ejecuta el pipeline
+> Python (`tools/python/dependency_graph_extractor.py`); este skill documenta el comportamiento, el
+> LLM no lo corre. Ver `skills/00-runtime/02-phase-contracts.md`.
+
+
 ## Objetivo
 Mapear inyecciones reales por SUT en `state/dependency-graph.json`.
 

@@ -1,5 +1,10 @@
 # DTO Fixtures
 
+> **DETERMINISTA — no es un turno del LLM.** Esta fase la ejecuta el pipeline
+> Python (`tools/python/fixture_catalog_builder.py`); este skill documenta el comportamiento, el
+> LLM no lo corre. Ver `skills/00-runtime/02-phase-contracts.md`.
+
+
 ## Reglas
 - DTOs Lombok `@Data`/`@Builder`: fixture vía builder verificado.
 - DTOs Java records (si Java >= 14, fuera de modo Java 8): fixture vía constructor canónico.

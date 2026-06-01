@@ -1,5 +1,10 @@
 # Framework Risk Classifier
 
+> **DETERMINISTA — no es un turno del LLM.** Esta fase la ejecuta el pipeline
+> Python (`tools/python/classification_analyzer.py`); este skill documenta el comportamiento, el
+> LLM no lo corre. Ver `skills/00-runtime/02-phase-contracts.md`.
+
+
 ## Objetivo
 Etiquetar clases que requieren estrategia especial por framework, antes de generar.
 

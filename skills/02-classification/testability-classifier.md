@@ -1,5 +1,10 @@
 # Testability Classifier
 
+> **DETERMINISTA — no es un turno del LLM.** Esta fase la ejecuta el pipeline
+> Python (`tools/python/classification_analyzer.py`); este skill documenta el comportamiento, el
+> LLM no lo corre. Ver `skills/00-runtime/02-phase-contracts.md`.
+
+
 ## Objetivo
 Asignar score y categoría a cada clase productiva. Alimenta `state/classification-index.json`.
 

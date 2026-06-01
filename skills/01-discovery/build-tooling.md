@@ -1,5 +1,10 @@
 # Build Tooling Detection
 
+> **DETERMINISTA — no es un turno del LLM.** Esta fase la ejecuta el pipeline
+> Python (`tools/python/pom_parser.py`); este skill documenta el comportamiento, el
+> LLM no lo corre. Ver `skills/00-runtime/02-phase-contracts.md`.
+
+
 ## Procedimiento
 1. Si existe `pom.xml` ⇒ `tool: maven`. Verificar wrapper `mvnw`.
 2. Si existe `build.gradle` / `build.gradle.kts` ⇒ `tool: gradle`. Verificar `gradlew`.

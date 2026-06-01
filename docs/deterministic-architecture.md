@@ -160,6 +160,6 @@ state/context-packs/  ← insumos mínimos para agentes LLM
 | **Inicio de ciclo** | `python tools/python/budget_enforcer.py tick --state state/execution-state.json` | Incrementa `cycle` y estampa `cycleStartedAt` antes de iniciar el trabajo del ciclo. |
 | **Fin de ciclo** | `python tools/python/budget_enforcer.py reset --state state/execution-state.json` | Limpia `cycleStartedAt` al cerrar el ciclo (éxito o fallo controlado). |
 
-`check` evalúa dos invariantes: `cycle < budget.maxCycles` y `(now - cycleStartedAt) < budget.maxMinutesPerCycle`. Si cualquiera se viola, rc=2 y el orchestrator **MUST** interrumpir; reintentar sin abortar viola G8.
+`check` evalúa dos invariantes (ver `budget_enforcer.check`): `cycle <= budget.maxCycles` (bloquea cuando `cycle > maxCycles`, dado que `cycle_loop` tickea ANTES de chequear, corren los ciclos `1..maxCycles` y se rechaza el `maxCycles+1`) y `(now - cycleStartedAt) <= budget.maxMinutesPerCycle`. Si cualquiera se viola, rc=2 y el orchestrator **MUST** interrumpir; reintentar sin abortar viola G8.
 
 `run_pipeline.py` y `run.py` son del pre-stage y NO invocan estos hooks — corren una sola vez. Son ciclos de Phase 6 (repair) y multi-batch generation los que requieren enforcement.

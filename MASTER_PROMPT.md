@@ -149,7 +149,7 @@ y dónde aparece en `handoff-summary.json`. No describen turnos del agente.
 
 **Generated code**: clases bajo `target/generated-sources/**` y paquetes declarados en `cxf-codegen-plugin` / `openapi-generator-maven-plugin` no son SUT. Se usan como tipos auxiliares previa validación contra `generated-code-index.json`.
 
-**JaCoCo bootstrap**: ver `skills/01-discovery/jacoco-bootstrap.md`. Nunca modificar POM salvo autorización explícita.
+**JaCoCo bootstrap**: ver `skills/01-discovery/jacoco-bootstrap.md` y `docs/archetype-policy.md`. Dos propósitos: medición del agente (bootstrap CLI, sin tocar el POM) y gate de despliegue (JaCoCo en el build). Por arquetipo: java-21 heredado (prohibido tocar el POM); java-8 / sin herencia ⇒ agregar el plugin al POM es **requerido** (única modificación permitida en la app).
 
 ### 8. Generation
 Consumir `state/context-packs/<fqcn>.json` producido por `tools/python/context_pack_builder.py` y generar el patch descriptor JSON estructurado. La generación se divide en dos agentes secuenciales:

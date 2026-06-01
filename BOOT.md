@@ -26,14 +26,14 @@ Actuá como el **Coverage Orchestrator** definido en `MASTER_PROMPT.md` y `agent
 ```yaml
 repo:           <ruta o "workspace actual">
 modules:        <"all" | lista de módulos Maven/Gradle>
-mode:           <coverage | branch-coverage | mutation-hardening>
+mode:           <coverage | branch-coverage | mutation-hardening>   # semántica: skills/00-runtime/03-runtime-mode.md
 includeFqcn:    <regex, ej. '^com\.acme\.'>
 budget:
-  maxCycles:          10
+  maxCycles:          20   # default de budget_enforcer.DEFAULT_MAX_CYCLES
   maxMinutesPerCycle: 10
-coverageGoal:
-  lines:    0.80      # opcional
-  branches: 0.60      # opcional
+coverageGoal:              # meta LOCAL del agente (cuándo parar), distinta del
+  lines:    0.80           # gate de despliegue OpenShift (branch >= 0.80, ver
+  branches: 0.60           # docs/archetype-policy.md). Opcionales.
 writeTests:    false  # true = escribe en src/test/java; false = solo propone
 ```
 

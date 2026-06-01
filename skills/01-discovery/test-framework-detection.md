@@ -1,5 +1,10 @@
 # Test Framework Detection
 
+> **DETERMINISTA — no es un turno del LLM.** Esta fase la ejecuta el pipeline
+> Python (`tools/python/stack_profile_detector.py`); este skill documenta el comportamiento, el
+> LLM no lo corre. Ver `skills/00-runtime/02-phase-contracts.md`.
+
+
 Alimenta `stack-profile.json`. Bloqueante para G5.
 
 ## Procedimiento

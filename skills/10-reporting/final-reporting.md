@@ -1,5 +1,10 @@
 # Final Reporting
 
+> **DETERMINISTA — no es un turno del LLM.** Esta fase la ejecuta el pipeline
+> Python (`tools/python/cycle_report_builder.py / cycle_summarizer.py`); este skill documenta el comportamiento, el
+> LLM no lo corre. Ver `skills/00-runtime/02-phase-contracts.md`.
+
+
 ## Objetivo
 Emitir el reporte de cierre con evidencia citable y reproducible.
 
