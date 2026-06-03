@@ -64,10 +64,17 @@ Coordinar el flujo completo, validar gates G1–G9 entre fases y mantener `state
    nunca llega al LLM, cero Java escrito), (3) corre el comando del ciclo, (4) deriva y escribe los DOS campos que `gate_g8` lee
    (`consecutiveZeroDeltaCycles`, `compileFailRateWindow`) desde
    `coverage-delta.json` y el exit code, (5) `reset` de `cycleStartedAt`, (6)
-   evalúa `gate_g8` y para con `rc=5` ante un stall. **El comando envuelto debe
-   producir `state/coverage-delta.json`** (vía `narrow_test_runner` + JaCoCo);
-   sin él, `cycle_loop` asume delta cero y G8 dispararía un falso stall. El
-   `--auto-repair` de `gate_runner` vive *dentro* de ese comando de ciclo.
+   evalúa `gate_g8` y para con `rc=5` ante un stall. `consecutiveZeroDeltaCycles`
+   es tri-estado (M3): +1 sólo cuando el ciclo MIDIÓ cobertura y quedó plana;
+   reset a 0 si midió progreso; PRESERVADO si el ciclo no produjo un
+   `coverage-delta.json` fresco (skip/block estructural, baseline ausente o
+   compile-fail). Un *stale-guard* borra `coverage-delta.json` antes de cada
+   ciclo (en `cycle_loop.run_loop` y en el grafo LangGraph `orchestrator/graph.py`),
+   así "no medido" nunca se confunde con un delta previo. **El comando envuelto
+   debería producir `state/coverage-delta.json`** (vía `narrow_test_runner` +
+   JaCoCo) para que un ciclo plano real se cuente; si no lo produce, el ciclo se
+   PRESERVA (no dispara un falso stall, a diferencia del comportamiento previo).
+   El `--auto-repair` de `gate_runner` vive *dentro* de ese comando de ciclo.
 6. Escritura atómica en `state/` (`*.tmp` + rename); actualizar
    `checkpoints[]` con SHA-256.
 7. Particionar trabajo paralelo por SUT (nunca dos agentes sobre el mismo

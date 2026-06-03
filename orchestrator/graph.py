@@ -63,13 +63,27 @@ def cycle_node(state: GraphState) -> dict:
         budget_enforcer.reset(sp)
         return {"status": "BUDGET", "stop_rc": RC_BUDGET}
 
+    # Stale-guard (audit M3, idéntico a cycle_loop.run_loop): borrar el
+    # coverage-delta.json previo ANTES del ciclo, así un ciclo que NO mide
+    # (skip/block estructural o baseline ausente) no re-lee el delta del ciclo
+    # anterior y no dispara un falso stall G8.
+    delta_path = sd / "coverage-delta.json"
+    try:
+        delta_path.unlink()
+    except FileNotFoundError:
+        pass
+
     # 3. trabajo del ciclo (gen→patch→validación). Reescribe coverage-delta.json.
     cmd_rc = nodes.run_cycle_work(sd, Path(state["repo"]))
 
-    # 4. registrar resultado (los dos campos que lee G8), derivado igual.
+    # 4. registrar resultado (los dos campos que lee G8), tri-estado igual a M3:
+    #    solo un ciclo MEDIDO y plano cuenta como zero-delta; "no medido" preserva.
     delta = cycle_loop._read_cycle_delta(sd)
-    zero_delta = (delta is None) or (delta[0] == 0 and delta[1] == 0)
     compile_failed = cmd_rc not in (0, done)
+    if delta is None:
+        zero_delta: bool | None = None
+    else:
+        zero_delta = (delta[0] == 0 and delta[1] == 0)
     cycle_loop.record_outcome(sp, zero_delta=zero_delta, compile_failed=compile_failed)
 
     # 5. reset del cronómetro del ciclo.

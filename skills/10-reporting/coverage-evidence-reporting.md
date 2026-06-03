@@ -10,7 +10,7 @@ Garantizar que cada afirmación de cobertura del reporte sea reproducible.
 
 ## Reglas
 - Adjuntar al reporte:
-  - `target/site/jacoco-baseline/jacoco.xml`
+  - `state/jacoco-baseline.xml` (baseline `--before`, snapshot de `run_pipeline.py`)
   - `target/site/jacoco-batch-<n>/jacoco.xml` (cada ciclo)
   - `state/coverage-delta.json`
 - Cada tabla del reporte debe citar el archivo y la coordenada (`<class>/<method>`) usados.

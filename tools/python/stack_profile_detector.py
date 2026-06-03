@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -144,6 +145,44 @@ def _namespace_from_sb_version(ver: str | None) -> str:
     if not m:
         return "unknown"
     return "jakarta" if int(m.group(1)) >= 3 else "javax"
+
+
+def _classpath_versions(mod_dir: Path) -> dict[str, str]:
+    """Map artifactId -> version from a module's resolved classpath dump.
+
+    classpath_resolver.py writes ``<module>/target/cp.txt`` (via
+    ``mvn dependency:build-classpath``) before this detector runs. Each entry is
+    an absolute path into the local Maven repo following the
+    ``<artifactId>/<version>/<artifactId>-<version>.jar`` layout, so the version
+    is the jar's parent directory and the artifactId its grandparent.
+
+    Returns ``{}`` when cp.txt is absent (offline / Gradle / build-classpath
+    failed) — callers then leave versions as ``None`` ("unknown"), i.e. the
+    previous behaviour is preserved. Deterministic: no network, no guessing.
+    """
+    cp = mod_dir / "target" / "cp.txt"
+    if not cp.is_file():
+        return {}
+    try:
+        raw = cp.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    entries: list[str] = []
+    for line in raw.splitlines():
+        entries.extend(line.split(os.pathsep))  # never split on ':' (Windows drive letters)
+    out: dict[str, str] = {}
+    for entry in entries:
+        entry = entry.strip()
+        if not entry or not entry.lower().endswith(".jar"):
+            continue
+        p = Path(entry)
+        version = p.parent.name
+        artifact = p.parent.parent.name
+        # Version dirs start with a digit; guards against non-m2-layout jars
+        # (e.g. a reactor module's target/*.jar where parent is 'target').
+        if artifact and version[:1].isdigit():
+            out.setdefault(artifact, version)
+    return out
 
 
 def _java_from_pom(root: etree._Element) -> str | None:
@@ -269,6 +308,30 @@ class _ModuleProfile:
         if ns != "unknown":
             self.namespace = ns
             self.spring_boot_version = resolved
+
+    def fill_versions_from_classpath(self, cp_map: dict[str, str]) -> None:
+        """Fill framework versions the POM did not pin, from the resolved
+        classpath (cp.txt). Only fills ``None`` fields — an explicit POM version
+        always wins. Common when junit/mockito/assertj are managed transitively
+        by the Spring Boot BOM (no explicit <version>) and would otherwise stay
+        "unknown" and trip gate G5.
+        """
+        if not cp_map:
+            return
+        if self.junit_version is None:
+            self.junit_version = (
+                cp_map.get("junit-jupiter")
+                or cp_map.get("junit-jupiter-api")
+                or cp_map.get("junit")
+            )
+        if self.mockito_version is None:
+            self.mockito_version = (
+                cp_map.get("mockito-core") or cp_map.get("mockito-junit-jupiter")
+            )
+        if self.assertj_version is None:
+            self.assertj_version = cp_map.get("assertj-core")
+        if self.hamcrest_version is None:
+            self.hamcrest_version = cp_map.get("hamcrest-core") or cp_map.get("hamcrest")
 
     def inherit_from(self, root_profile: "_ModuleProfile") -> None:
         """Inherit settings from root POM profile where not locally set."""
@@ -431,6 +494,10 @@ def detect(repo: Path) -> dict:
     root_profile = _ModuleProfile(str(repo.resolve()))
     root_profile.absorb_deps(root_el)
     root_profile.absorb_parent(root_el)
+    # Fill framework versions the POM left unpinned (transitive/BOM) from the
+    # resolved classpath written by classpath_resolver (step 4).
+    root_cp = _classpath_versions(repo)
+    root_profile.fill_versions_from_classpath(root_cp)
 
     java_ver = _resolve_property(root_el, _java_from_pom(root_el)) or "unknown"
 
@@ -456,6 +523,8 @@ def detect(repo: Path) -> dict:
         else:
             java_ver_local = java_ver
 
+        # Per-module classpath versions (fall back to the root cp map).
+        profile.fill_versions_from_classpath(_classpath_versions(mod_dir) or root_cp)
         profile.inherit_from(root_profile)
         _ = java_ver_local  # stored per module if needed in future
         module_profiles.append(profile.to_dict())

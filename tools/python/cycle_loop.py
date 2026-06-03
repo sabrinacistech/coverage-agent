@@ -93,16 +93,31 @@ def _read_cycle_delta(state_dir: Path) -> tuple[int, int] | None:
 def record_outcome(
     state_path: Path,
     *,
-    zero_delta: bool,
+    zero_delta: bool | None,
     compile_failed: bool,
     window_size: int = _COMPILE_FAIL_WINDOW,
 ) -> dict:
     """Write the two fields gate_g8 reads. Atomic (reuses budget_enforcer's loader
     and common.atomic_write_json so all execution-state writes share one path).
+
+    ``zero_delta`` is tri-state (audit M3 — stop false G8 stalls):
+      * ``True``  — the cycle MEASURED coverage and it was flat: a genuine
+                    stall → consecutiveZeroDeltaCycles += 1.
+      * ``False`` — the cycle measured real progress → reset to 0.
+      * ``None``  — the cycle produced NO fresh measurement (a structural
+                    skip/block, a missing-baseline no-op, or a compile failure):
+                    PRESERVE the counter. Such cycles must never push toward a
+                    G8 zero-delta stall — counting them was exactly what forced
+                    the full-pipeline restarts on generated/blocked targets.
     """
     state = budget_enforcer._load(state_path)
     prev = int(state.get("consecutiveZeroDeltaCycles", 0) or 0)
-    state["consecutiveZeroDeltaCycles"] = prev + 1 if zero_delta else 0
+    if zero_delta is None:
+        state["consecutiveZeroDeltaCycles"] = prev          # preserve (no-op cycle)
+    elif zero_delta:
+        state["consecutiveZeroDeltaCycles"] = prev + 1
+    else:
+        state["consecutiveZeroDeltaCycles"] = 0
     window = list(state.get("compileFailRateWindow") or [])
     window.append(1.0 if compile_failed else 0.0)
     state["compileFailRateWindow"] = window[-window_size:]
@@ -146,11 +161,28 @@ def run_loop(
                   f"over maxTokensIn: {tpayload.get('overBudgetSuts')}.", file=sys.stderr)
             return RC_BUDGET_EXCEEDED
 
+        # Stale-guard (audit M3): remove any prior coverage-delta.json BEFORE the
+        # cycle runs. A cycle that does not measure coverage — a structural
+        # skip/block, or a missing-baseline no-op — then leaves NO delta file, so
+        # we can distinguish "measured flat" (genuine stall) from "did not
+        # measure" (must not count) instead of re-reading a previous cycle's delta.
+        delta_path = state_dir / "coverage-delta.json"
+        try:
+            delta_path.unlink()
+        except FileNotFoundError:
+            pass
+
         cmd_rc = subprocess.run(command, check=False).returncode
 
         delta = _read_cycle_delta(state_dir)
-        zero_delta = (delta is None) or (delta[0] == 0 and delta[1] == 0)
         compile_failed = cmd_rc not in (0, done_exit_code)
+        if delta is None:
+            # No fresh measurement this cycle (skip/block/no-baseline/compile-fail)
+            # → not a measured stall; preserve the counter. Genuine flat cycles
+            # still accumulate; structural no-ops never trip G8 falsely.
+            zero_delta: bool | None = None
+        else:
+            zero_delta = (delta[0] == 0 and delta[1] == 0)
         record_outcome(state_path, zero_delta=zero_delta, compile_failed=compile_failed)
 
         budget_enforcer.reset(state_path)

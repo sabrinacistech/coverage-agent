@@ -52,6 +52,45 @@ def _simple_name(fqcn: str) -> str:
     return fqcn.rsplit(".", 1)[-1]
 
 
+def _collect_simple_names(test_classes: list[str]) -> list[str]:
+    """Flatten repeated/comma-separated --test-class values into deduped simple
+    names for surefire's -Dtest.
+
+    M5: one Maven invocation can run several test classes
+    (``-Dtest=FooTest,BarTest``); surefire reuses a single forked JVM for the
+    batch, so N classes pay ONE Maven/JVM startup instead of N. Order-preserving
+    and deduped so the command is deterministic.
+    """
+    out: list[str] = []
+    for tc in test_classes or []:
+        for part in tc.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            simple = _simple_name(part)
+            if simple not in out:
+                out.append(simple)
+    return out
+
+
+def _build_test_command(
+    tool: str, simple_names: list[str], jacoco_exec: Path, module: str | None
+) -> list[str]:
+    """Build the narrow `mvn test` command for a batch of test classes (M5)."""
+    cmd: list[str] = [
+        tool,
+        "-T", "1C",
+        "-o",
+        f"-Dtest={','.join(simple_names)}",
+        "-DfailIfNoTests=false",
+        f"-Djacoco.destFile={jacoco_exec}",
+        "test",
+    ]
+    if module:
+        cmd += ["-pl", module, "-am"]
+    return cmd
+
+
 def _resolve_module(state_dir: Path, override: str | None) -> str | None:
     if override:
         return override
@@ -120,7 +159,7 @@ def _run_compile_error_parser(state_dir: Path, log_path: Path) -> Path | None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Run a single test class against a Maven module (narrow loop).",
+        description="Run one or more test classes against a Maven module (narrow loop).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("--repo", required=True, help="Maven repo root.")
@@ -128,7 +167,13 @@ def main() -> int:
     ap.add_argument(
         "--test-class",
         required=True,
-        help="Fully-qualified name of the test class to run.",
+        action="append",
+        metavar="FQCN",
+        help=(
+            "Fully-qualified name of a test class to run. Repeat the flag (or "
+            "pass a comma-separated list) to batch several classes into ONE "
+            "Maven invocation — amortising JVM/Maven startup across the batch (M5)."
+        ),
     )
     ap.add_argument(
         "--module",
@@ -151,21 +196,21 @@ def main() -> int:
         print("[FAIL] Neither mvnd nor mvn found on PATH.", file=sys.stderr)
         return 2
 
+    if not Path(tool).name.lower().startswith("mvnd"):
+        # M5: mvnd (Maven Daemon) keeps the build JVM warm across cycles; plain
+        # mvn pays a cold JVM/Maven startup every run. mvnd is preferred when on
+        # PATH (see _resolve_tool); surface a hint when it is not.
+        print("[INFO] using 'mvn' (cold JVM per run). Install 'mvnd' for a warm "
+              "JVM reused across cycles — faster narrow runs.", file=sys.stderr)
+
     module = _resolve_module(state_dir, args.module)
-    simple = _simple_name(args.test_class)
+    simple_names = _collect_simple_names(args.test_class)
+    if not simple_names:
+        print("[FAIL] no test class name parsed from --test-class", file=sys.stderr)
+        return 2
 
     jacoco_exec = repo / "target" / "jacoco-narrow.exec"
-    cmd: list[str] = [
-        tool,
-        "-T", "1C",
-        "-o",
-        f"-Dtest={simple}",
-        "-DfailIfNoTests=false",
-        f"-Djacoco.destFile={jacoco_exec}",
-        "test",
-    ]
-    if module:
-        cmd += ["-pl", module, "-am"]
+    cmd = _build_test_command(tool, simple_names, jacoco_exec, module)
 
     summaries = state_dir / "_summaries"
     summaries.mkdir(parents=True, exist_ok=True)
@@ -176,7 +221,9 @@ def main() -> int:
     if os.name == "nt" and tool.lower().endswith((".cmd", ".bat")):
         popen_cmd = ["cmd", "/c", *cmd]
 
-    print(f"[INFO] tool={Path(tool).name} module={module or '<root>'} test={simple}")
+    test_label = ",".join(simple_names)
+    print(f"[INFO] tool={Path(tool).name} module={module or '<root>'} "
+          f"tests={test_label} ({len(simple_names)} class(es))")
     t0 = time.perf_counter()
     try:
         with log_path.open("w", encoding="utf-8", errors="replace") as fh:
@@ -186,6 +233,8 @@ def main() -> int:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
             )
             assert proc.stdout is not None
@@ -201,7 +250,7 @@ def main() -> int:
     if rc != 0:
         compile_idx = _run_compile_error_parser(state_dir, log_path)
         _write_failure_record(
-            state_dir, args.test_class, module, cmd, rc, duration_ms, compile_idx
+            state_dir, ",".join(args.test_class), module, cmd, rc, duration_ms, compile_idx
         )
         print(f"[FAIL] tests failed (exit {rc}); see {log_path}", file=sys.stderr)
         return rc

@@ -44,24 +44,108 @@ tools/python/        Pre-stage determinista (parsea POM/classpath/javap/JaCoCo)
 MASTER_PROMPT.md     Prompt principal con gates G1–G9
 ```
 
-Los **artefactos generados** (JSONs deterministas, context-packs, summaries, patches, caches)
-se escriben en `../.agent-state/` — un directorio hermano del repo, fuera del árbol versionado.
-Esta separación garantiza que el repo solo contenga código y contratos (schemas), nunca outputs
-de ejecución. El path se sobrescribe vía `--out` (Python) o `-StateDir` (`run_agents.ps1`).
+Los **artefactos generados** (JSONs deterministas, context-packs, summaries, patches, caches,
+`jacoco-baseline.xml`) se escriben **fuera del proyecto objetivo**, en una carpeta hermana con la
+convención **`coverage_<nombre-proyecto>`**. Ejemplo: si el proyecto es `C:\repo\proyectox`, el
+estado va a `C:\repo\coverage_proyectox`. Los **tests generados sí se escriben dentro del proyecto**
+(`<proyecto>/src/test/java/…`); la arquitectura **nunca** toca `src/main`. Aplica igual si la
+generación la dispara Copilot (handoff por archivo) o el orquestador LangGraph (v2). El path se
+controla con `--out` (pre-stage) / `--state` (patcher y runner). Ver el paso a paso en
+[§Ejecución desde VS Code + Copilot](#ejecución-desde-vs-code--copilot-paso-a-paso).
 
 ## Pre-stage Python (obligatorio)
 
 Antes de cualquier ciclo LLM, correr el pipeline determinista que produce todos los `state/*.json`. Esto **reduce drásticamente los tokens** consumidos y acelera la generación (ver [`docs/performance-tuning.md`](docs/performance-tuning.md) y [`docs/python-pipeline.md`](docs/python-pipeline.md)).
 
 ```bash
-mvn -q -DskipTests package
+mvn -q test jacoco:report     # clases compiladas + jacoco.xml (objetivos + baseline del delta)
 python tools/python/run_pipeline.py \
-   --repo . \
-   --out ../.agent-state \
+   --repo C:/repo/proyectox \
+   --out  C:/repo/coverage_proyectox \
    --module <module> \
    --include-fqcn '^com\.acme\.' \
-   --jacoco-xml target/site/jacoco/jacoco.xml
+   --jacoco-xml C:/repo/proyectox/target/site/jacoco/jacoco.xml
 ```
+
+> `--out` apunta **fuera** del proyecto (`coverage_<proyecto>`); los tests, en cambio, se escriben
+> dentro del proyecto. Paso a paso completo con Copilot en
+> [§Ejecución desde VS Code + Copilot](#ejecución-desde-vs-code--copilot-paso-a-paso).
+
+## Ejecución desde VS Code + Copilot (paso a paso)
+
+Escenario: en VS Code tenés abierta **esta arquitectura** (`coverage-agent`) como workspace, y
+disparás la cobertura de un proyecto externo con **un prompt en Copilot Chat**. Todo lo que genera
+la arquitectura queda **fuera** del proyecto; solo los tests se escriben **dentro** del proyecto.
+
+### Convención de carpetas
+
+```text
+C:\repo\proyectox            ← proyecto objetivo (SUT). Acá se escriben SOLO los tests (src/test/java).
+C:\repo\coverage_proyectox   ← carpeta de estado de la arquitectura (todo lo demás). Externa, borrable.
+C:\repoVC\coverage-agent     ← workspace abierto en VS Code (esta arquitectura; tools/python en la raíz).
+```
+
+Regla: `--repo` = el proyecto · `--out`/`--state` = la carpeta `coverage_<proyecto>` externa.
+
+### Prerrequisitos (una vez, en el proyecto objetivo)
+
+El pre-stage necesita clases compiladas y un reporte JaCoCo (de los tests existentes) para calcular
+los objetivos de cobertura y el baseline del delta:
+
+```bash
+cd C:\repo\proyectox
+mvn -q test jacoco:report        # genera target/classes + target/site/jacoco/jacoco.xml
+```
+
+Y las dependencias Python de la arquitectura (una vez): `pip install -r tools/python/requirements.txt`.
+
+### Prompt para Copilot Chat (el disparador)
+
+Pegá esto en Copilot Chat con `coverage-agent` como workspace, reemplazando las 3 variables del
+encabezado:
+
+```text
+Actuá como Orchestrator de la arquitectura coverage-agent (este workspace).
+
+PROYECTO   = C:\repo\proyectox                 # repo objetivo; los tests se escriben acá
+ESTADO     = C:\repo\coverage_proyectox        # carpeta EXTERNA; todo lo que genere la arquitectura va acá
+MODULO     = <artifactId-del-modulo>           # si es mono-módulo y el repo ES el módulo, usar "."
+
+Reglas duras:
+- TODO archivo intermedio (context-packs, batch-plan, baseline, summaries, patches) va a ESTADO, nunca dentro de PROYECTO.
+- Los tests se escriben dentro de PROYECTO/src/test/java. NUNCA tocar src/main ni el pom.
+- No inventes imports, clases, constructores, métodos ni builders: usá solo evidenceIds del context-pack. Respetá los gates G1–G8.
+- Cuerpo de test obligatorio con // given, // when, // then.
+
+Pasos:
+1) Pre-stage determinista (sin LLM):
+   python tools/python/run_pipeline.py --repo "%PROYECTO%" --out "%ESTADO%" --module %MODULO% --jacoco-xml "%PROYECTO%\target\site\jacoco\jacoco.xml"
+2) Leé "%ESTADO%\batch-plan.json". Para cada target, abrí su context-pack en "%ESTADO%\context-packs-compact\<FQCN>.json".
+3) Por cada SUT, generá el cuerpo de los métodos @Test citando evidenceIds; armá el patch JSON y aplicalo:
+   python tools/python/test_patch_applier.py --patch <patch.json> --repo "%PROYECTO%" --state "%ESTADO%" --templates templates --context-pack "%ESTADO%\context-packs-compact\<FQCN>.json" --whitelist "%ESTADO%\import-whitelist.json" --out "%ESTADO%\generated-tests.json"
+   (si un gate bloquea, corregí y reintentá; no escribas a la fuerza)
+4) Compilá y corré los tests generados (varios --test-class para batch):
+   python tools/python/narrow_test_runner.py --repo "%PROYECTO%" --state "%ESTADO%" --module %MODULO% --test-class <FQCN_Test_1> --test-class <FQCN_Test_2>
+5) Informá: tests escritos, gates, y resultado de la corrida.
+```
+
+> Mono-módulo: si el `pom.xml` del proyecto está en la raíz de `PROYECTO` (no hay reactor padre),
+> usá `MODULO = .` — en `narrow_test_runner` eso selecciona el proyecto actual (`-pl .`).
+>
+> Alternativa autónoma (v2): la misma corrida puede orquestarla la capa **LangGraph**
+> (`orchestrator/`) en lugar del handoff por Copilot — la convención de carpetas (estado externo,
+> tests dentro del proyecto) es idéntica. Ver [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+
+### Qué queda dónde, al terminar
+
+| Ubicación | Contenido |
+|-----------|-----------|
+| `C:\repo\coverage_proyectox\` | `batch-plan.json`, `context-packs-compact/`, `symbol-contracts/`, `import-whitelist.json`, `jacoco-baseline.xml`, `_summaries/`, `generated-tests.json`, caches |
+| `C:\repo\proyectox\src\test\java\…` | **solo** los `*Test.java` generados |
+
+Para limpiar una corrida basta con borrar `C:\repo\coverage_proyectox`; el proyecto objetivo queda
+intacto salvo por los tests. Detalle de gates/diagnósticos Copilot en
+[`docs/vscode-copilot-execution-guide.md`](docs/vscode-copilot-execution-guide.md).
 
 ## BGBA archetypes
 
@@ -108,7 +192,7 @@ Para ejecutar desde Visual Studio Code, usar la guía [`docs/vscode-copilot-exec
 
 1. Leer [`BOOT.md`](BOOT.md) — punto único de entrada (parámetros, Phase 0, reglas duras, procedimiento).
 2. Leer `MASTER_PROMPT.md` — contrato técnico (gates G1–G9, schemas, división del trabajo).
-3. Correr el pre-stage Python con auto-detección: `python tools/python/bootstrap.py --repo <ruta>`. Para overrides manuales, invocar `tools/python/run_pipeline.py` directamente.
+3. Correr el pre-stage Python apuntando `--out` a la carpeta externa `coverage_<proyecto>` (auto-detección: `python tools/python/bootstrap.py --repo <proyecto> --out C:/repo/coverage_<proyecto>`; overrides manuales con `run_pipeline.py`). Flujo VS Code + Copilot completo en [§Ejecución desde VS Code + Copilot](#ejecución-desde-vs-code--copilot-paso-a-paso).
 4. Ejecutar Orchestrator con `mode` y `budget` pegando `BOOT.md` en el chat (o cargándolo desde el agente).
 5. Validar cada test generado con `tools/python/test_linter.py` antes de compilar.
 6. Inspeccionar `state/execution-state.json` y los `state/_summaries/cycle-*.json` para progreso.

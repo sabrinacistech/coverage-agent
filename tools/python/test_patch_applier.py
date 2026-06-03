@@ -376,6 +376,29 @@ def _render_from_template(tpl: str, patch: dict) -> str:
     result = result.replace("${SUT_FQN}", sut_fqn)
     result = _COLLAB_BLOCK_RE.sub(collab_block, result)
     result = _BODY_PLACEHOLDER_RE.sub("\n\n" + body_block, result)
+
+    # M2: drop the Mockito scaffolding when there is nothing to inject. With no
+    # @Mock collaborators AND a SUT instance that the test body never touches
+    # (e.g. a static utility like LogSanitizer), @ExtendWith(MockitoExtension)
+    # + @InjectMocks are dead weight that trip SonarQube smells. We only strip
+    # them in this case: when the body DOES reference `sut`, keeping @InjectMocks
+    # lets Mockito instantiate it (compile-safe regardless of the constructor),
+    # so we never risk an uninstantiated SUT. The orphaned imports left behind
+    # are removed downstream by _prune_unused_imports.
+    sut_referenced = bool(re.search(r"\bsut\b", body_block))
+    if not fields and not sut_referenced:
+        result = re.sub(
+            r"[ \t]*@ExtendWith\(MockitoExtension\.class\)[ \t]*\n",
+            "",
+            result,
+        )
+        result = re.sub(
+            r"[ \t]*@InjectMocks[ \t]*\n[ \t]*private[ \t]+"
+            + re.escape(sut_simple)
+            + r"[ \t]+sut;[ \t]*\n",
+            "",
+            result,
+        )
     return result
 
 
@@ -445,6 +468,84 @@ def _inject_methods(text: str, methods: list[dict], existing_names: set[str]) ->
     return text + "\n\n" + blocks + "\n}\n"
 
 
+# ── Unused-import pruning (Clean Code: SonarQube "Unused imports") ────────────
+
+_IMPORT_CAPTURE_RE = re.compile(
+    r"^[ \t]*import[ \t]+(static[ \t]+)?([\w.]+(?:\.\*)?)[ \t]*;[ \t]*$",
+    re.MULTILINE,
+)
+
+
+def _strip_comments_and_strings(java: str) -> str:
+    """Blank out comments and string/char literals so they don't count as symbol
+    usage. A symbol named only in a comment (e.g. the BDD ``// when`` AAA marker)
+    or inside a string literal is NEVER a real use of an imported symbol — counting
+    it would wrongly keep an unused import (e.g. ``org.mockito.Mockito.when``) and
+    re-introduce the SonarQube "Unused imports" violation M2 exists to prevent.
+    """
+    java = re.sub(r"/\*.*?\*/", " ", java, flags=re.DOTALL)   # block comments
+    java = re.sub(r"//[^\n]*", " ", java)                      # line comments
+    java = re.sub(r'"(?:\\.|[^"\\\n])*"', " ", java)           # string literals
+    java = re.sub(r"'(?:\\.|[^'\\\n])*'", " ", java)           # char literals
+    return java
+
+
+def _prune_unused_imports(text: str) -> str:
+    """Remove import lines whose imported symbol is never referenced.
+
+    The deterministic template (templates/junit5-mockito.java) emits a fixed,
+    maximal import block (Mockito when/verify/never/times/any, assertThatThrownBy,
+    @Mock/@InjectMocks, ...). A simple getter/DTO test uses only a few of them,
+    leaving the rest as SonarQube "Unused imports" violations that block the
+    OpenShift quality gate. Because the LLM only fills ${TEST_BODY} it cannot
+    prune them — so we do it deterministically here, on the only code path that
+    writes Java.
+
+    Conservative by construction: a symbol counts as "used" if its simple name
+    appears as a whole word anywhere outside the import block (comments and
+    string literals excluded — see _strip_comments_and_strings). This biases
+    toward KEEPING an import — a false "used" leaves a harmless extra import,
+    whereas a false "unused" would break compilation. Wildcard imports (``.*``)
+    are always kept.
+    """
+    matches = list(_IMPORT_CAPTURE_RE.finditer(text))
+    if not matches:
+        return text
+
+    # Usage scan target: the file with every import statement removed (so an
+    # import's own path never counts as a usage of itself) AND with comments /
+    # string literals blanked (so a `// when` AAA marker never keeps the unused
+    # Mockito `when` import).
+    usage_text = _strip_comments_and_strings(_IMPORT_CAPTURE_RE.sub("", text))
+
+    spans_to_drop: list[tuple[int, int]] = []
+    for m in matches:
+        path = m.group(2)
+        if path.endswith(".*"):
+            continue  # wildcard — cannot prove unused
+        symbol = path.rsplit(".", 1)[-1]
+        if re.search(rf"\b{re.escape(symbol)}\b", usage_text):
+            continue  # referenced — keep
+        start, end = m.start(), m.end()
+        if end < len(text) and text[end] == "\n":
+            end += 1
+        spans_to_drop.append((start, end))
+
+    if not spans_to_drop:
+        return text
+
+    out: list[str] = []
+    cursor = 0
+    for start, end in spans_to_drop:
+        out.append(text[cursor:start])
+        cursor = end
+    out.append(text[cursor:])
+    pruned = "".join(out)
+
+    # Collapse any 3+ consecutive newlines left behind to a single blank line.
+    return re.sub(r"\n{3,}", "\n\n", pruned)
+
+
 # ── Core apply function ───────────────────────────────────────────────────────
 
 def apply_patch(
@@ -497,6 +598,12 @@ def apply_patch(
         new_text = _inject_imports(new_text, allowed_imports)
         injected_methods = [m["name"] for m in methods]
         action = "INITIALIZED"
+
+    # M2: strip imports left unused by the fixed template block (and by any
+    # FQCN-inlined symbols) so the file passes SonarQube "Unused imports", which
+    # otherwise blocks the OpenShift deploy gate. Single insertion point: this is
+    # the only code path that writes Java.
+    new_text = _prune_unused_imports(new_text)
 
     if not dry_run:
         test_path.parent.mkdir(parents=True, exist_ok=True)
@@ -819,16 +926,29 @@ def main() -> int:
         print(f"[FAIL] Unexpected error: {exc}", file=sys.stderr)
         return 1
 
-    # ── G6 (static linter) post-write: lint what we rendered; roll back on FAIL ─
+    # ── G6 (static linter) post-write: lint what we rendered, AUTO-REPAIR via
+    #    deterministic rules, then roll back only if it still fails ─────────────
+    # M6 — reconnect repair_dispatch into the only code path that writes Java.
+    # It was built but never invoked from here (audit H-2), so a fixable lint
+    # violation went straight to a rollback instead of a deterministic repair.
+    # evaluate_gates(auto_repair=True) owns the repair flow (gate_g6 → repair_
+    # dispatch → re-lint); we reuse it rather than duplicating, and gate only on
+    # the post-write G6 result (G1/G2/G5/G7/G8 already passed pre-write).
     if not gates_disabled and not args.dry_run:
-        from gate_runner import gate_g6  # local import (same dir)
+        from gate_runner import evaluate_gates as _post_eval  # local import (same dir)
 
         written = Path(result["file"])
-        g6 = gate_g6(
+        post = _post_eval(
+            patch,
+            context_pack or {},
             state_dir,
-            written,
-            Path(args.context_pack).resolve() if args.context_pack else None,
+            test_file=written,
+            auto_repair=True,
+            context_pack_path=(
+                Path(args.context_pack).resolve() if args.context_pack else None
+            ),
         )
+        g6 = post.get("gates", {}).get("G6", {})
         if g6.get("status") == "FAIL":
             try:
                 if prior_text is None:
@@ -839,9 +959,12 @@ def main() -> int:
                     rb_tmp.replace(written)
             except OSError as exc:
                 print(f"[WARN] G6 rollback failed: {exc}", file=sys.stderr)
+            ar = g6.get("autoRepair") or {}
             print(
                 f"[BLOCKED] gate G6_LINTER_FAIL "
-                f"(violations={g6.get('violationCount')}; write rolled back)",
+                f"(violations={g6.get('violationCount')}; "
+                f"autoRepair repaired={ar.get('repaired', 0)} "
+                f"escalated={ar.get('escalated', 0)}; write rolled back)",
                 file=sys.stderr,
             )
             return 3

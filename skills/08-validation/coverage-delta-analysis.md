@@ -4,8 +4,8 @@
 Calcular delta real de cobertura entre baseline y ejecución del ciclo, por clase y método.
 
 ## Entradas
-- Baseline: `target/site/jacoco-baseline/jacoco.xml` (snapshot antes del ciclo).
-- Final: `target/site/jacoco-batch-<n>/jacoco.xml` (después del ciclo).
+- Baseline (`--before`): `state/jacoco-baseline.xml` — snapshot determinista del reporte pre-generación, producido por `run_pipeline.py` (paso 8) copiando el `--jacoco-xml`. **Fuente única**: si falta, no se puede medir delta.
+- Final (`--after`): `target/site/jacoco-batch-<n>/jacoco.xml` (después del ciclo).
 
 ## Procedimiento
 1. Parsear ambos XML con DOM/StAX. Para cada `<class>`/`<method>` capturar contadores `LINE`, `BRANCH`, `INSTRUCTION`, `METHOD`, `COMPLEXITY`.
@@ -37,6 +37,6 @@ Calcular delta real de cobertura entre baseline y ejecución del ciclo, por clas
 ```
 
 ## Reglas
-- Si `totals.lines.delta == 0` por 2 ciclos consecutivos ⇒ activar G8.
+- Si `totals.lines.delta == 0` en 2 ciclos consecutivos que **midieron** cobertura ⇒ activar G8 (`G8_NO_DELTA`). Un ciclo sin medición fresca (sin `coverage-delta.json`: skip/block estructural, baseline ausente, compile-fail) PRESERVA el contador y no cuenta (M3, `cycle_loop.record_outcome`).
 - Si hay `regressions` ⇒ abortar ciclo y reportar.
 - Nunca reportar delta calculado por el LLM; siempre derivar de los XML.

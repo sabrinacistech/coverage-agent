@@ -122,6 +122,39 @@ def case_loop_halts_on_g8_stall() -> None:
         _assert("stopped at cycle 2 (not 10)", st.get("cycle") == 2, f"cycle={st.get('cycle')}")
 
 
+def _noop_cmd() -> list[str]:
+    """A cycle command that succeeds (rc 0) but measures nothing (writes no delta)."""
+    return [sys.executable, "-c", "import sys; sys.exit(0)"]
+
+
+def case_skip_preserves_counter() -> None:
+    print("== M3: no-measurement cycle PRESERVES the stall counter (no false stall) ==")
+    with tempfile.TemporaryDirectory() as td:
+        sd = Path(td); sp = _seed(sd, 10)
+        cycle_loop.record_outcome(sp, zero_delta=True, compile_failed=False)   # measured flat → 1
+        cycle_loop.record_outcome(sp, zero_delta=None, compile_failed=False)   # skip → preserve
+        st = json.loads(sp.read_text(encoding="utf-8"))
+        _assert("skip preserves counter at 1 (neither +1 nor reset)",
+                st.get("consecutiveZeroDeltaCycles") == 1, str(st))
+        _assert("gate_g8 PASS after a skip", gate_g8(sd).get("status") == "PASS")
+        cycle_loop.record_outcome(sp, zero_delta=True, compile_failed=False)   # measured flat → 2
+        g8 = gate_g8(sd)
+        _assert("genuine stall still detected across an interleaved skip",
+                g8.get("status") == "FAIL" and g8.get("blockedReason") == "G8_NO_DELTA", str(g8))
+
+
+def case_loop_skip_no_false_stall() -> None:
+    print("== M3: loop of no-measurement cycles never trips G8; budget bounds it ==")
+    with tempfile.TemporaryDirectory() as td:
+        sd = Path(td); sp = _seed(sd, 3)
+        rc = cycle_loop.run_loop(sp, sd, _noop_cmd(), done_exit_code=7, max_iterations=None)
+        st = json.loads(sp.read_text(encoding="utf-8"))
+        _assert("loop stopped on BUDGET, not on a false G8 stall",
+                rc == cycle_loop.RC_BUDGET_EXCEEDED, f"rc={rc}")
+        _assert("consecutiveZeroDeltaCycles stayed 0 across skip cycles",
+                st.get("consecutiveZeroDeltaCycles") == 0, str(st))
+
+
 def case_loop_done_signal() -> None:
     print("== C2: loop stops cleanly when the cycle command signals DONE ==")
     with tempfile.TemporaryDirectory() as td:
@@ -138,6 +171,8 @@ def main() -> int:
     case_compile_fail_rate()
     case_loop_halts_on_budget()
     case_loop_halts_on_g8_stall()
+    case_skip_preserves_counter()
+    case_loop_skip_no_false_stall()
     case_loop_done_signal()
     print()
     if FAILURES:
