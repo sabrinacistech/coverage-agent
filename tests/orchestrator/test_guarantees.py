@@ -124,6 +124,39 @@ def test_run_one_cycle_blocks_when_compact_pack_missing(tmp_path, monkeypatch):
     assert one_cycle.select_next_target(tmp_path.resolve()) is None
 
 
+def test_run_one_cycle_blocks_generated_sut(tmp_path, monkeypatch):
+    """REGLA #13: una clase autogenerada NO se testea. El ciclo la BLOQUEA antes de
+    llamar al modelo, aun si llegara al batch-plan."""
+    sut = "com.example.openapi.model.FooDTO"
+    _write(tmp_path / "batch-plan.json", {
+        "schemaVersion": 1, "cycle": 1, "mode": "coverage", "sizeChosen": 1,
+        "items": [{"targetId": "t1", "sut": sut, "method": "equals()"}],
+    })
+    _write(tmp_path / "generated-code-index.json", {"excludedFqcns": [sut], "excludedPackages": []})
+    # compact-pack presente: así el bloqueo es por "generado", no por falta de pack (F4).
+    _write(tmp_path / "context-packs-compact" / f"{sut}.json", {"sut": sut})
+
+    called = {"n": 0}
+    monkeypatch.setattr(one_cycle.generation, "generate_patch",
+                        lambda **k: called.__setitem__("n", called["n"] + 1))
+
+    rc = one_cycle.run_one_cycle(tmp_path, tmp_path)
+    assert rc == one_cycle.RC_OK
+    assert called["n"] == 0, "no debe invocarse generación para una clase autogenerada"
+    assert one_cycle.select_next_target(tmp_path.resolve()) is None
+
+
+def test_is_generated_sut_matches_fqcn_and_package(tmp_path):
+    _write(tmp_path / "generated-code-index.json", {
+        "excludedFqcns": ["com.acme.gen.Exact"],
+        "excludedPackages": ["com.acme.openapi.model", "target/generated-sources/**"],
+    })
+    assert one_cycle.is_generated_sut(tmp_path, "com.acme.gen.Exact")            # FQCN exacto
+    assert one_cycle.is_generated_sut(tmp_path, "com.acme.openapi.model.Foo")    # por paquete
+    assert not one_cycle.is_generated_sut(tmp_path, "com.acme.service.Bar")      # negocio real
+    assert not one_cycle.is_generated_sut(tmp_path, "target.generated.X")        # glob de path no matchea FQCN
+
+
 def test_select_next_target_skips_processed(tmp_path):
     _write(tmp_path / "batch-plan.json", {
         "schemaVersion": 1, "cycle": 1, "mode": "coverage", "sizeChosen": 2,

@@ -114,6 +114,42 @@ def case_g5_verbose_dict_version_exempt() -> None:
         raise AssertionError("verbose dict: unknown framework must still block")
 
 
+# ── Detector: Mockito >= 5 ⇒ inline mock-maker disponible por default ─────────
+# Regresión del falso negativo G5: un proyecto con Mockito 5.x (sin el artefacto
+# separado mockito-inline) quedaba con mock.features=[] y G5 bloqueaba mockStatic().
+
+def _mock_features(version: str | None, *, has_inline_artifact: bool = False) -> list[str]:
+    p = _ModuleProfile("m")
+    p.has_mockito = True
+    p.mockito_version = version
+    p.has_mockito_inline = has_inline_artifact
+    return p.to_dict()["mock"]["features"]
+
+
+def case_mockito5_inline_by_default() -> None:
+    if "mockito-inline" not in _mock_features("5.11.0"):
+        raise AssertionError("Mockito 5.x debe exponer 'mockito-inline' por default")
+
+
+def case_mockito4_no_inline_without_artifact() -> None:
+    if "mockito-inline" in _mock_features("4.11.0"):
+        raise AssertionError("Mockito 4.x sin el artefacto NO debe declarar inline")
+
+
+def case_mockito_unknown_version_conservative() -> None:
+    # Versión sin resolver → conservador: no asumir inline.
+    if "mockito-inline" in _mock_features(None):
+        raise AssertionError("version desconocida no debe asumir inline")
+    if "mockito-inline" in _mock_features("unknown"):
+        raise AssertionError("'unknown' no debe asumir inline")
+
+
+def case_mockito_inline_artifact_still_wins() -> None:
+    # Aunque sea Mockito 4.x, si el artefacto separado está presente, inline va.
+    if "mockito-inline" not in _mock_features("4.11.0", has_inline_artifact=True):
+        raise AssertionError("el artefacto mockito-inline explícito debe declarar inline")
+
+
 def main() -> int:
     cases = [
         ("classpath-versions-parsed",            case_classpath_versions_parsed),
@@ -122,6 +158,10 @@ def main() -> int:
         ("g5-pass-when-only-versions-unknown",   case_g5_passes_when_only_versions_unknown_compact),
         ("g5-fail-when-framework-unknown",       case_g5_fails_when_framework_unknown_compact),
         ("g5-verbose-dict-version-exempt",       case_g5_verbose_dict_version_exempt),
+        ("mockito5-inline-by-default",           case_mockito5_inline_by_default),
+        ("mockito4-no-inline-without-artifact",  case_mockito4_no_inline_without_artifact),
+        ("mockito-unknown-version-conservative", case_mockito_unknown_version_conservative),
+        ("mockito-inline-artifact-still-wins",   case_mockito_inline_artifact_still_wins),
     ]
     failed = 0
     for name, fn in cases:
@@ -136,6 +176,48 @@ def main() -> int:
         return 1
     print("\nAll M7 cases passed")
     return 0
+
+
+# ── pytest entry points (colectados por la suite) ─────────────────────────────
+
+def test_classpath_versions_parsed():
+    case_classpath_versions_parsed()
+
+
+def test_classpath_absent_is_empty():
+    case_classpath_absent_is_empty()
+
+
+def test_fill_only_fills_none_and_from_cp():
+    case_fill_only_fills_none_and_from_cp()
+
+
+def test_g5_passes_when_only_versions_unknown_compact():
+    case_g5_passes_when_only_versions_unknown_compact()
+
+
+def test_g5_fails_when_framework_unknown_compact():
+    case_g5_fails_when_framework_unknown_compact()
+
+
+def test_g5_verbose_dict_version_exempt():
+    case_g5_verbose_dict_version_exempt()
+
+
+def test_mockito5_inline_by_default():
+    case_mockito5_inline_by_default()
+
+
+def test_mockito4_no_inline_without_artifact():
+    case_mockito4_no_inline_without_artifact()
+
+
+def test_mockito_unknown_version_conservative():
+    case_mockito_unknown_version_conservative()
+
+
+def test_mockito_inline_artifact_still_wins():
+    case_mockito_inline_artifact_still_wins()
 
 
 if __name__ == "__main__":

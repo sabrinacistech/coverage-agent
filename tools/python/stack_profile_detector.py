@@ -66,6 +66,19 @@ _MOCKITO_AIDS: frozenset[str] = frozenset({
     "mockito-core", "mockito-all", "mockito-junit-jupiter",
 })
 _MOCKITO_INLINE_AIDS: frozenset[str] = frozenset({"mockito-inline"})
+# Desde Mockito 5.0 el inline mock-maker es el DEFAULT en mockito-core: mockStatic()
+# y mockConstruction() funcionan SIN el artefacto separado `mockito-inline` (que quedó
+# deprecado). Por eso, con Mockito core >= esta major, `inline` se considera disponible.
+_MOCKITO_INLINE_DEFAULT_MAJOR = 5
+
+
+def _leading_int(ver: str | None) -> int | None:
+    """Major version (primer entero) de un string tipo '5.11.0'. None si no se puede
+    determinar (propiedad sin resolver, 'unknown', etc.) → tratamiento conservador."""
+    if not ver:
+        return None
+    m = re.match(r"\s*(\d+)", ver)
+    return int(m.group(1)) if m else None
 _POWERMOCK_AIDS: frozenset[str] = frozenset({
     "powermock-api-mockito2",
     "powermock-api-mockito",
@@ -362,6 +375,15 @@ class _ModuleProfile:
             if proc not in self.annotation_processors:
                 self.annotation_processors.append(proc)
 
+    def _inline_by_default(self) -> bool:
+        """True si el inline mock-maker está disponible por defecto: Mockito core
+        cuya major >= 5 lo trae de fábrica (no necesita el artefacto `mockito-inline`).
+        Conservador: si la versión no se pudo resolver, devuelve False."""
+        if not self.has_mockito:
+            return False
+        major = _leading_int(self.mockito_version)
+        return major is not None and major >= _MOCKITO_INLINE_DEFAULT_MAJOR
+
     def to_dict(self) -> dict:
         """Serialise to the JSON object expected by stack-profile.schema.json."""
         # Test framework
@@ -372,9 +394,12 @@ class _ModuleProfile:
         else:
             test_framework = "junit5"  # conservative default
 
-        # Mock features
+        # Mock features. inline disponible si: (a) está el artefacto separado, o
+        # (b) Mockito core >= 5 (inline maker es el default desde 5.0). Sin (b), un
+        # proyecto Mockito 5.x quedaba con features=[] y G5 bloqueaba mockStatic()
+        # aunque SÍ está soportado (falso negativo).
         mock_features: list[str] = []
-        if self.has_mockito_inline:
+        if self.has_mockito_inline or self._inline_by_default():
             mock_features.append("mockito-inline")
         if self.has_powermock:
             mock_features.append("powermock")

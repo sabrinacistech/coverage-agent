@@ -77,6 +77,31 @@ def select_next_target(state_dir: Path) -> dict | None:
     return None
 
 
+def is_generated_sut(state_dir: Path, sut: str) -> bool:
+    """REGLA DURA: las clases autogeneradas NO se testean (DTOs OpenAPI/CXF,
+    artefactos de annotation processors, etc.). Fuente: generated-code-index.json
+    (`excludedFqcns` + `excludedPackages`), producido por generated_code_scanner.py.
+
+    El planner ya las descarta del batch (coverage_planner._build_excluded_set), pero
+    esto es la garantía POR CONSTRUCCIÓN a nivel de ciclo: aunque un target generado
+    llegue por un batch-plan editado a mano o una regresión del planner, NUNCA se
+    invoca al modelo para una clase generada. Ver docs/canonical-prohibitions.md #13."""
+    idx = state_dir / "generated-code-index.json"
+    if not idx.exists():
+        return False
+    try:
+        d = _load_json(idx)
+    except Exception:
+        return False
+    if sut in set(d.get("excludedFqcns") or []):
+        return True
+    for pkg in (d.get("excludedPackages") or []):
+        # Solo entradas que son NOMBRES DE PAQUETE (no globs de path como build/generated/**).
+        if pkg and "/" not in pkg and "*" not in pkg and sut.startswith(pkg + "."):
+            return True
+    return False
+
+
 def load_context_pack_compact(state_dir: Path, sut: str) -> dict | None:
     """Pack COMPACTO (context-packs-compact/<sut>.json) — proyección minificada
     que se manda al modelo (minimización de tokens).
@@ -164,6 +189,16 @@ def run_one_cycle(state_dir: Path, repo: Path) -> int:
 
     sut = target["sut"]
     target_id = target.get("targetId", sut)
+
+    # REGLA DURA (canonical-prohibitions #13): las clases autogeneradas NO se testean.
+    # Garantía por construcción a nivel de ciclo — nunca se invoca al modelo para una
+    # clase generada, aun si el planner la dejara pasar.
+    if is_generated_sut(state_dir, sut):
+        print(f"[one_cycle] target {target_id}: BLOCKED — {sut} es código autogenerado "
+              "(generated-code-index); las clases generadas NO se testean.")
+        mark_processed(state_dir, target_id)
+        return RC_OK
+
     pack_path = state_dir / "context-packs" / f"{sut}.json"
     pack_compact = load_context_pack_compact(state_dir, sut)  # → al modelo (pocos tokens)
 

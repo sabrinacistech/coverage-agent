@@ -33,6 +33,12 @@
 10. **NUNCA** usar `Thread.sleep`, `new Random()`, `Instant.now()` sin Clock mock o seed fijo.
 11. **NUNCA** silenciar tests con `@Ignore`/`@Disabled`/`assume*` o tragar excepciones.
 12. **NUNCA** usar `new Type_Builder()` directo — solo `new Type.Builder()` si el contrato lo confirma.
+13. **NUNCA** generar tests para clases AUTOGENERADAS (DTOs OpenAPI/CXF, artefactos de
+    annotation processors, código en `target/generated-sources/**`). No son SUT. Fuente:
+    `state/generated-code-index.json` (`excludedFqcns` + `excludedPackages`) y
+    `state/classification-index.json` (`type=generated/excluded`). Enforcement por
+    construcción: `coverage_planner.py` las descarta del batch **y** `one_cycle.is_generated_sut`
+    bloquea el ciclo antes de llamar al modelo (exit RC_OK, target marcado y saltado).
 
 ## Patrones correctivos (un solo ejemplo por regla)
 
