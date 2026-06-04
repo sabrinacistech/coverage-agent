@@ -43,9 +43,21 @@ Gradle equivalente:
     jacocoTestReport
 ```
 
+## Enforcement determinista
+La decisión de agregar (o no) el plugin al POM **no la toma el LLM**: la gatea
+`tools/python/jacoco_pom_guard.py` leyendo `build-tool-contract.json#jacoco.configured`
+y `archetype-profile.json`. La tabla normativa y los códigos de salida viven en
+`docs/archetype-policy.md` §"Enforcement determinista". Uso:
+
+```bash
+python tools/python/jacoco_pom_guard.py --state ../.agent-state --module . --check   # reporta la decisión
+python tools/python/jacoco_pom_guard.py --state ../.agent-state --module . --apply   # inserta solo si action=add
+```
+
 ## Reglas
 - El agente **nunca** toca `src/main`. La **única** modificación permitida en la app
-  es agregar el `jacoco-maven-plugin` al POM cuando el arquetipo lo requiere (abajo).
+  es agregar el `jacoco-maven-plugin` al POM cuando el arquetipo lo requiere (abajo),
+  y esa edición la realiza `jacoco_pom_guard.py`, no el LLM.
 - `archetype: java-21` ⇒ **prohibido** agregar `jacoco-maven-plugin` (heredado del parent).
 - `archetype: java-8` (o parent no-BGBA) **sin** JaCoCo ⇒ **agregar el plugin al POM
   (requerido para el gate de OpenShift)** usando el **bloque canónico** de

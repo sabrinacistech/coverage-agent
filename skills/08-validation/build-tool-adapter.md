@@ -48,4 +48,8 @@ Aislar Maven vs Gradle detrás de un contrato común `state/build-tool-contract.
 
 ## Reglas
 - Si JaCoCo no está configurado ⇒ generar reporte vía CLI (`org.jacoco:jacoco-maven-plugin:report`) sin modificar el POM.
-- Prohibido editar `pom.xml`/`build.gradle` salvo instrucción explícita del usuario.
+- Prohibido editar `pom.xml`/`build.gradle`, **salvo la única excepción** de
+  `docs/archetype-policy.md` (agregar `jacoco-maven-plugin` en java-8 / parent
+  no-BGBA cuando el POM carece de él, para el gate de despliegue). Esa edición la
+  decide y la aplica de forma determinista `tools/python/jacoco_pom_guard.py` — no
+  el LLM ni una "instrucción del usuario" ad-hoc.

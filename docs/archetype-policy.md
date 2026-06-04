@@ -49,10 +49,32 @@ app (el agente nunca toca `src/main`).
 - Nunca duplicar plugins ya provistos por el parent.
 - Si el changelog contradice el POM, ganar el POM y registrar `discrepancies[]`.
 
+## Enforcement determinista (fuente normativa única)
+
+> **Este documento es la ÚNICA fuente de la política de edición del POM.** BOOT.md,
+> `MASTER_PROMPT.md` y los skills referencian esta sección; no definen reglas propias.
+
+La excepción "agregar `jacoco-maven-plugin`" **no la decide ni la aplica el LLM**. La
+gatea de forma determinista `tools/python/jacoco_pom_guard.py`, que lee
+`state/build-tool-contract.json#jacoco.configured` y `state/archetype-profile.json`
+(`modules[].archetype` + `implies.jacoco`) y resuelve por módulo:
+
+| Estado del módulo | Decisión de la guarda | Acción |
+|-------------------|-----------------------|--------|
+| JaCoCo ya presente en el POM | `none` | No tocar (prohibido duplicar). |
+| `archetype: java-21` / `implies.jacoco: inherited` | `forbidden` | **Rechaza la edición** (heredado del parent). Medir por bootstrap CLI. |
+| `java-8` (`manual`) o parent no-BGBA (`absent`), **sin** JaCoCo | `add` | Inserta el bloque canónico de abajo (única modificación permitida en la app). |
+
+`jacoco_pom_guard.py --apply` aplica la edición **solo** en el caso `add` y solo si el
+POM efectivamente carece del plugin (doble verificación). En `forbidden` sale con
+código 3 sin escribir. El bloque que inserta se **lee de la sección siguiente** (no se
+duplica en el código).
+
 ## Bloque JaCoCo canónico (Java 8 / sin JaCoCo heredado) — REQUERIDO para el gate de OpenShift
 
 > **Fuente única de verdad** del bloque del POM. Cualquier doc/skill que necesite
 > mostrarlo debe **referenciar esta sección** en vez de duplicar uno divergente.
+> `jacoco_pom_guard.py` extrae este mismo bloque XML al aplicar la edición.
 > Versión: **0.8.13**. Incluye el `check` de branch ≥ **0.80**.
 
 ```xml

@@ -132,7 +132,12 @@ Resumen operativo:
 2. Toda línea de cada test propuesto debe citar un `evidence-id` del contrato.
 3. Aplicar los gates G1–G9 entre fases. Si un gate falla, NO avanzar: reportar y pedir decisión.
 4. Escritura atómica en `state/` (`*.tmp` + rename). Hashes SHA-256 en `state/execution-state.json`.
-5. Nunca editar `pom.xml` ni `build.gradle`. Nunca `mvn clean` / `install`.
+5. Nunca editar `pom.xml` ni `build.gradle`, **salvo la única excepción** definida
+   en `docs/archetype-policy.md`: agregar `jacoco-maven-plugin` cuando el arquetipo
+   lo requiere (java-8 / parent no-BGBA) **y** el POM carece de él. Esa excepción NO
+   la decide el LLM: la gatea de forma determinista `tools/python/jacoco_pom_guard.py`
+   (rechaza la edición si JaCoCo ya está presente o es heredado del parent — java-21).
+   Nunca `mvn clean` / `install`.
 6. Cobertura solo derivada de los JaCoCo XML reales (baseline + final).
 7. Antes de proponer un test, pasarlo por `tools/python/test_linter.py`. Si tiene violaciones G1/G6, descartarlo sin invocar `javac`.
 8. Respetar `state/generated-code-index.json#excludedFqcns` y `excludedPackages`: esas clases no son SUT.

@@ -14,6 +14,7 @@ Procesos deterministas que el LLM **no** debe ejecutar a mano: parseos de POM, c
 |--------|-------------------|
 | `pom_parser.py` | `build-tool-contract.json` |
 | `archetype_detector.py` | `archetype-profile.json` |
+| `jacoco_pom_guard.py` | gate determinista del **único** edit permitido en el POM (agrega `jacoco-maven-plugin` solo si falta y el arquetipo lo requiere; rechaza si es heredado). Ver `docs/archetype-policy.md`. |
 | `generated_code_scanner.py` | `generated-code-index.json` |
 | `classpath_resolver.py` | `import-whitelist.json` |
 | `bytecode_scanner.py` | `symbol-contracts/<fqcn>.json` |
