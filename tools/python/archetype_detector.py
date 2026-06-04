@@ -86,7 +86,7 @@ def main() -> int:
         changelogs_dir = repo / changelogs_dir
 
     modules_out = []
-    for mod_dir in find_pom_modules(repo):
+    for mod_dir in find_pom_modules(repo, contract=state_dir / "build-tool-contract.json"):
         pom = mod_dir / "pom.xml"
         parent = None
         try:

@@ -350,6 +350,27 @@ def snapshot_baseline(jacoco_xml: Path, out_dir: Path, *, force: bool = False) -
     return baseline
 
 
+def _write_empty_batch_plan(out_dir: Path, mode: str) -> None:
+    """Write a schema-valid, EMPTY batch-plan so downstream (cycle_loop/one_cycle)
+    sees a definitive '0 targets' instead of a missing file.
+
+    Used by the early-exit (A): when JaCoCo reports nothing uncovered, the
+    expensive middle steps (classpath/index/classification/planning/context) are
+    skipped, so no batch-plan would otherwise be produced. The loop then reports
+    'no quedan targets' (RC_NO_TARGETS) cleanly instead of erroring on a missing file.
+    """
+    from common import atomic_write_json  # local: common is on sys.path
+    atomic_write_json(out_dir / "batch-plan.json", {
+        "schemaVersion": 1,
+        "cycle": 1,
+        "mode": mode,
+        "sizeChosen": 0,
+        "items": [],
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "reason": "no uncovered targets reported by JaCoCo (run_pipeline early-exit)",
+    })
+
+
 def run_step(args: list[str]) -> int:
     print(f"\n$ python {' '.join(str(a) for a in args)}")
     return subprocess.call([sys.executable, *[str(a) for a in args]])
@@ -568,6 +589,46 @@ def main() -> int:
             HERE / "generated_code_scanner.py", "--repo", args.repo, "--out", args.out,
         ])
 
+    # ── Step 3.5: JaCoCo parser → coverage-targets.json (MOVED EARLY) ─────────
+    # jacoco_parser solo necesita el jacoco.xml (no pom/classpath/contracts), y su
+    # resultado gatea los pasos caros de abajo. Si JaCoCo no halló NINGÚN método sin
+    # cubrir, no hay nada que generar: salteamos classpath (~5s) + bytecode (~5s) +
+    # index/clasificación/planner/context y terminamos limpio.
+    if "jacoco" not in skip and args.jacoco_xml:
+        step("jacoco", [
+            HERE / "jacoco_parser.py",
+            "--mode", "targets",
+            "--xml", args.jacoco_xml,
+            "--out", str(Path(args.out) / "coverage-targets.json"),
+            "--coverage-mode", args.coverage_mode,
+        ])
+        # M4: snapshot del mismo reporte como baseline del delta (lo lee el loop).
+        b = snapshot_baseline(Path(args.jacoco_xml), Path(args.out))
+        if b is not None:
+            print(f"[OK] {b}  (delta baseline for jacoco_parser --mode delta --before)")
+
+        # A — early-exit: 0 targets sin cubrir ⇒ nada que generar.
+        cov = Path(args.out) / "coverage-targets.json"
+        if cov.exists():
+            try:
+                n_targets = len(json.loads(cov.read_text(encoding="utf-8")).get("targets", []))
+            except Exception:
+                n_targets = -1
+            if n_targets == 0:
+                print("[DONE] JaCoCo: 0 uncovered targets — nothing to generate. "
+                      "Skipping classpath/index/classification/planning/context.")
+                _write_empty_batch_plan(Path(args.out), args.coverage_mode)
+                return rc
+    elif "jacoco" not in skip:
+        # #2: make the auto-skip loud and actionable instead of silent.
+        print(
+            "[WARN] step 'jacoco' skipped: no --jacoco-xml given. "
+            "state/coverage-targets.json will be empty, so the batch-plan is "
+            "empty and no targets reach the LLM. Generate a JaCoCo report "
+            "(mvn test jacoco:report) and pass --jacoco-xml.",
+            file=sys.stderr,
+        )
+
     # ── Step 4: Classpath resolver → import-whitelist.json ───────────────────
     if "classpath" not in skip:
         cp_args = [HERE / "classpath_resolver.py", "--repo", args.repo, "--out", args.out]
@@ -619,32 +680,6 @@ def main() -> int:
         if args.module:
             source_args += ["--module", args.module]
         step("source", source_args)
-
-    # ── Step 8: JaCoCo parser → coverage-targets.json ────────────────────────
-    if "jacoco" not in skip and args.jacoco_xml:
-        step("jacoco", [
-            HERE / "jacoco_parser.py",
-            "--mode", "targets",
-            "--xml", args.jacoco_xml,
-            "--out", str(Path(args.out) / "coverage-targets.json"),
-            "--coverage-mode", args.coverage_mode,
-        ])
-        # M4: snapshot the same pre-generation report as the delta baseline so
-        # the per-cycle loop can ALWAYS compute coverage-delta.json. Without a
-        # baseline the delta is never produced and the loop cannot tell progress
-        # from a stall (the missing-baseline no-op that M3 now preserves).
-        b = snapshot_baseline(Path(args.jacoco_xml), Path(args.out))
-        if b is not None:
-            print(f"[OK] {b}  (delta baseline for jacoco_parser --mode delta --before)")
-    elif "jacoco" not in skip:
-        # #2: make the auto-skip loud and actionable instead of silent.
-        print(
-            "[WARN] step 'jacoco' skipped: no --jacoco-xml given. "
-            "state/coverage-targets.json will be empty, so the batch-plan is "
-            "empty and no targets reach the LLM. Generate a JaCoCo report "
-            "(mvn test jacoco:report) and pass --jacoco-xml.",
-            file=sys.stderr,
-        )
 
     # ── Step 9 [Phase 1]: Semantic index writer ───────────────────────────────
     if "index" not in skip:

@@ -504,7 +504,7 @@ def _parse_pom(pom: Path) -> etree._Element | None:
         return None
 
 
-def detect(repo: Path) -> dict:
+def detect(repo: Path, contract: Path | None = None) -> dict:
     """Return a complete stack-profile dict for the given repository."""
     root_pom = repo / "pom.xml"
     if not root_pom.exists():
@@ -527,7 +527,7 @@ def detect(repo: Path) -> dict:
     java_ver = _resolve_property(root_el, _java_from_pom(root_el)) or "unknown"
 
     # ── modules ───────────────────────────────────────────────────────────────
-    module_dirs = find_pom_modules(repo)
+    module_dirs = find_pom_modules(repo, contract=contract)
     module_profiles: list[dict] = []
 
     for mod_dir in sorted(module_dirs):
@@ -610,7 +610,7 @@ def main() -> int:
     # Retrocompatibly extend the schema before validating
     _update_schema(SCHEMAS_DIR / "stack-profile.schema.json")
 
-    profile = detect(repo)
+    profile = detect(repo, contract=state_dir / "build-tool-contract.json")
     validate("stack-profile", profile)
     atomic_write_json(state_dir / "stack-profile.json", profile)
 

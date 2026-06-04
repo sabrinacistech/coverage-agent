@@ -328,8 +328,24 @@ def fail(msg: str, code: int = 2) -> None:
     sys.exit(code)
 
 
-def find_pom_modules(repo: Path) -> list[Path]:
-    """Best-effort list of Maven module directories (root + children with pom.xml)."""
+def find_pom_modules(repo: Path, contract: Path | str | None = None) -> list[Path]:
+    """Best-effort list of Maven module directories (root + children with pom.xml).
+
+    Consolidación (audit): el descubrimiento de módulos lo hace UNA sola vez
+    ``pom_parser`` (primer paso de la Fase 0) → ``build-tool-contract.json``.
+    Cuando se pasa ``contract`` (la ruta a ese JSON) y existe, se reutiliza su
+    lista de módulos en lugar de volver a caminar el árbol con ``rglob`` — así
+    los 4 pasos de discovery siguientes (archetype/generated/classpath/stack) no
+    repiten el mismo walk del repo. Si el contrato falta o no se puede leer, cae
+    al ``rglob`` (comportamiento previo, sin cambios observables)."""
+    if contract is not None:
+        try:
+            data = json.loads(Path(contract).read_text(encoding="utf-8"))
+            mods = [Path(m["path"]) for m in data.get("modules", []) if m.get("path")]
+            if mods:
+                return mods
+        except Exception:
+            pass  # contrato ausente/ilegible → fallback al rglob
     poms = sorted(repo.rglob("pom.xml"))
     # Skip generated/build dirs
     poms = [p for p in poms if "target" not in p.parts and "build" not in p.parts]

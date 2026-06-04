@@ -142,7 +142,7 @@ def main() -> int:
     state_dir = Path(args.out).resolve()
 
     aggregated_modules = []
-    for mod_dir in find_pom_modules(repo):
+    for mod_dir in find_pom_modules(repo, contract=state_dir / "build-tool-contract.json"):
         pom = mod_dir / "pom.xml"
         if pom.exists():
             try:

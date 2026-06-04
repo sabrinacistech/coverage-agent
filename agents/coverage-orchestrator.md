@@ -125,7 +125,6 @@ El orquestador invoca las herramientas; no hay agente LLM intermedio.
 | Archetype            | `archetype_detector.py`           | `state/archetype-profile.json`                                   |
 | Generated code       | `generated_code_scanner.py`       | `state/generated-code-index.json`                                |
 | Classpath / whitelist| `classpath_resolver.py`           | `state/import-whitelist.json`                                    |
-| Repo intelligence    | `repo_intelligence.py` (wrapper)  | `state/_summaries/repo-intelligence.json` + outputs de stack/contracts/index/classification/deps |
 | Stack profile        | `stack_profile_detector.py`       | `state/stack-profile.json`                                       |
 | Symbol contracts     | `bytecode_scanner.py` + `source_symbol_enricher.py` | `state/symbol-contracts/<fqcn>.json`               |
 | Coverage targets     | `jacoco_parser.py --mode targets` | `state/coverage-targets.json`                                    |

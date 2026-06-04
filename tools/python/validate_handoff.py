@@ -305,6 +305,40 @@ def main() -> int:
         )
         return 2
 
+    # A — terminal limpio "sin targets": no hay nada que generar. Dos formas:
+    #   (a) JaCoCo reportó 0 métodos sin cubrir (run_pipeline hace early-exit y NO
+    #       produce import-whitelist/packs/contracts), o
+    #   (b) había targets crudos pero TODOS quedaron fuera del batch-plan tras la
+    #       exclusión de código generado/cubierto (batch-plan con items=[]).
+    # Ninguna es un handoff roto → reportar NO_TARGETS (exit 0) en vez de
+    # BLOCKED_PRE_STAGE_MISSING, ANTES de exigir whitelist/packs/contracts.
+    cov_targets = state_dir / "coverage-targets.json"
+    batch_plan = state_dir / "batch-plan.json"
+    no_targets = False
+    why = ""
+    if cov_targets.exists():
+        try:
+            if len(load_json(cov_targets).get("targets", [])) == 0:
+                no_targets, why = True, "JaCoCo reportó 0 métodos sin cubrir"
+        except Exception:
+            pass
+    if not no_targets and batch_plan.exists():
+        try:
+            if len(load_json(batch_plan).get("items", [])) == 0:
+                no_targets, why = True, "todos los targets quedaron fuera del batch (generados/cubiertos)"
+        except Exception:
+            pass
+    if no_targets:
+        print(f"[OK] handoff: NO_TARGETS — {why}; nada que generar.")
+        payload = {
+            "schemaVersion": 1,
+            "generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "phase": "PRE_GENERATION",
+            "status": "NO_TARGETS",
+        }
+        _emit_summary(state_dir / "_summaries" / "handoff-summary.json", payload)
+        return 0
+
     missing = _check_required(state_dir)
     if missing:
         print("[BLOCKED] BLOCKED_PRE_STAGE_MISSING", file=sys.stderr)

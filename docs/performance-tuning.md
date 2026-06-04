@@ -112,7 +112,7 @@ Las optimizaciones anteriores son la base. El roadmap incremental añade:
 - **Phase 4 — Generación quirúrgica (AST patches)**: emitir parches mínimos, no archivos completos. Ver `skills/07-generation/ast-patch-generation.md`.
 - **Phase 5 — Plantillas determinísticas**: `templates/*.java` reducen alucinación. El LLM completa cuerpos/asserts, no esqueletos.
 - **Phase 6 — Repair determinístico**: `repair-rules/*.rules` resuelven antes de llamar al LLM.
-- **Phase 7 — Consolidación**: `tools/python/repo_intelligence.py` (wrapper determinista) absorbe discovery/classification/dep-graph/symbol-contract/stack-profile. No es un turno LLM.
+- **Phase 7 — Consolidación**: `tools/python/run_pipeline.py` orquesta de forma determinista discovery/classification/dep-graph/symbol-contract/stack-profile en un solo pre-stage (no es un turno LLM). El descubrimiento de módulos Maven se resuelve una sola vez (`pom_parser` → `build-tool-contract.json`) y el resto de las tools lo reusa vía `find_pom_modules(..., contract=...)`.
 - **Phase 8 — LSP**: reutilizar JDT.LS de VS Code en vez de re-resolver símbolos. Ver `skills/00-runtime/lsp-integration.md`.
 
 ### KPIs adicionales esperados tras phases 1-8

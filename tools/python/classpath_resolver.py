@@ -163,7 +163,7 @@ def main() -> int:
     out_dir = state_dir / "import-whitelist"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    modules = find_pom_modules(repo)
+    modules = find_pom_modules(repo, contract=state_dir / "build-tool-contract.json")
     if args.module and args.module not in (".", ""):
         modules = [m for m in modules if m.name == args.module]
     if not modules:

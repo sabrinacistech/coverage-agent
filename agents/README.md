@@ -19,7 +19,6 @@ y consume `state/*.json`.
 | Semantic index          | `tools/python/semantic_index_writer.py` | `state/index/*.json`                                                          |
 | Classification          | `tools/python/classification_analyzer.py` | `classification-index.json`                                                |
 | Dependency graph        | `tools/python/dependency_graph_extractor.py` | `dependency-graph.json`                                                 |
-| Repository intelligence | `tools/python/repo_intelligence.py`    | `_summaries/repo-intelligence.json` (wrapper determinístico de stack/contracts/index/classification/deps) |
 | Fixtures                | `tools/python/fixture_catalog_builder.py` | `fixture-catalog.json`                                                     |
 | Planning                | `tools/python/coverage_planner.py`     | `batch-plan.json`                                                              |
 | Incremental scope       | `tools/python/incremental_map_writer.py` | `incremental-map.json`                                                       |
