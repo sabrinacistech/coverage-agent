@@ -165,6 +165,15 @@ def main() -> int:
         choices=["coverage", "branch-coverage", "mutation-hardening"],
     )
     parser.add_argument(
+        "--include-fqcn",
+        default=None,
+        metavar="REGEX",
+        help="Regex passed to the bytecode scanner: only scan FQCNs matching it. "
+        "Use it to EXCLUDE generated code (CXF/wsdl2java, JAXB, OpenAPI) that would "
+        "otherwise produce symbol-contracts failing schema validation. "
+        r"Example: '^com\.acme\.(?!.*\.webservice\.impl\.)'. Default: scan all (.*).",
+    )
+    parser.add_argument(
         "--clean",
         action="store_true",
         help="Wipe --state-dir before the run (mirrors run_coverage.ps1). "
@@ -281,18 +290,20 @@ def main() -> int:
 
     # ── D. Full Fase 0 with the JaCoCo report ────────────────────────────────
     print("\n==== [D] Full Fase 0 (run_pipeline --jacoco-xml) ====")
-    run(
-        [
-            python, str(run_pipeline),
-            "--repo", str(repo),
-            "--out", str(state_dir),
-            "--module", args.module,
-            "--jacoco-xml", str(jacoco_xml),
-            "--coverage-mode", args.coverage_mode,
-        ],
-        cwd=agent_root,
-        env=env,
-    )
+    pipeline_cmd = [
+        python, str(run_pipeline),
+        "--repo", str(repo),
+        "--out", str(state_dir),
+        "--module", args.module,
+        "--jacoco-xml", str(jacoco_xml),
+        "--coverage-mode", args.coverage_mode,
+    ]
+    if args.include_fqcn:
+        # Scopes the bytecode scanner so generated code never reaches
+        # validate-contracts (where a non-conforming generated contract aborts
+        # the whole pipeline at exit 1).
+        pipeline_cmd += ["--include-fqcn", args.include_fqcn]
+    run(pipeline_cmd, cwd=agent_root, env=env)
 
     state_file = ensure_execution_state(
         state_dir=state_dir,
