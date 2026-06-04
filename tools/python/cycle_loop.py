@@ -67,6 +67,7 @@ RC_DONE = 0
 RC_BUDGET_EXCEEDED = 2
 RC_STATE_MALFORMED = 3
 RC_CONVERGENCE_STALL = 5
+RC_CYCLE_ERROR = 4  # one_cycle exited abnormally (crash/handoff error) — NOT a compile fail
 
 _COMPILE_FAIL_WINDOW = 4   # how many recent cycles gate_g8 can see; it reads [-1].
 _ABSOLUTE_SAFETY_CAP = 1000  # defends against a malformed/unbounded budget.
@@ -174,10 +175,29 @@ def run_loop(
 
         cmd_rc = subprocess.run(command, check=False).returncode
 
+        # Crash guard (audit 2026-06-04): one_cycle's defined exit codes are 0 (ok),
+        # RC_BUDGET_EXCEEDED (its own budget backstop) and done_exit_code (no more
+        # targets). ANY OTHER code is an uncaught crash — a malformed handoff /
+        # patch-descriptor, a provider/timeout error, an I/O fault. That is NOT a
+        # compile failure: feeding it to G8's compileFailRateWindow turns a broken
+        # handoff into a FALSE convergence stall that aborts the whole run on the
+        # first cycle. Surface it as its own error and leave the G8 signals untouched.
+        if cmd_rc not in (RC_DONE, RC_BUDGET_EXCEEDED, done_exit_code):
+            budget_enforcer.reset(state_path)
+            print(f"[FAIL] cycle command exited abnormally (rc={cmd_rc}); infra/handoff "
+                  "error, not a compile failure — aborting without touching G8.",
+                  file=sys.stderr)
+            return RC_CYCLE_ERROR
+
         delta = _read_cycle_delta(state_dir)
-        compile_failed = cmd_rc not in (0, done_exit_code)
+        # cmd_rc ∈ {0, RC_BUDGET_EXCEEDED}. Neither is a compile failure at this
+        # layer: one_cycle swallows test failures (best-effort) and returns 0, so
+        # genuine non-progress surfaces as a flat/zero delta below (the G8 zero-delta
+        # path bounds it). compile_failed stays False so the window never re-accumulates
+        # the crash false-positives that used to trip G8.
+        compile_failed = False
         if delta is None:
-            # No fresh measurement this cycle (skip/block/no-baseline/compile-fail)
+            # No fresh measurement this cycle (skip/block/no-baseline)
             # → not a measured stall; preserve the counter. Genuine flat cycles
             # still accumulate; structural no-ops never trip G8 falsely.
             zero_delta: bool | None = None

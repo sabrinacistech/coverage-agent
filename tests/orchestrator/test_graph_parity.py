@@ -55,6 +55,9 @@ def _via_graph(d: Path, plan: list, monkeypatch) -> tuple[int, int]:
     ("budget", 2, [[0, 5, 0]] * 6, cycle_loop.RC_BUDGET_EXCEEDED),
     # G8 STALL: delta cero repetido -> el gate de convergencia corta.
     ("stall", 20, [[0, 0, 0]] * 10, cycle_loop.RC_CONVERGENCE_STALL),
+    # CRASH: one_cycle sale con un código anormal (handoff/patch inválido). NO debe
+    # contarse como compile-fail ni disparar G8: ambos drivers paran con RC_CYCLE_ERROR.
+    ("crash", 20, [[1, 0, 0]], cycle_loop.RC_CYCLE_ERROR),
 ])
 def test_graph_parity(tmp_path, monkeypatch, name, max_cycles, plan, expected_rc):
     d_cyc = tmp_path / f"{name}-cyc"

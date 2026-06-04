@@ -32,6 +32,7 @@ RC_DONE = cycle_loop.RC_DONE
 RC_BUDGET = cycle_loop.RC_BUDGET_EXCEEDED
 RC_STATE_MALFORMED = cycle_loop.RC_STATE_MALFORMED
 RC_STALL = cycle_loop.RC_CONVERGENCE_STALL
+RC_CYCLE_ERROR = cycle_loop.RC_CYCLE_ERROR
 _ABSOLUTE_CAP = cycle_loop._ABSOLUTE_SAFETY_CAP
 
 
@@ -76,10 +77,18 @@ def cycle_node(state: GraphState) -> dict:
     # 3. trabajo del ciclo (gen→patch→validación). Reescribe coverage-delta.json.
     cmd_rc = nodes.run_cycle_work(sd, Path(state["repo"]))
 
+    # 3b. Crash guard (paridad con cycle_loop): un código fuera de {0, RC_BUDGET,
+    # done} es un crash de one_cycle (handoff/patch inválido, provider/I-O), NO un
+    # compile-fail. No alimentar G8 — surfacearlo como error de ciclo.
+    if cmd_rc not in (RC_DONE, RC_BUDGET, done):
+        budget_enforcer.reset(sp)
+        return {"status": "CYCLE_ERROR", "stop_rc": RC_CYCLE_ERROR}
+
     # 4. registrar resultado (los dos campos que lee G8), tri-estado igual a M3:
     #    solo un ciclo MEDIDO y plano cuenta como zero-delta; "no medido" preserva.
+    #    compile_failed=False: los crashes ya se filtraron arriba (no son churn).
     delta = cycle_loop._read_cycle_delta(sd)
-    compile_failed = cmd_rc not in (0, done)
+    compile_failed = False
     if delta is None:
         zero_delta: bool | None = None
     else:

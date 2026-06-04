@@ -20,5 +20,5 @@ class GraphState(TypedDict, total=False):
     iterations: int
     last_cmd_rc: Optional[int]
     # Resultado de parada
-    status: Optional[str]   # "running" | "DONE" | "BUDGET" | "STALL" | "STATE_MALFORMED"
+    status: Optional[str]   # "running" | "DONE" | "BUDGET" | "STALL" | "STATE_MALFORMED" | "CYCLE_ERROR"
     stop_rc: Optional[int]
