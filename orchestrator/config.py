@@ -51,6 +51,16 @@ def langfuse_enabled() -> bool:
     return os.environ.get("LANGFUSE_ENABLED", "0") == "1"
 
 
+def prompt_caching_enabled() -> bool:
+    """Prompt caching del *system prompt* en LiteLLMProvider (F3).
+
+    El system prompt (el agente markdown: ~1.5K–3K tokens) es estable entre
+    llamadas del mismo rol; marcarlo con `cache_control` evita re-facturarlo en
+    cada generación/repair. Default ON; `COVAGENT_PROMPT_CACHE=0` lo desactiva.
+    """
+    return (os.environ.get("COVAGENT_PROMPT_CACHE") or "1").strip() != "0"
+
+
 # ── Proveedor de LLM (E1.1) ───────────────────────────────────────────────────
 # El gateway despacha al proveedor activo. En etapa 1 el default es `ide`: el LLM
 # lo pone Claude Code / GitHub Copilot vía handoff por archivo (sin API key). El

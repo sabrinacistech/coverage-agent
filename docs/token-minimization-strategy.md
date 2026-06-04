@@ -174,6 +174,20 @@ preferida del LLM en producción y respeta el schema
 
 ---
 
+## Regla 7 — Prompt caching del system prompt (camino `litellm`)
+
+El *system prompt* de cada rol es el agente markdown (`agents/test-body-agent.md`
+~1.5K tokens, `agents/repair-agent.md` ~3K tokens): **estable entre llamadas** del
+mismo rol. `LiteLLMProvider` lo marca con `cache_control: {type: ephemeral}`
+(`orchestrator/providers.py#cache_system_messages`) cuando el modelo lo soporta, así
+los ciclos siguientes **no re-facturan** esos tokens de entrada — solo cambia el
+*user message* (el context-pack compacto del SUT), que nunca se cachea.
+
+- Default **ON**; `COVAGENT_PROMPT_CACHE=0` lo desactiva.
+- Solo aplica al proveedor `litellm` (autónomo). En el proveedor `ide` (handoff a
+  Claude Code) el caching lo gestiona el propio IDE.
+- Es inocuo si el proveedor no soporta caching: LiteLLM descarta `cache_control`.
+
 ## Métricas de referencia
 
 | Práctica prohibida | Costo estimado | Alternativa |

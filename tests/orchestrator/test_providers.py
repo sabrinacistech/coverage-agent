@@ -6,8 +6,10 @@ el archivo de respuesta desde otro hilo.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -112,3 +114,65 @@ def test_ide_provider_interactive_enter_continues(tmp_path, monkeypatch):
         [{"role": "user", "content": "x"}], role="generation", state_dir=tmp_path))
     assert out["status"] == "BLOCKED"
     assert list((ide / "_done").glob("response-*.json"))
+
+
+# ── F3: prompt caching del system prompt en LiteLLMProvider ────────────────────
+
+def test_cache_system_messages_marks_only_system():
+    msgs = [
+        {"role": "system", "content": "AGENTE LARGO Y ESTABLE"},
+        {"role": "user", "content": "context pack que cambia"},
+    ]
+    out = providers.cache_system_messages(msgs)
+    # system → bloque de contenido con cache_control ephemeral
+    assert isinstance(out[0]["content"], list)
+    block = out[0]["content"][0]
+    assert block["type"] == "text"
+    assert block["text"] == "AGENTE LARGO Y ESTABLE"
+    assert block["cache_control"] == {"type": "ephemeral"}
+    # user intacto (no se cachea: cambia en cada llamada)
+    assert out[1] == {"role": "user", "content": "context pack que cambia"}
+    # no muta el original
+    assert msgs[0]["content"] == "AGENTE LARGO Y ESTABLE"
+
+
+def _install_fake_litellm(monkeypatch) -> dict:
+    """Inyecta un `litellm` falso que captura los kwargs de completion()."""
+    captured: dict = {}
+    fake = types.ModuleType("litellm")
+
+    def completion(**kwargs):
+        captured.update(kwargs)
+        msg = types.SimpleNamespace(content='{"schemaVersion":1,"status":"BLOCKED","blockReason":"x"}')
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg)])
+
+    fake.completion = completion
+    monkeypatch.setitem(sys.modules, "litellm", fake)
+    return captured
+
+
+def test_litellm_provider_applies_caching(tmp_path, monkeypatch):
+    monkeypatch.setenv("COVAGENT_LLM_PROVIDER", "litellm")
+    monkeypatch.delenv("COVAGENT_PROMPT_CACHE", raising=False)  # default ON
+    captured = _install_fake_litellm(monkeypatch)
+
+    llm_gateway.complete(
+        [{"role": "system", "content": "SYS"}, {"role": "user", "content": "U"}],
+        role="generation", state_dir=tmp_path)
+
+    sys_msg = captured["messages"][0]
+    assert isinstance(sys_msg["content"], list)
+    assert sys_msg["content"][0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_litellm_provider_caching_can_be_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("COVAGENT_LLM_PROVIDER", "litellm")
+    monkeypatch.setenv("COVAGENT_PROMPT_CACHE", "0")  # opt-out
+    captured = _install_fake_litellm(monkeypatch)
+
+    llm_gateway.complete(
+        [{"role": "system", "content": "SYS"}, {"role": "user", "content": "U"}],
+        role="generation", state_dir=tmp_path)
+
+    # system queda como string plano: sin cache_control
+    assert captured["messages"][0]["content"] == "SYS"

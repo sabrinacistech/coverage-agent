@@ -170,14 +170,69 @@ def _archive(done: Path, *paths: Path) -> None:
                 pass
 
 
+# ── Prompt caching (F3) ────────────────────────────────────────────────────────
+
+def cache_system_messages(messages: list[dict]) -> list[dict]:
+    """Marca cada *system message* de texto con `cache_control: ephemeral`.
+
+    Pura y sin dependencias de litellm (testeable en aislamiento). Convierte
+    ``{"role":"system","content":"<str>"}`` en la forma de bloques de contenido
+    que la API soporta para cachear, dejando intactos los demás mensajes (el
+    *user message* lleva el context-pack, que cambia en cada llamada y NO se
+    cachea). Idempotente: un system message que ya viene como lista se respeta.
+    """
+    out: list[dict] = []
+    for m in messages:
+        if m.get("role") == "system" and isinstance(m.get("content"), str):
+            out.append({
+                "role": "system",
+                "content": [{
+                    "type": "text",
+                    "text": m["content"],
+                    "cache_control": {"type": "ephemeral"},
+                }],
+            })
+        else:
+            out.append(m)
+    return out
+
+
+def _supports_prompt_caching(model: str) -> bool:
+    """¿El modelo soporta prompt caching?
+
+    Todos los modelos Claude actuales lo soportan, así que la heurística por nombre
+    tiene precedencia sobre el mapa de capacidades de LiteLLM (que puede estar
+    desactualizado y no reconocer nombres nuevos como `claude-opus-4-8`). Para
+    otros proveedores se consulta a LiteLLM. `cache_control` es inocuo si el
+    proveedor no lo soporta (LiteLLM lo descarta), así que ser permisivo no rompe.
+    """
+    m = model.lower()
+    if "claude" in m or "anthropic" in m:
+        return True
+    try:
+        from litellm.utils import supports_prompt_caching as _spc
+
+        return bool(_spc(model=model))
+    except Exception:
+        return False
+
+
 # ── Proveedor LiteLLM (autónomo, dormido en etapa 1) ──────────────────────────
 
 class LiteLLMProvider:
-    """Llama litellm.completion. Requiere credenciales del proveedor de modelos."""
+    """Llama litellm.completion. Requiere credenciales del proveedor de modelos.
+
+    Aplica prompt caching del system prompt (F3) cuando el modelo lo soporta y
+    `COVAGENT_PROMPT_CACHE != 0`: el agente markdown se cachea una vez y los
+    ciclos siguientes del mismo rol no re-facturan esos tokens de entrada.
+    """
 
     def complete(self, messages: list[dict], *, role: str, state_dir, **kwargs) -> str:
         model = config.model_for_role(role)
         import litellm  # import perezoso: aísla litellm de los tests del IDEProvider
+
+        if config.prompt_caching_enabled() and _supports_prompt_caching(model):
+            messages = cache_system_messages(messages)
 
         resp = litellm.completion(
             model=model,
