@@ -77,24 +77,18 @@ def select_next_target(state_dir: Path) -> dict | None:
     return None
 
 
-def load_context_pack(state_dir: Path, sut: str) -> dict:
-    """Pack COMPLETO (context-packs/<sut>.json) — lo consume el perímetro del
-    patcher (allowedImports / sut). NO se manda al modelo: puede pesar cientos de
-    KB; para eso está el compacto."""
-    return _load_json(state_dir / "context-packs" / f"{sut}.json")
-
-
-def load_context_pack_compact(state_dir: Path, sut: str) -> dict:
+def load_context_pack_compact(state_dir: Path, sut: str) -> dict | None:
     """Pack COMPACTO (context-packs-compact/<sut>.json) — proyección minificada
-    que se manda al modelo (minimización de tokens). Si no existe (estado viejo),
-    cae al completo con aviso: peor en tokens pero no rompe el ciclo."""
+    que se manda al modelo (minimización de tokens).
+
+    F4: si NO existe, devuelve None en vez de degradar al pack completo. Mandar el
+    pack completo (cientos de KB) al modelo sería un blowup de tokens silencioso;
+    es preferible BLOQUEAR el target y forzar re-correr la fase 0 con `--compact`
+    (run_pipeline.py). El llamador trata el None como BLOCKED."""
     compact = state_dir / "context-packs-compact" / f"{sut}.json"
     if compact.exists():
         return _load_json(compact)
-    print(f"[one_cycle] WARN: sin compact-pack para {sut}; uso el completo "
-          "(re-corré la fase 0 para generar context-packs-compact y bajar tokens).",
-          file=sys.stderr)
-    return load_context_pack(state_dir, sut)
+    return None
 
 
 def testcase_from_target(item: dict) -> dict:
@@ -172,6 +166,15 @@ def run_one_cycle(state_dir: Path, repo: Path) -> int:
     target_id = target.get("targetId", sut)
     pack_path = state_dir / "context-packs" / f"{sut}.json"
     pack_compact = load_context_pack_compact(state_dir, sut)  # → al modelo (pocos tokens)
+
+    # F4: sin compact-pack NO se degrada al pack completo (evita blowup de tokens).
+    # Se BLOQUEA el target; re-correr la fase 0 con --compact regenera el pack.
+    if pack_compact is None:
+        print(f"[one_cycle] target {target_id}: BLOCKED — sin compact-pack para {sut}. "
+              "Re-corré la fase 0 (run_pipeline.py --compact) para regenerarlo; "
+              "NO se degrada al pack completo.")
+        mark_processed(state_dir, target_id)
+        return RC_OK
 
     # Fase 8 — generación (el gateway aplica el token-budget antes de llamar).
     # Al modelo va el pack COMPACTO; el COMPLETO queda para el perímetro del patcher.

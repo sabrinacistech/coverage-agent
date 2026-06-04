@@ -102,6 +102,28 @@ def test_apply_patch_blocks_import_outside_perimeter(tmp_path):
     assert rc == 3, "un import fuera del perímetro debe bloquearse con rc=3"
 
 
+def test_run_one_cycle_blocks_when_compact_pack_missing(tmp_path, monkeypatch):
+    """F4: si falta el compact-pack del SUT, el ciclo BLOQUEA el target y NUNCA
+    invoca al modelo (no degrada al pack completo → sin blowup de tokens)."""
+    sut = "com.example.Foo"
+    _write(tmp_path / "batch-plan.json", {
+        "schemaVersion": 1, "cycle": 1, "mode": "coverage", "sizeChosen": 1,
+        "items": [{"targetId": "t1", "sut": sut, "method": "foo()"}],
+    })
+    # El pack COMPLETO existe; el COMPACTO (lo que va al modelo) NO.
+    _write(tmp_path / "context-packs" / f"{sut}.json", {"sut": sut, "allowedImports": []})
+
+    called = {"n": 0}
+    monkeypatch.setattr(one_cycle.generation, "generate_patch",
+                        lambda **k: called.__setitem__("n", called["n"] + 1))
+
+    rc = one_cycle.run_one_cycle(tmp_path, tmp_path)
+    assert rc == one_cycle.RC_OK
+    assert called["n"] == 0, "generación NO debe invocarse sin compact-pack"
+    # El target quedó procesado → el loop no se queda girando sobre él.
+    assert one_cycle.select_next_target(tmp_path.resolve()) is None
+
+
 def test_select_next_target_skips_processed(tmp_path):
     _write(tmp_path / "batch-plan.json", {
         "schemaVersion": 1, "cycle": 1, "mode": "coverage", "sizeChosen": 2,
