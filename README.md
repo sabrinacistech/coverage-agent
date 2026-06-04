@@ -53,9 +53,52 @@ generación la dispara Copilot (handoff por archivo) o el orquestador LangGraph 
 controla con `--out` (pre-stage) / `--state` (patcher y runner). Ver el paso a paso en
 [§Ejecución desde VS Code + Copilot](#ejecución-desde-vs-code--copilot-paso-a-paso).
 
-## Pre-stage Python (obligatorio)
+## Modelo de uso: determinista (consola) + agéntico (Copilot/VS Code)
+
+La corrida tiene **dos partes bien separadas**:
+
+1. **Parte determinista — desde consola, SIN agente.** Un único comando
+   (`tools/python/run_all_deterministic.py`) ejecuta todo el pre-stage: verifica
+   JaCoCo, corre Maven y deja la Fase 0 con el handoff `READY`. No consume tokens
+   ni necesita Copilot/Claude Code. **Es más rápido y barato** que pedirle a un
+   agente que apruebe comando por comando.
+2. **Parte agéntica — desde Copilot o VS Code.** El LLM solo ejecuta `generation`
+   y `repair` consumiendo los artefactos que dejó la parte 1 (ver
+   [§Ejecución desde VS Code + Copilot](#ejecución-desde-vs-code--copilot-paso-a-paso)).
+
+## Pre-stage Python (parte determinista, obligatorio)
 
 Antes de cualquier ciclo LLM, correr el pipeline determinista que produce todos los `state/*.json`. Esto **reduce drásticamente los tokens** consumidos y acelera la generación (ver [`docs/performance-tuning.md`](docs/performance-tuning.md) y [`docs/python-pipeline.md`](docs/python-pipeline.md)).
+
+### Opción recomendada: un solo comando
+
+`run_all_deterministic.py` orquesta todo el pre-stage de punta a punta, sin intervención del agente:
+
+```bash
+python tools/python/run_all_deterministic.py \
+   --repo      C:/repo/proyectox \
+   --state-dir C:/repo/coverage_proyectox \
+   --module    <module> \
+   --clean
+```
+
+Orden interno: **(A)** pre-pasada de contratos (`pom` + `archetype`) → **(B)** verificación JaCoCo (`jacoco_pom_guard`) → **(C)** baseline Maven que genera `target/` + `jacoco.xml` → **(D)** Fase 0 completa con `--jacoco-xml` (los pasos `pom`/`archetype` salen como `[CACHE HIT]`). Flags útiles:
+
+| Flag | Para qué |
+|------|----------|
+| `--skip-jacoco` | Reusar un `jacoco.xml` ya generado (saltea A/B/C) |
+| `--apply-jacoco-pom` | Inyectar el plugin JaCoCo en el POM (necesario si vas a correr el ciclo y el POM no lo tiene; default `--check`, no escribe) |
+| `--start-cycle-loop` | Encadenar el ciclo de generación/reparación (provider por handoff IDE) |
+| `--coverage-mode` | `coverage` (default) · `branch-coverage` · `mutation-hardening` |
+| `--max-cycles` / `--max-minutes-per-cycle` | Presupuesto sembrado en `execution-state.json` |
+
+> Maven debe estar en el PATH (en Windows el script lo lanza vía `cmd /c mvn`). En
+> Git Bash usá barras `/` en las rutas. Corré el script con el Python del entorno
+> que tenga instaladas las deps (`pip install -r tools/python/requirements.txt`).
+
+### Alternativa granular (paso a paso)
+
+Si necesitás control fino sobre cada paso, podés correr Maven y el pipeline a mano:
 
 ```bash
 mvn -q test jacoco:report     # clases compiladas + jacoco.xml (objetivos + baseline del delta)
@@ -67,8 +110,8 @@ python tools/python/run_pipeline.py \
    --jacoco-xml C:/repo/proyectox/target/site/jacoco/jacoco.xml
 ```
 
-> `--out` apunta **fuera** del proyecto (`coverage_<proyecto>`); los tests, en cambio, se escriben
-> dentro del proyecto. Paso a paso completo con Copilot en
+> `--out`/`--state-dir` apuntan **fuera** del proyecto (`coverage_<proyecto>`); los tests, en cambio,
+> se escriben dentro del proyecto. Paso a paso completo con Copilot en
 > [§Ejecución desde VS Code + Copilot](#ejecución-desde-vs-code--copilot-paso-a-paso).
 
 ## Ejecución desde VS Code + Copilot (paso a paso)
@@ -76,6 +119,11 @@ python tools/python/run_pipeline.py \
 Escenario: en VS Code tenés abierta **esta arquitectura** (`coverage-agent`) como workspace, y
 disparás la cobertura de un proyecto externo con **un prompt en Copilot Chat**. Todo lo que genera
 la arquitectura queda **fuera** del proyecto; solo los tests se escriben **dentro** del proyecto.
+
+> **Recomendado:** corré primero la **parte determinista desde consola** con
+> `run_all_deterministic.py` (ver [§Pre-stage Python](#pre-stage-python-parte-determinista-obligatorio)).
+> Así el agente arranca directo en `generation` (paso 2 de abajo) y no gasta tokens en el pre-stage.
+> El prompt de abajo incluye el paso 1 solo para el caso en que prefieras que el agente lo dispare.
 
 ### Convención de carpetas
 
