@@ -1,418 +1,502 @@
 #!/usr/bin/env python3
 """
-Piloto: análisis de arquitectura desde URI GitHub sin git clone manual.
+run_architecture_review.py
 
-Diseñado como pipeline hermano de run_pipeline.py:
-- No compila.
-- No requiere JaCoCo.
-- No escribe en el repo objetivo.
-- Descarga solo archivos relevantes desde GitHub Contents API / raw URLs.
+Piloto v3:
+- Soporta github.com y GitHub Enterprise.
+- No hace git clone.
+- Descarga árbol y contenido vía GitHub REST API.
+- Escribe reportes/análisis fuera de agents/, skills/, tools/ y schemas/.
 
-Uso:
+Ejemplo:
   python tools/python/run_architecture_review.py \
-    --repo-uri https://github.com/org/repo \
+    --repo-uri https://github.p1.com.ar/myop-otorgamiento/margenes-comportamental-backend.git \
     --branch main \
-    --out ./architecture-state
-
-Para repos privados:
-  set GITHUB_TOKEN=...
-  python tools/python/run_architecture_review.py --repo-uri ... --github-token-env GITHUB_TOKEN
+    --out ./state/architecture_app
 """
+
 from __future__ import annotations
 
 import argparse
 import base64
-import dataclasses
-import fnmatch
-import hashlib
 import json
 import os
 import re
+import ssl
 import sys
-import textwrap
-import urllib.error
 import urllib.parse
 import urllib.request
-from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable
-
-RELEVANT_EXTENSIONS = {
-    ".java", ".kt", ".xml", ".gradle", ".kts", ".yml", ".yaml",
-    ".properties", ".md", ".dockerfile", ".tf", ".json"
-}
-RELEVANT_BASENAMES = {
-    "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts",
-    "Dockerfile", "Jenkinsfile", "README.md", "application.yml", "application.yaml",
-    "application.properties", "openapi.yml", "openapi.yaml"
-}
-DEFAULT_EXCLUDES = [
-    "target/**", "build/**", ".git/**", ".idea/**", ".vscode/**", "node_modules/**",
-    "**/generated/**", "**/build/generated/**", "**/target/generated-sources/**",
-]
-MAX_FILE_BYTES_DEFAULT = 250_000
-MAX_FILES_DEFAULT = 900
 
 
-@dataclasses.dataclass(frozen=True)
-class RemoteFile:
+PROTECTED_AGENT_DIRS = {"agents", "skills", "tools", "schemas"}
+
+
+@dataclass
+class RepoRef:
+    host: str
+    owner: str
+    repo: str
+    api_base: str
+
+
+@dataclass
+class SourceFile:
     path: str
+    kind: str
     size: int
-    sha: str
-    download_url: str | None
 
 
-def parse_github_uri(uri: str) -> tuple[str, str]:
-    parsed = urllib.parse.urlparse(uri)
-    if parsed.netloc.lower() != "github.com":
-        raise ValueError("Este piloto solo soporta URI github.com. Para GitLab/Bitbucket agregar otro adapter.")
+@dataclass
+class Finding:
+    severity: str
+    category: str
+    title: str
+    description: str
+    evidence: list[str]
+    recommendation: str
+
+
+def parse_repo_uri(repo_uri: str, github_api_base: str | None = None) -> RepoRef:
+    parsed = urllib.parse.urlparse(repo_uri)
+
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError(
+            "URI inválida. Formato esperado: https://<github-host>/<owner>/<repo>[.git]"
+        )
+
+    host = parsed.netloc.lower()
     parts = [p for p in parsed.path.strip("/").split("/") if p]
+
     if len(parts) < 2:
-        raise ValueError("URI GitHub inválida. Esperado: https://github.com/{owner}/{repo}")
-    owner, repo = parts[0], parts[1]
+        raise ValueError(
+            "URI inválida. Formato esperado: https://<github-host>/<owner>/<repo>[.git]"
+        )
+
+    owner = parts[0]
+    repo = parts[1]
     if repo.endswith(".git"):
         repo = repo[:-4]
-    return owner, repo
+
+    if github_api_base:
+        api_base = github_api_base.rstrip("/")
+    elif host == "github.com":
+        api_base = "https://api.github.com"
+    else:
+        # GitHub Enterprise REST API default.
+        api_base = f"https://{host}/api/v3"
+
+    return RepoRef(host=host, owner=owner, repo=repo, api_base=api_base)
 
 
-def github_headers(token: str | None) -> dict[str, str]:
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "coverage-agent-architecture-pilot",
-    }
+def http_json(url: str, token: str | None = None) -> dict:
+    req = urllib.request.Request(url)
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("User-Agent", "coverage-agent-architecture-pilot")
     if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
+        req.add_header("Authorization", f"Bearer {token}")
 
-
-def http_json(url: str, headers: dict[str, str]) -> Any:
-    request = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(req, timeout=60) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"GitHub API error {exc.code} for {url}: {body[:500]}") from exc
+        raise RuntimeError(f"HTTP {exc.code} consultando {url}\n{body}") from exc
+    except ssl.SSLError as exc:
+        raise RuntimeError(
+            "Error SSL al conectar con GitHub Enterprise. "
+            "Configurar certificados corporativos/CA bundle para Python. "
+            "No se recomienda desactivar verificación SSL."
+        ) from exc
 
 
-def http_text(url: str, headers: dict[str, str]) -> str:
-    request = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            raw = response.read()
-            return raw.decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Download error {exc.code} for {url}: {body[:300]}") from exc
+def list_remote_files(repo_ref: RepoRef, branch: str, token: str | None) -> list[SourceFile]:
+    encoded_branch = urllib.parse.quote(branch, safe="")
+    url = (
+        f"{repo_ref.api_base}/repos/"
+        f"{urllib.parse.quote(repo_ref.owner, safe='')}/"
+        f"{urllib.parse.quote(repo_ref.repo, safe='')}/"
+        f"git/trees/{encoded_branch}?recursive=1"
+    )
+    data = http_json(url, token)
+    tree = data.get("tree", [])
 
+    if data.get("truncated"):
+        print(
+            "WARN: GitHub devolvió tree truncado. "
+            "El análisis puede estar incompleto. Considerar filtros o ZIP adapter.",
+            file=sys.stderr,
+        )
 
-def get_default_branch(owner: str, repo: str, headers: dict[str, str]) -> str:
-    data = http_json(f"https://api.github.com/repos/{owner}/{repo}", headers)
-    return data.get("default_branch") or "main"
-
-
-def list_tree(owner: str, repo: str, branch: str, headers: dict[str, str]) -> tuple[list[RemoteFile], bool]:
-    url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{urllib.parse.quote(branch)}?recursive=1"
-    data = http_json(url, headers)
-    truncated = bool(data.get("truncated"))
-    files: list[RemoteFile] = []
-    for item in data.get("tree", []):
+    files: list[SourceFile] = []
+    for item in tree:
         if item.get("type") != "blob":
             continue
-        path = item.get("path") or ""
+        path = item.get("path", "")
         size = int(item.get("size") or 0)
-        sha = item.get("sha") or ""
-        files.append(RemoteFile(path=path, size=size, sha=sha, download_url=None))
-    return files, truncated
+        if is_relevant(path):
+            files.append(SourceFile(path=path, kind=classify_path(path), size=size))
+    return files
 
 
-def is_relevant(path: str, size: int, max_file_bytes: int, includes: list[str], excludes: list[str]) -> bool:
-    norm = path.replace("\\", "/")
-    if size > max_file_bytes:
+def get_file_content(repo_ref: RepoRef, branch: str, path: str, token: str | None) -> str:
+    encoded_path = urllib.parse.quote(path)
+    encoded_ref = urllib.parse.quote(branch, safe="")
+    url = (
+        f"{repo_ref.api_base}/repos/"
+        f"{urllib.parse.quote(repo_ref.owner, safe='')}/"
+        f"{urllib.parse.quote(repo_ref.repo, safe='')}/"
+        f"contents/{encoded_path}?ref={encoded_ref}"
+    )
+    data = http_json(url, token)
+
+    if isinstance(data, list):
+        return ""
+
+    encoding = data.get("encoding")
+    content = data.get("content", "")
+
+    if encoding == "base64":
+        return base64.b64decode(content).decode("utf-8", errors="replace")
+
+    download_url = data.get("download_url")
+    if download_url:
+        req = urllib.request.Request(download_url)
+        req.add_header("User-Agent", "coverage-agent-architecture-pilot")
+        if token:
+            req.add_header("Authorization", f"Bearer {token}")
+        with urllib.request.urlopen(req, timeout=60) as response:
+            return response.read().decode("utf-8", errors="replace")
+
+    return ""
+
+
+def classify_path(path: str) -> str:
+    p = path.lower()
+    if p.endswith(".java"):
+        if "/controller/" in p or p.endswith("controller.java"):
+            return "java-controller"
+        if "/service/" in p or p.endswith("service.java") or "serviceimpl" in p:
+            return "java-service"
+        if "/repository/" in p or p.endswith("repository.java"):
+            return "java-repository"
+        if "/entity/" in p or "/model/" in p:
+            return "java-entity"
+        if "/dto/" in p or p.endswith("dto.java"):
+            return "java-dto"
+        if "/config/" in p:
+            return "java-config"
+        return "java"
+    if p.endswith("pom.xml"):
+        return "maven"
+    if p.endswith("build.gradle") or p.endswith("build.gradle.kts"):
+        return "gradle"
+    if p.endswith(".yml") or p.endswith(".yaml") or p.endswith(".properties"):
+        return "config"
+    if p.endswith("dockerfile") or p == "dockerfile" or p.endswith(".dockerfile"):
+        return "docker"
+    if ".github/workflows/" in p:
+        return "ci"
+    if p.endswith(".md"):
+        return "docs"
+    return "other"
+
+
+def is_relevant(path: str) -> bool:
+    p = path.lower()
+    if p.startswith(("target/", "build/", ".git/")):
         return False
-    if any(fnmatch.fnmatch(norm, pattern) for pattern in excludes):
+    if "node_modules/" in p or "/dist/" in p or "/target/" in p or "/build/" in p:
         return False
-    if includes and not any(fnmatch.fnmatch(norm, pattern) for pattern in includes):
-        return False
-    base = os.path.basename(norm)
-    ext = os.path.splitext(base)[1]
-    return base in RELEVANT_BASENAMES or ext in RELEVANT_EXTENSIONS or norm.startswith(".github/workflows/")
+
+    suffixes = (
+        ".java", ".kt", ".xml", ".gradle", ".kts", ".yml", ".yaml",
+        ".properties", ".md", "dockerfile", ".dockerfile",
+    )
+    return p.endswith(suffixes) or ".github/workflows/" in p or p.endswith("jenkinsfile")
 
 
-def raw_url(owner: str, repo: str, branch: str, path: str) -> str:
-    quoted_path = "/".join(urllib.parse.quote(part) for part in path.split("/"))
-    return f"https://raw.githubusercontent.com/{owner}/{repo}/{urllib.parse.quote(branch)}/{quoted_path}"
+def safe_output_dir(out: str | None, repo_name: str) -> Path:
+    project_root = Path(__file__).resolve().parents[2].resolve()
+
+    if out:
+        output = Path(out).expanduser().resolve()
+    else:
+        output = (project_root.parent / "architecture-reviews" / repo_name).resolve()
+
+    for dirname in PROTECTED_AGENT_DIRS:
+        protected = (project_root / dirname).resolve()
+        try:
+            output.relative_to(protected)
+            raise ValueError(
+                f"La salida no puede escribirse dentro de la arquitectura del agente: {protected}"
+            )
+        except ValueError as exc:
+            if "arquitectura del agente" in str(exc):
+                raise
+
+    output.mkdir(parents=True, exist_ok=True)
+    return output
 
 
-def package_of_java(source: str) -> str | None:
-    m = re.search(r"^\s*package\s+([a-zA-Z_][\w.]*)\s*;", source, flags=re.MULTILINE)
-    return m.group(1) if m else None
+def package_name(java_text: str) -> str | None:
+    match = re.search(r"^\s*package\s+([\w.]+)\s*;", java_text, flags=re.MULTILINE)
+    return match.group(1) if match else None
 
 
-def class_name_of_java(source: str) -> str | None:
-    m = re.search(r"\b(class|interface|enum|record)\s+([A-Za-z_][A-Za-z0-9_]*)", source)
-    return m.group(2) if m else None
+def imports(java_text: str) -> list[str]:
+    return re.findall(r"^\s*import\s+([\w.]+)\s*;", java_text, flags=re.MULTILINE)
 
 
-def annotations_of_java(source: str) -> list[str]:
-    return sorted(set(re.findall(r"@([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)", source)))
+def annotations(java_text: str) -> list[str]:
+    return sorted(set(re.findall(r"@([A-Za-z_][A-Za-z0-9_]*)", java_text)))
 
 
-def imports_of_java(source: str) -> list[str]:
-    return sorted(set(re.findall(r"^\s*import\s+(?:static\s+)?([a-zA-Z_][\w.]*)(?:\.\*)?\s*;", source, flags=re.MULTILINE)))
+def build_maps(files: list[SourceFile], contents: dict[str, str]) -> tuple[dict, dict, list[Finding]]:
+    java_files = [f for f in files if f.path.endswith(".java")]
 
-
-def classify_java(path: str, source: str) -> str:
-    anns = set(annotations_of_java(source))
-    lowered = path.lower()
-    if anns & {"RestController", "Controller"} or "/controller" in lowered:
-        return "controller"
-    if anns & {"Service", "Component"} or "/service" in lowered:
-        return "service"
-    if anns & {"Repository"} or "/repository" in lowered or "/dao" in lowered:
-        return "repository"
-    if anns & {"Entity", "MappedSuperclass", "Embeddable"} or "/entity" in lowered or "/model" in lowered:
-        return "domain-or-entity"
-    if anns & {"Configuration"} or "/config" in lowered:
-        return "configuration"
-    if "/dto" in lowered or path.endswith("Dto.java") or path.endswith("DTO.java"):
-        return "dto"
-    if "/exception" in lowered:
-        return "exception"
-    return "unknown"
-
-
-def detect_framework(files: dict[str, str]) -> dict[str, Any]:
-    joined = "\n".join(files.get(p, "")[:50_000] for p in files if p.endswith(("pom.xml", ".gradle", ".kts", ".yml", ".yaml", ".properties")))
-    markers = {
-        "spring_boot": ["spring-boot-starter", "SpringBootApplication"],
-        "spring_web": ["spring-boot-starter-web", "@RestController"],
-        "spring_data_jpa": ["spring-boot-starter-data-jpa", "JpaRepository", "@Entity"],
-        "spring_security": ["spring-boot-starter-security", "SecurityFilterChain", "WebSecurityConfigurerAdapter"],
-        "actuator": ["spring-boot-starter-actuator", "management.endpoints"],
-        "openapi": ["springdoc-openapi", "swagger", "openapi"],
-        "lombok": ["lombok", "@Getter", "@Builder", "@Data"],
-        "mapstruct": ["mapstruct", "@Mapper"],
-        "kafka": ["spring-kafka", "KafkaTemplate", "@KafkaListener"],
-        "junit5": ["junit-jupiter", "org.junit.jupiter"],
-        "junit4": ["junit:junit", "org.junit.Test"],
+    packages: dict[str, list[str]] = {}
+    components: dict[str, list[str]] = {
+        "controllers": [],
+        "services": [],
+        "repositories": [],
+        "entities": [],
+        "dtos": [],
+        "configs": [],
+        "other_java": [],
     }
-    return {name: any(marker in joined for marker in marker_list) for name, marker_list in markers.items()}
+    edges: list[dict] = []
+    findings: list[Finding] = []
 
+    for f in java_files:
+        text = contents.get(f.path, "")
+        pkg = package_name(text) or "(default)"
+        packages.setdefault(pkg, []).append(f.path)
 
-def build_inventory(files: dict[str, str], meta: list[RemoteFile]) -> dict[str, Any]:
-    by_ext = Counter(Path(f.path).suffix or Path(f.path).name for f in meta)
-    java_entries = []
-    for path, source in files.items():
-        if not path.endswith(".java"):
-            continue
-        java_entries.append({
-            "path": path,
-            "package": package_of_java(source),
-            "className": class_name_of_java(source),
-            "role": classify_java(path, source),
-            "annotations": annotations_of_java(source),
-            "imports": imports_of_java(source),
-            "sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
-        })
-    return {
-        "generatedAt": datetime.now(timezone.utc).isoformat(),
-        "fileCount": len(files),
-        "byExtension": dict(by_ext),
-        "javaTypes": java_entries,
-    }
+        anns = annotations(text)
+        lower = f.path.lower()
 
+        is_controller = "RestController" in anns or "Controller" in anns or "/controller/" in lower
+        is_service = "Service" in anns or "/service/" in lower
+        is_repository = "Repository" in anns or "/repository/" in lower
+        is_entity = "Entity" in anns or "/entity/" in lower or "/model/" in lower
+        is_dto = "/dto/" in lower or lower.endswith("dto.java")
+        is_config = "Configuration" in anns or "/config/" in lower
 
-def build_architecture_map(inventory: dict[str, Any], framework: dict[str, Any]) -> dict[str, Any]:
-    roles = Counter(entry["role"] for entry in inventory["javaTypes"])
-    packages = Counter(entry["package"] for entry in inventory["javaTypes"] if entry.get("package"))
-    root_candidates = Counter(pkg.split(".")[0] + "." + pkg.split(".")[1] if pkg and len(pkg.split(".")) > 1 else pkg for pkg in packages)
-    return {
-        "frameworkProfile": framework,
-        "roleCounts": dict(roles),
-        "topPackages": dict(packages.most_common(30)),
-        "rootPackageCandidates": dict(root_candidates.most_common(10)),
-        "hasLayeredShape": roles.get("controller", 0) > 0 and roles.get("service", 0) > 0,
-        "hasPersistenceShape": roles.get("repository", 0) > 0 or roles.get("domain-or-entity", 0) > 0,
-    }
+        if is_controller:
+            components["controllers"].append(f.path)
+            if ".repository." in text or re.search(r"\b[A-Za-z0-9_]+Repository\b", text):
+                findings.append(Finding(
+                    severity="HIGH",
+                    category="layering",
+                    title="Controller acoplado a Repository",
+                    description="Se detectó un controller que parece importar o usar repositories directamente.",
+                    evidence=[f.path],
+                    recommendation="Mover el acceso a persistencia detrás de una capa service/use-case.",
+                ))
+        elif is_service:
+            components["services"].append(f.path)
+        elif is_repository:
+            components["repositories"].append(f.path)
+        elif is_entity:
+            components["entities"].append(f.path)
+        elif is_dto:
+            components["dtos"].append(f.path)
+        elif is_config:
+            components["configs"].append(f.path)
+        else:
+            components["other_java"].append(f.path)
 
+        for imp in imports(text):
+            edges.append({"source": f.path, "target_import": imp})
 
-def build_dependency_map(inventory: dict[str, Any]) -> dict[str, Any]:
-    known_packages = {entry["package"] for entry in inventory["javaTypes"] if entry.get("package")}
-    edges = []
-    package_edges = Counter()
-    for entry in inventory["javaTypes"]:
-        src_pkg = entry.get("package")
-        if not src_pkg:
-            continue
-        for imp in entry.get("imports", []):
-            dst_pkg = ".".join(imp.split(".")[:-1])
-            if dst_pkg in known_packages or any(dst_pkg.startswith(p + ".") for p in known_packages):
-                package_edges[(src_pkg, dst_pkg)] += 1
-                edges.append({"from": src_pkg, "to": dst_pkg, "import": imp, "source": entry["path"]})
-    return {
-        "internalImportEdges": edges[:1000],
-        "packageEdgeCounts": [
-            {"from": k[0], "to": k[1], "count": v}
-            for k, v in package_edges.most_common(200)
-        ],
-    }
+        if "System.out.println" in text:
+            findings.append(Finding(
+                severity="LOW",
+                category="observability",
+                title="Uso de System.out.println",
+                description="Se detectó salida directa por consola en código Java.",
+                evidence=[f.path],
+                recommendation="Usar logger estructurado o mecanismo de logging del framework.",
+            ))
 
-
-def evaluate_rules(files: dict[str, str], inventory: dict[str, Any], architecture: dict[str, Any]) -> list[dict[str, Any]]:
-    findings: list[dict[str, Any]] = []
-    roles = Counter(entry["role"] for entry in inventory["javaTypes"])
-
-    def add(severity: str, rule: str, title: str, evidence: list[str], recommendation: str) -> None:
-        findings.append({
-            "severity": severity,
-            "rule": rule,
-            "title": title,
-            "evidence": evidence[:20],
-            "recommendation": recommendation,
-        })
-
-    if roles.get("controller", 0) and roles.get("service", 0) == 0:
-        add("HIGH", "LAYER-001", "Hay controllers pero no se detecta capa de servicios", [], "Introducir servicios de aplicación para evitar lógica de negocio en controllers.")
-
-    suspicious_controller_repo = []
-    for entry in inventory["javaTypes"]:
-        if entry["role"] == "controller" and any("Repository" in imp or ".repository." in imp.lower() for imp in entry.get("imports", [])):
-            suspicious_controller_repo.append(entry["path"])
-    if suspicious_controller_repo:
-        add("HIGH", "LAYER-002", "Controllers importan repositories directamente", suspicious_controller_repo, "Hacer que controllers dependan de servicios/casos de uso, no de persistencia.")
-
-    entity_exposure = []
-    for entry in inventory["javaTypes"]:
-        if entry["role"] == "controller":
-            src = files.get(entry["path"], "")
-            if "@Entity" in src or re.search(r"ResponseEntity\s*<\s*[A-Za-z0-9_]*Entity", src):
-                entity_exposure.append(entry["path"])
-    if entity_exposure:
-        add("MEDIUM", "API-001", "Posible exposición de entidades en la API", entity_exposure, "Separar DTOs de entidades JPA y mapear explícitamente.")
-
-    config_files = [p for p in files if p.endswith((".yml", ".yaml", ".properties"))]
-    secret_hits = []
-    secret_re = re.compile(r"(?i)(password|secret|token|apikey|api-key)\s*[:=]\s*[^\s${][^\n#]+")
+    config_files = [f.path for f in files if f.kind == "config"]
     for path in config_files:
-        if secret_re.search(files[path]):
-            secret_hits.append(path)
-    if secret_hits:
-        add("CRITICAL", "SEC-001", "Posibles secretos hardcodeados en configuración", secret_hits, "Mover secretos a vault/variables de entorno y dejar placeholders.")
+        text = contents.get(path, "")
+        if re.search(r"(?i)(password|secret|token|apikey|api_key)\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{8,}", text):
+            findings.append(Finding(
+                severity="CRITICAL",
+                category="security",
+                title="Posible secreto hardcodeado",
+                description="Se detectaron claves o credenciales potenciales en configuración.",
+                evidence=[path],
+                recommendation="Mover secretos a vault, variables de entorno o secret manager.",
+            ))
 
-    if architecture["frameworkProfile"].get("spring_boot") and not architecture["frameworkProfile"].get("actuator"):
-        add("MEDIUM", "OBS-001", "No se detecta Spring Boot Actuator", [], "Agregar actuator y exponer health/metrics según política corporativa.")
+    framework_signals = {
+        "spring_boot": any("SpringApplication" in contents.get(f.path, "") for f in java_files),
+        "spring_web": any("RestController" in contents.get(f.path, "") for f in java_files),
+        "spring_data_jpa": any("JpaRepository" in contents.get(f.path, "") for f in java_files),
+        "spring_security": any("SecurityFilterChain" in contents.get(f.path, "") or "EnableWebSecurity" in contents.get(f.path, "") for f in java_files),
+        "actuator_configured": any("management.endpoints" in contents.get(p, "") for p in config_files),
+    }
 
-    if not any(Path(p).name == "Dockerfile" for p in files):
-        add("LOW", "DELIVERY-001", "No se detecta Dockerfile", [], "Confirmar si la imagen se construye con buildpack corporativo; si no, agregar Dockerfile estándar.")
+    if components["controllers"] and not components["services"]:
+        findings.append(Finding(
+            severity="MEDIUM",
+            category="layering",
+            title="Controllers sin capa service detectable",
+            description="Hay controllers, pero no se detectó una capa service clara.",
+            evidence=components["controllers"][:10],
+            recommendation="Introducir servicios o casos de uso para separar API de lógica de negocio.",
+        ))
 
-    if not any(p.startswith(".github/workflows/") or "jenkinsfile" in p.lower() for p in files):
-        add("LOW", "DELIVERY-002", "No se detecta pipeline CI/CD versionado", [], "Agregar workflow/Jenkinsfile o documentar el pipeline externo.")
+    if components["entities"] and not components["dtos"]:
+        findings.append(Finding(
+            severity="MEDIUM",
+            category="api-design",
+            title="Entidades sin DTOs detectables",
+            description="Hay entidades/modelos, pero no se detectan DTOs.",
+            evidence=components["entities"][:10],
+            recommendation="Separar entidades de persistencia de contratos externos de API.",
+        ))
 
-    if roles.get("unknown", 0) > max(10, len(inventory["javaTypes"]) * 0.6):
-        add("INFO", "STRUCT-001", "Muchos tipos Java no pudieron clasificarse por rol", [], "Evaluar convenciones de paquetes/anotaciones o extender las reglas de clasificación.")
+    if not framework_signals["actuator_configured"]:
+        findings.append(Finding(
+            severity="INFO",
+            category="observability",
+            title="Actuator no detectable",
+            description="No se detectó configuración explícita de management endpoints.",
+            evidence=config_files[:5],
+            recommendation="Evaluar health checks, métricas y endpoints de observabilidad.",
+        ))
 
-    return findings
+    architecture_map = {
+        "packages": packages,
+        "components": components,
+        "framework_signals": framework_signals,
+        "ci_delivery": {
+            "github_actions": [f.path for f in files if f.kind == "ci"],
+            "dockerfiles": [f.path for f in files if f.kind == "docker"],
+        },
+    }
+    dependency_map = {"edges": edges, "edge_count": len(edges)}
+    return architecture_map, dependency_map, findings
 
 
-def write_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(path)
+def write_json(path: Path, data: object) -> None:
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def render_report(repo_uri: str, branch: str, inventory: dict[str, Any], architecture: dict[str, Any], findings: list[dict[str, Any]], truncated: bool) -> str:
-    severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
-    findings_sorted = sorted(findings, key=lambda f: severity_order.get(f["severity"], 99))
+def render_report(repo_ref: RepoRef, repo_uri: str, branch: str, files: list[SourceFile], arch: dict, dep: dict, findings: list[Finding]) -> str:
     lines = [
-        "# Architecture Review — piloto remoto",
+        "# Architecture Review",
         "",
-        f"- Repo: `{repo_uri}`",
+        f"- Repositorio: `{repo_uri}`",
+        f"- Host: `{repo_ref.host}`",
+        f"- API base: `{repo_ref.api_base}`",
         f"- Branch: `{branch}`",
-        f"- Generado: `{inventory['generatedAt']}`",
-        f"- Archivos analizados: `{inventory['fileCount']}`",
-        f"- Tree truncado por GitHub API: `{truncated}`",
+        f"- Archivos analizados: `{len(files)}`",
+        f"- Edges de imports: `{dep['edge_count']}`",
         "",
-        "## Perfil detectado",
+        "## Componentes detectados",
         "",
     ]
-    for k, v in architecture["frameworkProfile"].items():
-        lines.append(f"- {k}: `{v}`")
-    lines += ["", "## Capas / roles", ""]
-    for k, v in architecture["roleCounts"].items():
-        lines.append(f"- {k}: `{v}`")
-    lines += ["", "## Hallazgos", ""]
-    if not findings_sorted:
-        lines.append("No se detectaron hallazgos con las reglas piloto.")
-    for f in findings_sorted:
-        evidence = ", ".join(f.get("evidence") or []) or "sin archivo puntual"
-        lines += [
-            f"### {f['severity']} — {f['rule']} — {f['title']}",
-            "",
-            f"Evidencia: {evidence}",
-            "",
-            f"Recomendación: {f['recommendation']}",
-            "",
-        ]
-    lines += [
-        "## Limitaciones del piloto",
+
+    for key, values in arch["components"].items():
+        lines.append(f"- {key}: {len(values)}")
+
+    lines.extend(["", "## Señales de framework", ""])
+    for key, value in arch["framework_signals"].items():
+        lines.append(f"- {key}: `{value}`")
+
+    lines.extend(["", "## Hallazgos", ""])
+    grouped: dict[str, list[Finding]] = {}
+    for finding in findings:
+        grouped.setdefault(finding.severity, []).append(finding)
+
+    for severity in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
+        items = grouped.get(severity, [])
+        if not items:
+            continue
+        lines.extend([f"### {severity}", ""])
+        for item in items:
+            evidence = ", ".join(f"`{e}`" for e in item.evidence[:10]) or "`sin evidencia`"
+            lines.extend([
+                f"#### {item.title}",
+                "",
+                f"- Categoría: `{item.category}`",
+                f"- Descripción: {item.description}",
+                f"- Evidencia: {evidence}",
+                f"- Recomendación: {item.recommendation}",
+                "",
+            ])
+
+    lines.extend([
+        "## Nota de alcance",
         "",
-        "Este análisis es estático y remoto. No compila, no levanta Spring, no resuelve classpath real y no reemplaza los gates determinísticos del flujo de cobertura.",
-    ]
+        "Este análisis es estático y remoto. No compila, no ejecuta tests, no levanta la aplicación y no valida runtime.",
+        "Los reportes fueron generados fuera de la arquitectura del agente.",
+        "",
+    ])
     return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Piloto de análisis arquitectónico remoto para coverage-agent")
-    parser.add_argument("--repo-uri", required=True, help="URI GitHub: https://github.com/{owner}/{repo}")
-    parser.add_argument("--branch", default=None, help="Branch/ref. Si se omite, usa default_branch")
-    parser.add_argument("--out", required=True, help="Directorio de salida del estado")
-    parser.add_argument("--github-token-env", default="GITHUB_TOKEN", help="Nombre de env var con token GitHub")
-    parser.add_argument("--include", action="append", default=[], help="Glob de inclusión, repetible")
-    parser.add_argument("--exclude", action="append", default=[], help="Glob de exclusión adicional, repetible")
-    parser.add_argument("--max-files", type=int, default=MAX_FILES_DEFAULT)
-    parser.add_argument("--max-file-bytes", type=int, default=MAX_FILE_BYTES_DEFAULT)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--repo-uri", required=True)
+    parser.add_argument("--branch", default="main")
+    parser.add_argument("--out", default=None)
+    parser.add_argument("--github-token-env", default="GITHUB_TOKEN")
+    parser.add_argument("--github-api-base", default=None)
+    parser.add_argument("--max-files", type=int, default=500)
+    parser.add_argument("--max-bytes-per-file", type=int, default=200_000)
     args = parser.parse_args(argv)
 
-    owner, repo = parse_github_uri(args.repo_uri)
+    repo_ref = parse_repo_uri(args.repo_uri, args.github_api_base)
     token = os.environ.get(args.github_token_env)
-    headers = github_headers(token)
-    branch = args.branch or get_default_branch(owner, repo, headers)
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
+    out_dir = safe_output_dir(args.out, repo_ref.repo)
 
-    remote_files, truncated = list_tree(owner, repo, branch, headers)
-    excludes = DEFAULT_EXCLUDES + args.exclude
-    selected = [
-        f for f in remote_files
-        if is_relevant(f.path, f.size, args.max_file_bytes, args.include, excludes)
-    ][: args.max_files]
+    files = list_remote_files(repo_ref, args.branch, token)
+    files = [f for f in files if f.size <= args.max_bytes_per_file][: args.max_files]
 
     contents: dict[str, str] = {}
-    for f in selected:
-        url = raw_url(owner, repo, branch, f.path)
-        contents[f.path] = http_text(url, headers)
+    for f in files:
+        try:
+            contents[f.path] = get_file_content(repo_ref, args.branch, f.path, token)
+        except Exception as exc:
+            contents[f.path] = f"/* ERROR downloading file: {exc} */"
 
-    inventory = build_inventory(contents, selected)
-    framework = detect_framework(contents)
-    architecture = build_architecture_map(inventory, framework)
-    dependency_map = build_dependency_map(inventory)
-    findings = evaluate_rules(contents, inventory, architecture)
-    report = render_report(args.repo_uri, branch, inventory, architecture, findings, truncated)
+    inventory = {
+        "repo_uri": args.repo_uri,
+        "host": repo_ref.host,
+        "api_base": repo_ref.api_base,
+        "owner": repo_ref.owner,
+        "repo": repo_ref.repo,
+        "branch": args.branch,
+        "output_dir": str(out_dir),
+        "rule": "reports_outside_agent_architecture",
+        "files": [asdict(f) for f in files],
+    }
 
-    write_json(out / "source-inventory.json", inventory)
-    write_json(out / "architecture-map.json", architecture)
-    write_json(out / "dependency-map.json", dependency_map)
-    write_json(out / "architecture-findings.json", findings)
-    (out / "architecture-report.md").write_text(report, encoding="utf-8")
+    architecture_map, dependency_map, findings = build_maps(files, contents)
 
-    print(f"OK: arquitectura analizada desde {args.repo_uri}@{branch}")
-    print(f"Archivos analizados: {len(contents)}")
+    write_json(out_dir / "source-inventory.json", inventory)
+    write_json(out_dir / "architecture-map.json", architecture_map)
+    write_json(out_dir / "dependency-map.json", dependency_map)
+    write_json(out_dir / "architecture-findings.json", [asdict(f) for f in findings])
+
+    report = render_report(repo_ref, args.repo_uri, args.branch, files, architecture_map, dependency_map, findings)
+    (out_dir / "architecture-report.md").write_text(report, encoding="utf-8")
+
+    print(f"OK: arquitectura analizada desde {args.repo_uri}@{args.branch}")
+    print(f"Host: {repo_ref.host}")
+    print(f"API base: {repo_ref.api_base}")
+    print(f"Salida externa: {out_dir}")
+    print(f"Archivos analizados: {len(files)}")
     print(f"Hallazgos: {len(findings)}")
-    print(f"Reporte: {out / 'architecture-report.md'}")
+    print(f"Reporte: {out_dir / 'architecture-report.md'}")
     return 0
 
 
