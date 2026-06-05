@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Architecture Findings",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["severity", "rule", "title", "evidence", "recommendation"],
+    "properties": {
+      "severity": {"enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]},
+      "rule": {"type": "string"},
+      "title": {"type": "string"},
+      "evidence": {"type": "array", "items": {"type": "string"}},
+      "recommendation": {"type": "string"}
+    }
+  }
+}
