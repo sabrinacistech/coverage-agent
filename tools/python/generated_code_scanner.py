@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -19,9 +20,61 @@ NS = {"m": "http://maven.apache.org/POM/4.0.0"}
 def _resolve(s: str | None, module_dir: Path) -> str | None:
     if not s:
         return None
-    return s.replace("${project.basedir}", str(module_dir)).replace(
-        "${basedir}", str(module_dir)
+    return (
+        s.replace("${project.build.directory}", str(module_dir / "target"))
+        .replace("${project.basedir}", str(module_dir))
+        .replace("${basedir}", str(module_dir))
     )
+
+
+def _jaxb_pkg_from_namespace(ns: str | None) -> str | None:
+    """Map an XML namespace to the Java package CXF/JAXB generates by default.
+
+    Mirrors the JAXB default mapping (spec App. D.5.1, common case): reverse the
+    host labels, append the path segments, lowercase, replace non-identifier chars
+    with '_', and prefix '_' to segments starting with a digit. Example:
+      http://webservices.ws.bancogalicia.com.ar/abmcinfoclientes/personafisica/3.0.0
+      → ar.com.bancogalicia.ws.webservices.abmcinfoclientes.personafisica._3_0_0
+    Best effort: if the mapping is slightly off, bytecode_scanner's skip-invalid
+    net still drops the oversized generated contract, so nothing aborts the run.
+    """
+    ns = (ns or "").strip()
+    if not ns:
+        return None
+    m = re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://([^/]+)(/.*)?$", ns)
+    if m:
+        host = m.group(1).split(":")[0]  # drop port
+        host_labels = [l for l in host.split(".") if l]
+        if host_labels and host_labels[0].lower() == "www":
+            host_labels = host_labels[1:]
+        segs = list(reversed(host_labels)) + [s for s in (m.group(2) or "").split("/") if s]
+    else:
+        # urn:foo:bar or other: treat ':' and '/' as separators, no host reversal.
+        segs = [s for s in re.split(r"[:/]", ns) if s and s.lower() not in ("urn",)]
+    out: list[str] = []
+    for s in segs:
+        s = re.sub(r"[^A-Za-z0-9_]", "_", s)
+        if not s:
+            continue
+        if s[0].isdigit():
+            s = "_" + s
+        out.append(s.lower())
+    return ".".join(out) if out else None
+
+
+def _namespaces_from_wsdl(wsdl_path: Path) -> set[str]:
+    """All targetNamespace values in a WSDL (the <definitions> plus every embedded
+    <xsd:schema>) — the generated DTO packages derive from these."""
+    found: set[str] = set()
+    try:
+        tree = etree.parse(str(long_path(wsdl_path)))
+        for el in tree.iter():
+            tns = el.get("targetNamespace")
+            if tns:
+                found.add(tns)
+    except Exception:
+        pass
+    return found
 
 
 def scan_module(pom_path: Path) -> dict:
@@ -33,16 +86,40 @@ def scan_module(pom_path: Path) -> dict:
     excluded_packages: set[str] = set()
     excluded_fqcns: set[str] = set()
     blocked: list[dict] = []
+    extra_source_roots: set[Path] = set()
 
-    # CXF Codegen
+    # CXF Codegen — like OpenAPI, but the generated package is NOT declared in the
+    # POM: CXF/JAXB derives it from each WSDL's targetNamespace. So we parse the
+    # WSDL(s) and map their namespaces to packages, adding them to excludedPackages
+    # exactly as openapi modelPackage/apiPackage are. We also resolve the plugin's
+    # <sourceRoot> so the FQCN walk below can read the actual generated .java.
     for plugin in root.xpath(
         "//m:plugin[m:artifactId='cxf-codegen-plugin']", namespaces=NS
     ):
+        src_root = _resolve(plugin.findtext(".//m:sourceRoot", namespaces=NS), mod_dir)
+        if not src_root:
+            # CXF's default output directory when <sourceRoot> is omitted.
+            src_root = str(mod_dir / "target" / "generated-sources" / "cxf")
+        extra_source_roots.add(Path(src_root))
+        excluded_packages.add(src_root.replace("\\", "/").rstrip("/") + "/**")
+
         for wsdl_node in plugin.xpath(".//m:wsdl", namespaces=NS):
             raw = wsdl_node.text or ""
             wsdl = _resolve(raw.strip(), mod_dir)
             exists = bool(wsdl) and Path(wsdl).exists()
-            entry = {"kind": "cxf", "wsdl": wsdl or "", "wsdlExists": exists, "packages": []}
+            pkgs: list[str] = []
+            if exists:
+                for tns in _namespaces_from_wsdl(Path(wsdl)):
+                    pkg = _jaxb_pkg_from_namespace(tns)
+                    if pkg:
+                        pkgs.append(pkg)
+                        excluded_packages.add(pkg)
+            entry = {
+                "kind": "cxf",
+                "wsdl": wsdl or "",
+                "wsdlExists": exists,
+                "packages": sorted(set(pkgs)),
+            }
             generators.append(entry)
             if not exists:
                 blocked.append({"kind": "cxf", "reason": "BLOCKED_MISSING_CONTRACT", "wsdl": wsdl or ""})
@@ -95,11 +172,13 @@ def scan_module(pom_path: Path) -> dict:
     for d in ("target/generated-sources", "build/generated", "src/generated"):
         excluded_packages.add(d + "/**")
 
-    # Walk generated source roots to collect FQCNs (best effort)
-    for gen_root in (
+    # Walk generated source roots to collect FQCNs (best effort). Includes any
+    # explicit CXF <sourceRoot> in case it lives outside the default dirs.
+    for gen_root in {
         mod_dir / "target" / "generated-sources",
         mod_dir / "build" / "generated",
-    ):
+        *extra_source_roots,
+    }:
         if not gen_root.exists():
             continue
         # long_path() prefixes \\?\ on Windows so deeply nested OpenAPI/CXF
