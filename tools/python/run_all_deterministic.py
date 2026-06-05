@@ -114,7 +114,7 @@ def base_env() -> dict[str, str]:
 
 
 def ensure_execution_state(
-    state_dir: Path, max_cycles: int, max_minutes_per_cycle: int
+    state_dir: Path, mode: str, max_cycles: int, max_minutes_per_cycle: int
 ) -> Path:
     state_dir.mkdir(parents=True, exist_ok=True)
     state_file = state_dir / "execution-state.json"
@@ -128,8 +128,13 @@ def ensure_execution_state(
     # (consecutiveZeroDeltaCycles, compileFailRateWindow) actually read. If we
     # did not pre-create this, the loop would auto-create an empty budget and
     # silently fall back to the built-in defaults, ignoring --max-cycles.
+    #
+    # execution-state.schema.json REQUIRES ["schemaVersion", "mode", "cycle",
+    # "phase", "budget", "checkpoints"] — omitting `mode` makes the pipeline's
+    # full `validate` step fail with "'mode' is a required property".
     payload = {
         "schemaVersion": 1,
+        "mode": mode,
         "cycle": 0,
         "phase": "generation",
         "budget": {
@@ -307,6 +312,7 @@ def main() -> int:
 
     state_file = ensure_execution_state(
         state_dir=state_dir,
+        mode=args.coverage_mode,
         max_cycles=args.max_cycles,
         max_minutes_per_cycle=args.max_minutes_per_cycle,
     )
