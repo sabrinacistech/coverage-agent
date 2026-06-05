@@ -23,6 +23,14 @@ from common import (
     validate,
 )
 
+# Reuse the classifier's exclusion matcher (single source of truth) so the
+# scanner skips the SAME generated FQCNs the planner would later exclude —
+# instead of emitting contracts for CXF/wsdl2java, JAXB or OpenAPI classes.
+from classification_analyzer import (  # noqa: E402
+    _build_exclusion_matchers,
+    _is_excluded,
+)
+
 DESC_RE = re.compile(r"descriptor:\s*(\S+)")
 ACCESS_RE = re.compile(
     r"^\s*(public|protected|private|default)?\s*"
@@ -237,6 +245,16 @@ def main() -> int:
     javap = find_tool("javap")
     include = re.compile(args.include)
     fqcn_whitelist: set[str] | None = set(args.fqcn) if args.fqcn else None
+
+    # Generated-code exclusion (audit fix): the architecture must NOT create test
+    # contracts for generated classes (CXF/wsdl2java, JAXB, OpenAPI). They are not
+    # unit-test SUTs and their large generated APIs can even break the contract
+    # schema (e.g. a DTO with >80 methods aborts validate-contracts). Read the same
+    # generated-code-index.json the classifier/planner use and skip those FQCNs.
+    gen_index_path = state_dir / "generated-code-index.json"
+    gen_index = load_json(gen_index_path) if gen_index_path.exists() else {}
+    excluded_fqcns, excluded_pkg_patterns = _build_exclusion_matchers(gen_index)
+
     out_dir = state_dir / "symbol-contracts"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -269,12 +287,17 @@ def main() -> int:
             scanned = list(pool.map(_scan_pair, candidates))
 
     n = 0
+    skipped_generated = 0
     written: list[dict] = []
     seen_fqcns: set[str] = set()
     for cf, contract in scanned:
         if not contract:
             continue
         if not include.search(contract["fqcn"]):
+            continue
+        if _is_excluded(contract["fqcn"], excluded_fqcns, excluded_pkg_patterns):
+            # Generated code (CXF/wsdl2java, JAXB, OpenAPI): never a unit-test SUT.
+            skipped_generated += 1
             continue
         if fqcn_whitelist is not None and contract["fqcn"] not in fqcn_whitelist:
             continue
@@ -318,6 +341,11 @@ def main() -> int:
         "count": len(all_entries),
         "contracts": sorted(all_entries, key=lambda e: e["fqcn"]),
     })
+    if skipped_generated:
+        print(
+            f"[OK] skipped {skipped_generated} generated class(es) "
+            "(generated-code-index.json) — not unit-test SUTs"
+        )
     print(f"[OK] {n} contracts -> {out_dir}")
     print(f"[OK] manifest -> {manifest_path} ({len(all_entries)} total entries)")
     return 0
