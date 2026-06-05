@@ -288,6 +288,7 @@ def main() -> int:
 
     n = 0
     skipped_generated = 0
+    skipped_invalid = 0
     written: list[dict] = []
     seen_fqcns: set[str] = set()
     for cf, contract in scanned:
@@ -308,7 +309,20 @@ def main() -> int:
         try:
             validate("symbol-contract", contract)
         except Exception as e:
-            print(f"[WARN] schema failed for {contract['fqcn']}: {e}", file=sys.stderr)
+            # Safety net: do NOT emit a contract that violates the schema. Writing
+            # it only to have the downstream validate-contracts step abort the WHOLE
+            # pipeline is strictly worse than skipping it — a class that breaks the
+            # schema (e.g. a generated JAXB/wsdl2java DTO with >80 methods) is not a
+            # viable unit-test SUT. Skipping keeps the run alive for the real
+            # classes even when the generated-code detector missed this one.
+            reason = " ".join(str(e).split())[:180]
+            print(
+                f"[WARN] skipping {contract['fqcn']}: viola symbol-contract.schema.json "
+                f"({reason}…) — clase no apta como SUT (¿generada?), continúo",
+                file=sys.stderr,
+            )
+            skipped_invalid += 1
+            continue
         atomic_write_json(out_dir / f"{contract['fqcn']}.json", contract)
         written.append({
             "fqcn": contract["fqcn"],
@@ -345,6 +359,11 @@ def main() -> int:
         print(
             f"[OK] skipped {skipped_generated} generated class(es) "
             "(generated-code-index.json) — not unit-test SUTs"
+        )
+    if skipped_invalid:
+        print(
+            f"[OK] skipped {skipped_invalid} class(es) whose contract violated the "
+            "schema (oversized/generated, e.g. >80 methods) — not unit-test SUTs"
         )
     print(f"[OK] {n} contracts -> {out_dir}")
     print(f"[OK] manifest -> {manifest_path} ({len(all_entries)} total entries)")
