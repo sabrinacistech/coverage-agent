@@ -47,6 +47,11 @@ from pathlib import Path
 
 from common import SCHEMAS_DIR, atomic_write_json, load_json, validate
 
+# Single source of truth for generated-code matching (same matcher the classifier
+# uses). Lets the planner drop generated SUTs directly from generated-code-index.json
+# even when they have no contract/classification (bytecode_scanner skips them).
+from classification_analyzer import _build_exclusion_matchers, _is_excluded  # noqa: E402
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Scoring constants
 # ─────────────────────────────────────────────────────────────────────────────
@@ -212,6 +217,26 @@ def plan(
                 f"[INFO] generated/excluded filter active: dropped {dropped} "
                 f"target(s) on {len(excluded)} excluded class(es) "
                 f"(classification-index.json type=generated/excluded)"
+            )
+
+    # Belt-and-suspenders: also drop targets on classes the generated-code detector
+    # flagged (generated-code-index.json), independent of classification. Generated
+    # classes no longer get a symbol-contract (bytecode_scanner skips them), so they
+    # never reach classification and would otherwise leak back into the plan here
+    # (e.g. an OpenAPI/CXF DTO's equals() out-scoring real logic).
+    gen_index = _safe_load(state_dir / "generated-code-index.json", {})
+    gen_fqcns, gen_pkg_patterns = _build_exclusion_matchers(gen_index)
+    if gen_fqcns or gen_pkg_patterns:
+        before = len(targets)
+        targets = [
+            t for t in targets
+            if not _is_excluded(t.get("sut", ""), gen_fqcns, gen_pkg_patterns)
+        ]
+        dropped = before - len(targets)
+        if dropped:
+            print(
+                f"[INFO] generated-code-index filter active: dropped {dropped} "
+                f"target(s) (generated-code-index.json excludedFqcns/excludedPackages)"
             )
 
     if sut_filter:

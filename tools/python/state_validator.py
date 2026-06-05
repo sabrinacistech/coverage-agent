@@ -109,6 +109,7 @@ _RUNTIME_OPTIONAL: dict[str, str] = {
     "failure-memory":        "written by LLM Repair agent across cycles",
     "generated-tests":       "written by LLM Generation agent",
     "mutation-intelligence": "written by LLM Mutation agent",
+    "architecture-findings": "written by run_architecture_review.py (separate architecture-review tool, not the coverage pipeline)",
     # ── Escritos condicionalmente por el pipeline Python (flags opcionales) ───
     "coverage-targets":      "requires --jacoco-xml flag (Step 8)",
     "dependency-graph":      "requires pipeline Step 11; use --skip deps to omit",
