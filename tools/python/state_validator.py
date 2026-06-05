@@ -122,6 +122,86 @@ _RUNTIME_OPTIONAL: dict[str, str] = {
 # Helpers de validación de un único archivo
 # ---------------------------------------------------------------------------
 
+# Colector central de fallas de validación. Cada función llama a _record_failure
+# en lugar de imprimir el [ERR] suelto, para que main() pueda (a) imprimir un
+# RESUMEN al final —lo último en pantalla, sin que el detalle se pierda por scroll—
+# y (b) persistirlo en <state>/_summaries/validation-errors.json.
+_FAILURES: list[dict] = []
+
+
+def _record_failure(file_label: str, schema_label: str, reason: str) -> None:
+    """Registra UNA falla de validación e imprime su bloque [ERR] inmediato."""
+    _FAILURES.append({"file": file_label, "schema": schema_label, "reason": reason})
+    print(
+        f"[ERR]  {file_label}\n"
+        f"       schema: {schema_label}\n"
+        f"       reason: {reason}",
+        file=sys.stderr,
+    )
+
+
+def _format_validation_error(exc) -> str:
+    """Mensaje conciso y legible para un jsonschema.ValidationError.
+
+    El `.message` por defecto vuelca la instancia completa: para un array de miles
+    de elementos da '[...]' is too long' — ilegible e inútil. Acá damos la RUTA
+    JSON, la regla violada y el límite, con una muestra acotada de la instancia.
+    """
+    path = getattr(exc, "json_path", None) or "$"
+    validator = getattr(exc, "validator", None)
+    limit = getattr(exc, "validator_value", None)
+    inst = getattr(exc, "instance", None)
+    try:
+        if validator in ("maxItems", "minItems") and isinstance(inst, list):
+            sample = inst[:3]
+            more = " …" if len(inst) > 3 else ""
+            return (
+                f"{path}: el array tiene {len(inst)} ítems y viola "
+                f"{validator}={limit}. Muestra: {sample}{more}"
+            )
+        if validator in ("maxLength", "minLength") and isinstance(inst, str):
+            return f"{path}: string de {len(inst)} caracteres, viola {validator}={limit}"
+        if validator == "enum":
+            return f"{path}: valor {inst!r} no está en el enum permitido {limit}"
+        if validator in ("required", "additionalProperties", "type", "pattern"):
+            return f"{path}: {exc.message}"
+    except Exception:
+        pass
+    msg = exc.message
+    if len(msg) > 300:
+        msg = msg[:300] + "… (truncado)"
+    return f"{path}: {msg}"
+
+
+def _finalize_failures(state_dir: Path) -> None:
+    """Imprime el resumen final de fallas y lo persiste a JSON (si hubo)."""
+    if not _FAILURES:
+        return
+    print(
+        f"\n================ VALIDATION FAILURES ({len(_FAILURES)}) ================",
+        file=sys.stderr,
+    )
+    for f in _FAILURES:
+        print(f"  - {f['file']}", file=sys.stderr)
+        print(f"      schema: {f['schema']}", file=sys.stderr)
+        print(f"      reason: {f['reason']}", file=sys.stderr)
+    print(
+        "=" * 57 + "\n"
+        f"[FAIL] {len(_FAILURES)} archivo(s) no cumplen su schema (ver arriba).",
+        file=sys.stderr,
+    )
+    try:
+        out = state_dir / "_summaries" / "validation-errors.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"schemaVersion": 1, "count": len(_FAILURES), "failures": _FAILURES}
+        out.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(f"[INFO] detalle completo en {out}", file=sys.stderr)
+    except OSError as exc:
+        print(f"[WARN] no se pudo escribir validation-errors.json: {exc}", file=sys.stderr)
+
+
 def _validate_file(
     target: Path,
     schema: dict,
@@ -143,7 +223,7 @@ def _validate_file(
         jsonschema.validate(data, schema)
         return "OK", None
     except jsonschema.ValidationError as exc:
-        return "ERR", exc.message
+        return "ERR", _format_validation_error(exc)
     except jsonschema.SchemaError as exc:
         return "ERR", f"schema error — {exc.message}"
 
@@ -194,11 +274,10 @@ def validate_standard_schemas(
         if status == "OK":
             print(f"[OK]   state/{target.name}")
         else:
-            print(
-                f"[ERR]  state/{target.name}\n"
-                f"       schema: state/_schemas/{schema_file.name}\n"
-                f"       reason: {error}",
-                file=sys.stderr,
+            _record_failure(
+                f"state/{target.name}",
+                f"state/_schemas/{schema_file.name}",
+                error,
             )
             rc = 1
 
@@ -254,11 +333,10 @@ def validate_symbol_contracts(
             print(f"[OK]   state/symbol-contracts/{cf.name}")
             ok_count += 1
         else:
-            print(
-                f"[ERR]  state/symbol-contracts/{cf.name}\n"
-                f"       schema: state/_schemas/symbol-contract.schema.json\n"
-                f"       reason: {error}",
-                file=sys.stderr,
+            _record_failure(
+                f"state/symbol-contracts/{cf.name}",
+                "state/_schemas/symbol-contract.schema.json",
+                error,
             )
             rc = 1
 
@@ -320,11 +398,10 @@ def validate_context_packs(
             print(f"[OK]   state/context-packs/{pf.name}")
             ok_count += 1
         else:
-            print(
-                f"[ERR]  state/context-packs/{pf.name}\n"
-                f"       schema: state/_schemas/context-pack.schema.json\n"
-                f"       reason: {error}",
-                file=sys.stderr,
+            _record_failure(
+                f"state/context-packs/{pf.name}",
+                "state/_schemas/context-pack.schema.json",
+                error,
             )
             rc = 1
 
@@ -413,12 +490,10 @@ def validate_semantic_index(
             print(f"[OK]   state/index/{filename}")
             ok_count += 1
         except jsonschema.ValidationError as exc:
-            print(
-                f"[ERR]  state/index/{filename}\n"
-                f"       schema: state/_schemas/semantic-index.schema.json"
-                f"#/definitions/{definition}\n"
-                f"       reason: {exc.message}",
-                file=sys.stderr,
+            _record_failure(
+                f"state/index/{filename}",
+                f"state/_schemas/semantic-index.schema.json#/definitions/{definition}",
+                _format_validation_error(exc),
             )
             rc = 1
         except jsonschema.SchemaError as exc:
@@ -638,33 +713,32 @@ def main() -> int:
     # Scoped runs: invoked from the middle of the pipeline (after step 6 or 9)
     # to validate one artefact group as soon as it is produced.
     if args.scope == "contracts":
-        result = validate_symbol_contracts(SCHEMAS_DIR, state_dir, jsonschema)
-        return result if result != 0 else 0
-    if args.scope == "index":
-        result = validate_semantic_index(SCHEMAS_DIR, state_dir, jsonschema)
-        return result if result != 0 else 0
+        rc = validate_symbol_contracts(SCHEMAS_DIR, state_dir, jsonschema)
+    elif args.scope == "index":
+        rc = validate_semantic_index(SCHEMAS_DIR, state_dir, jsonschema)
+    else:
+        # Full validation (scope == "all"): runs as step 15.
+        # ── 1. Validación estándar: schema → state/<name>.json ───────────────
+        rc |= validate_standard_schemas(SCHEMAS_DIR, state_dir, jsonschema)
 
-    # Full validation (scope == "all"): runs as step 15.
-    # ── 1. Validación estándar: schema → state/<name>.json ───────────────────
-    rc |= validate_standard_schemas(SCHEMAS_DIR, state_dir, jsonschema)
+        # ── 2. Validación especial: symbol-contracts/ ────────────────────────
+        if validate_symbol_contracts(SCHEMAS_DIR, state_dir, jsonschema) != 0:
+            rc = 1
 
-    # ── 2. Validación especial: symbol-contracts/ ─────────────────────────────
-    result = validate_symbol_contracts(SCHEMAS_DIR, state_dir, jsonschema)
-    if result != 0:
-        rc = result
+        # ── 3. Validación especial: context-packs/ ───────────────────────────
+        if validate_context_packs(state_dir, SCHEMAS_DIR, jsonschema) != 0:
+            rc = 1
 
-    # ── 3. Validación especial: context-packs/ ────────────────────────────────
-    result = validate_context_packs(state_dir, SCHEMAS_DIR, jsonschema)
-    if result != 0:
-        rc = result
+        # ── 4. Validación especial: state/index/ (semantic-index) ────────────
+        if validate_semantic_index(SCHEMAS_DIR, state_dir, jsonschema) != 0:
+            rc = 1
 
-    # ── 4. Validación especial: state/index/ (semantic-index) ────────────────
-    result = validate_semantic_index(SCHEMAS_DIR, state_dir, jsonschema)
-    if result != 0:
-        rc = result
+        # ── 5. Archivos auxiliares sin schema ────────────────────────────────
+        report_auxiliary_files(SCHEMAS_DIR, state_dir)
 
-    # ── 5. Archivos auxiliares sin schema ─────────────────────────────────────
-    report_auxiliary_files(SCHEMAS_DIR, state_dir)
+    # Resumen final de fallas (lo último en pantalla) + persistencia a JSON.
+    # Aplica a TODOS los scopes, incluido el scoped 'contracts' que usa el pipeline.
+    _finalize_failures(state_dir)
 
     return rc
 
