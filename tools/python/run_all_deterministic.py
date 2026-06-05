@@ -317,9 +317,16 @@ def main() -> int:
         max_minutes_per_cycle=args.max_minutes_per_cycle,
     )
 
+    # Consolidated analysis report (coverage to realize + excluded generated code).
+    report_tool = tools / "analysis_report.py"
+    if report_tool.exists():
+        print("\n==== [E] Reporte de análisis ====")
+        run([python, str(report_tool), "--state-dir", str(state_dir)], cwd=agent_root, env=env)
+
     print("\n[OK] deterministic pre-stage completed.")
     print(f"[OK] state-dir: {state_dir}")
     print(f"[OK] execution-state: {state_file}")
+    print(f"[OK] analysis report: {state_dir / '_summaries' / 'analysis-report.md'}")
 
     if not args.start_cycle_loop:
         print(
