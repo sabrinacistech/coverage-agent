@@ -296,6 +296,15 @@ def _is_authorized_test_path(path: Path, repo: Path) -> bool:
 
 def _resolve_test_file(patch: dict, repo: Path) -> Path:
     test_class: str = patch["testClass"]          # e.g. com.acme.FooServiceTest
+    # Hardening: testClass SHOULD be the FQCN, but if an unqualified name slips
+    # through (e.g. "FooServiceTest"), the file would land at src/test/java root
+    # with a mismatched `package` declaration (JDT: "declared package … does not
+    # match expected package", and same-package types fail to resolve). Qualify it
+    # with testPackage so the file always lands in its package directory.
+    if "." not in test_class:
+        pkg = (patch.get("testPackage") or "").strip()
+        if pkg:
+            test_class = f"{pkg}.{test_class}"
     pkg_path = test_class.replace(".", "/") + ".java"
     target_dir: str = patch.get("targetDir") or "src/test/java"
     module: str = patch.get("targetModule") or ""
