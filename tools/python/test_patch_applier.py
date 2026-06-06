@@ -533,8 +533,13 @@ def _prune_unused_imports(text: str) -> str:
         if path.endswith(".*"):
             continue  # wildcard — cannot prove unused
         symbol = path.rsplit(".", 1)[-1]
-        if re.search(rf"\b{re.escape(symbol)}\b", usage_text):
-            continue  # referenced — keep
+        # The import is only "used" if its simple name appears as a BARE identifier.
+        # A qualified reference (e.g. `Mockito.when(...)`) does NOT consume the
+        # import `import static org.mockito.Mockito.when;` — the `(?<!\.)` lookbehind
+        # rejects a leading dot, so qualified uses no longer keep an unused import
+        # (the SonarQube "Unused imports" false-positive this method must avoid).
+        if re.search(rf"(?<![\w.]){re.escape(symbol)}\b", usage_text):
+            continue  # referenced as a bare name — keep
         start, end = m.start(), m.end()
         if end < len(text) and text[end] == "\n":
             end += 1
