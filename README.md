@@ -44,10 +44,11 @@ tools/python/        Pre-stage determinista (parsea POM/classpath/javap/JaCoCo)
 MASTER_PROMPT.md     Prompt principal con gates G1–G9
 ```
 
-Los **artefactos generados** (JSONs deterministas, context-packs, summaries, patches, caches,
-`jacoco-baseline.xml`) se escriben **fuera del proyecto objetivo**, en una carpeta hermana con la
-convención **`coverage_<nombre-proyecto>`**. Ejemplo: si el proyecto es `C:\repo\proyectox`, el
-estado va a `C:\repo\coverage_proyectox`. Los **tests generados sí se escriben dentro del proyecto**
+Los **artefactos generados y los reportes** (JSONs deterministas, context-packs, summaries,
+`_summaries/analysis-report.md`, patches, caches, `jacoco-baseline.xml`) se escriben **fuera del
+proyecto objetivo Y fuera de esta arquitectura**, en una carpeta externa con la convención
+**`coverage_<nombre-proyecto>`**. Ejemplo: si el proyecto es `C:\repo\proyectox`, el análisis va a
+`C:\repo\coverage_proyectox`. Los **tests generados sí se escriben dentro del proyecto**
 (`<proyecto>/src/test/java/…`); la arquitectura **nunca** toca `src/main`. Aplica igual si la
 generación la dispara Copilot (handoff por archivo) o el orquestador LangGraph (v2). El path se
 controla con `--out` (pre-stage) / `--state` (patcher y runner). Ver el paso a paso en
@@ -72,17 +73,37 @@ Antes de cualquier ciclo LLM, correr el pipeline determinista que produce todos 
 
 ### Opción recomendada: un solo comando
 
-`run_all_deterministic.py` orquesta todo el pre-stage de punta a punta, sin intervención del agente:
+`run_all_deterministic.py` orquesta todo el pre-stage de punta a punta, sin intervención del agente.
 
+#### Regla de oro — 3 ubicaciones separadas
+
+| Ubicación | Qué vive ahí | Flag |
+|-----------|--------------|------|
+| **Arquitectura** `coverage-agent/` | El código de los tools. **No** se escribe análisis acá. | `--agent-root` (default `.`) |
+| **Proyecto analizado** `…/proyectox/` | **Solo** los tests nuevos (`src/test/java/…`). Nunca análisis, nunca `src/main`. | `--repo` |
+| **Carpeta externa** `…/coverage_proyectox/` | **Todo el análisis y los reportes** (`*.json`, context-packs, `_summaries/analysis-report.md`, caches). Externa a las otras dos; borrable. | `--state-dir` |
+
+> El script **rechaza** un `--state-dir` que sea, contenga o esté dentro del proyecto **o** de la arquitectura (y `--clean` se niega a borrar algo que parezca un proyecto real). Así el análisis nunca queda dentro de la arquitectura ni del proyecto.
+
+**Git Bash** (rutas con `/`):
 ```bash
 python tools/python/run_all_deterministic.py \
-   --repo      C:/repo/proyectox \
-   --state-dir C:/repo/coverage_proyectox \
-   --module    <module> \
+   --repo      /c/repo/proyectox \
+   --state-dir /c/repo/coverage_proyectox \
+   --module    . \
    --clean
 ```
 
-Orden interno: **(A)** pre-pasada de contratos (`pom` + `archetype`) → **(B)** verificación JaCoCo (`jacoco_pom_guard`) → **(C)** baseline Maven que genera `target/` + `jacoco.xml` → **(D)** Fase 0 completa con `--jacoco-xml` (los pasos `pom`/`archetype` salen como `[CACHE HIT]`). Flags útiles:
+**cmd.exe** (rutas con `\`, todo en una línea o con `^` de continuación):
+```bat
+python tools\python\run_all_deterministic.py ^
+   --repo      C:\repo\proyectox ^
+   --state-dir C:\repo\coverage_proyectox ^
+   --module    . ^
+   --clean
+```
+
+Orden interno: **(A)** pre-pasada de contratos (`pom` + `archetype`) → **(B)** verificación JaCoCo (`jacoco_pom_guard`) → **(C)** baseline Maven que genera `target/` + `jacoco.xml` → **(D)** Fase 0 completa con `--jacoco-xml` (los pasos `pom`/`archetype` salen como `[CACHE HIT]`) → **(E)** reporte consolidado en `<state-dir>/_summaries/analysis-report.md`. Flags útiles:
 
 | Flag | Para qué |
 |------|----------|
@@ -92,9 +113,13 @@ Orden interno: **(A)** pre-pasada de contratos (`pom` + `archetype`) → **(B)**
 | `--coverage-mode` | `coverage` (default) · `branch-coverage` · `mutation-hardening` |
 | `--max-cycles` / `--max-minutes-per-cycle` | Presupuesto sembrado en `execution-state.json` |
 
-> Maven debe estar en el PATH (en Windows el script lo lanza vía `cmd /c mvn`). En
-> Git Bash usá barras `/` en las rutas. Corré el script con el Python del entorno
-> que tenga instaladas las deps (`pip install -r tools/python/requirements.txt`).
+> **Consolas:** funciona en **cmd.exe** y **Git Bash** (y PowerShell). En Git Bash
+> usá barras `/` en las rutas (`/c/repo/…`); en cmd.exe usá `\` (`C:\repo\…`). Maven
+> debe estar en el PATH (en Windows el script lo lanza vía `cmd /c mvn`). Corré el
+> script con el Python del entorno que tenga las deps (`pip install -r tools/python/requirements.txt`).
+>
+> **Salida:** al terminar, el reporte consolidado del análisis queda en
+> `<state-dir>/_summaries/analysis-report.md` (+ `.json`) — fuera de la arquitectura y del proyecto.
 
 ### Alternativa granular (paso a paso)
 

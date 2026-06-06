@@ -224,18 +224,26 @@ def main() -> int:
     if not repo.exists():
         raise SystemExit(f"[FAIL] target repo does not exist: {repo}")
 
-    # Safety guard: the state dir MUST be external to the target repo. Pointing
-    # --state-dir at the repo (or inside/around it) and then --clean would rmtree
-    # the project (incl. .git/src). Refuse loudly with a safe suggestion.
+    # Safety guard: ALL analysis output (state + reports) must live OUTSIDE both
+    # the analyzed project and this architecture. Only the generated unit tests go
+    # inside the project (src/test/java). Pointing --state-dir at either tree (and
+    # then --clean) would rmtree it. Refuse loudly with a safe external suggestion.
     suggestion = repo.parent / f"coverage_{repo.name}"
-    if state_dir == repo or repo in state_dir.parents or state_dir in repo.parents:
-        raise SystemExit(
-            f"[FAIL] --state-dir no puede ser el repo, ni estar dentro/alrededor de él.\n"
-            f"        repo      = {repo}\n"
-            f"        state-dir = {state_dir}\n"
-            f"        El estado va FUERA del proyecto. Sugerido:\n"
-            f"          --state-dir {suggestion}"
-        )
+
+    def _conflicts(inner: Path, outer: Path) -> bool:
+        return inner == outer or outer in inner.parents or inner in outer.parents
+
+    for label, other in (("el proyecto analizado", repo),
+                         ("la arquitectura (agent-root)", agent_root)):
+        if _conflicts(state_dir, other):
+            raise SystemExit(
+                f"[FAIL] --state-dir no puede ser, contener ni estar dentro de {label}.\n"
+                f"        {label:<28} = {other}\n"
+                f"        --state-dir                  = {state_dir}\n"
+                f"        El análisis y los reportes van a una carpeta EXTERNA a ambos.\n"
+                f"        Sugerido:  --state-dir {suggestion}"
+            )
+
     if args.clean and (
         (state_dir / ".git").exists()
         or (state_dir / "pom.xml").exists()
