@@ -502,32 +502,122 @@ def _framework_imports_from_stack(stack: dict) -> set[str]:
     return imports
 
 
+# Dotted Java identifier (a fully-qualified class name) embedded anywhere in a
+# type string — survives generics, arrays and varargs (e.g. "Map<String,
+# com.x.Foo>[]" yields "com.x.Foo"). Simple names like "String" or primitives
+# like "int" have no dot and are intentionally ignored: they need no import.
+_FQCN_TOKEN = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+")
+
+
+# Direct members of java.lang (java.lang.String, java.lang.Object, …) are
+# auto-imported by every compilation unit; an explicit import is redundant and
+# tripped by common checkstyle rules. Subpackages (java.lang.reflect.*) still
+# require imports, so only single-segment java.lang members are filtered.
+_JAVA_LANG_MEMBER = re.compile(r"^java\.lang\.[A-Za-z_$][A-Za-z0-9_$]*$")
+
+
+def _fqcns_in(text: str) -> set[str]:
+    """Extract every importable FQCN embedded in a type string.
+
+    Auto-imported java.lang members are dropped (no import needed).
+    """
+    if not text:
+        return set()
+    return {t for t in _FQCN_TOKEN.findall(text) if not _JAVA_LANG_MEMBER.match(t)}
+
+
+def _referenced_types(
+    constructors: list[dict],
+    methods: list[dict],
+    dependencies: list[dict],
+    collaborator_usage: list[dict],
+) -> set[str]:
+    """FQCNs the SUT's evidenced API surface forces a test to reference.
+
+    Walks constructor/method signatures (params, returnType, throws), declared
+    dependencies, and collaborator-usage methods. Types are stored as FQCNs in
+    symbol-contracts and dependency-graph, so this is the exact set of non-local
+    types a generated test may legitimately need to import.
+    """
+    refs: set[str] = set()
+
+    def add_params(params: list) -> None:
+        for p in params:
+            refs.update(_fqcns_in(p.get("type", "") if isinstance(p, dict) else str(p)))
+
+    for c in constructors:
+        add_params(c.get("params", []))
+        for t in c.get("throws", []):
+            refs.update(_fqcns_in(t))
+
+    for m in methods:
+        refs.update(_fqcns_in(m.get("returnType", "")))
+        add_params(m.get("params", []))
+        for t in m.get("throws", []):
+            refs.update(_fqcns_in(t))
+
+    for d in dependencies:
+        refs.update(_fqcns_in(d.get("type", "")))
+
+    for cu in collaborator_usage:
+        refs.update(_fqcns_in(cu.get("type", "")))
+        for cm in cu.get("methods", []):
+            refs.update(_fqcns_in(cm.get("returnType", "")))
+            add_params(cm.get("params", []))
+            for t in cm.get("throws", []):
+                refs.update(_fqcns_in(t))
+
+    return refs
+
+
 def extract_allowed_imports(
     import_whitelist: dict | None,
     stack: dict,
+    sut_fqcn: str,
+    constructors: list[dict],
+    methods: list[dict],
+    dependencies: list[dict],
+    collaborator_usage: list[dict],
     baseline_presets: list[str] | None = None,
 ) -> list[str]:
-    """Return allowed FQCNs under minimum-privilege: stack-confirmed frameworks + whitelist.
+    """Per-SUT minimum-privilege import whitelist.
 
-    JDK standard-library classes (java.util.*, java.time.*, java.math.*, …) are
-    admitted only when they appear explicitly in import-whitelist.json with origin
-    'jdk', or when listed in the architecture baseline presets (stack_profile
-    presets.imports.allowed).  They are never added unconditionally.
+    The full transitive classpath is NEVER admitted wholesale. Admitted FQCNs are
+    scoped to what *this* SUT can plausibly need in a test:
+      - test/mock/assert/spring framework imports confirmed by the stack,
+      - architecture baseline preset imports (stack_profile.presets.imports.allowed),
+      - the project's own source classes (origin='source' in the whitelist),
+      - the SUT itself,
+      - every FQCN actually referenced by the SUT's evidenced signatures
+        (constructors, methods, dependencies, collaborator usage) — both project
+        collaborators and external dependency types.
+
+    A dependency/JDK class enters only when the SUT's bytecode-derived evidence
+    references it — so multi-release JAR noise (META-INF/versions/…) and the
+    thousands of unrelated transitive classes never reach the pack. Referenced
+    types are admitted directly: they come from symbol-contracts and the
+    dependency-graph, so they are resolvable on the classpath by construction
+    (the resolved-classpath whitelist holds only external deps, never the
+    project's own classes).
     """
     allowed: set[str] = _framework_imports_from_stack(stack)
 
-    # Project-local (source/dep) and explicitly approved JDK classes from the whitelist.
-    if import_whitelist:
-        for entry in import_whitelist.get("classes", []):
-            origin = entry.get("origin", "")
-            fqcn = entry.get("fqcn", "")
-            if fqcn and origin in ("source", "dep", "jdk"):
-                allowed.add(fqcn)
-
-    # Global exception rules parsed from the architecture baseline configuration
-    # (stack_profile.presets.imports.allowed).
+    # Architecture baseline exception rules.
     if baseline_presets:
         allowed.update(baseline_presets)
+
+    # Project-local source classes are always importable (bounded by project size).
+    if import_whitelist:
+        for entry in import_whitelist.get("classes", []):
+            if entry.get("origin") == "source" and entry.get("fqcn"):
+                allowed.add(entry["fqcn"])
+
+    # The SUT itself.
+    if sut_fqcn:
+        allowed.add(sut_fqcn)
+
+    # Types the SUT's evidenced API surface forces a test to reference.
+    allowed.update(_referenced_types(constructors, methods, dependencies, collaborator_usage))
 
     return sorted(allowed)
 
@@ -562,7 +652,16 @@ def build_pack(
         if isinstance(raw_presets, list):
             baseline_presets = raw_presets or None
 
-    allowed_imports = extract_allowed_imports(import_whitelist, stack, baseline_presets)
+    allowed_imports = extract_allowed_imports(
+        import_whitelist,
+        stack,
+        fqcn,
+        constructors,
+        methods,
+        dependencies,
+        collab_usage,
+        baseline_presets,
+    )
 
     pack: dict = {
         "schemaVersion": 1,
