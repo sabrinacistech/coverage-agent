@@ -120,7 +120,25 @@ def ensure_execution_state(
     state_file = state_dir / "execution-state.json"
 
     if state_file.exists():
-        print(f"[OK] execution-state.json already exists: {state_file}")
+        # Honor budget flags on restart: refresh maxCycles/maxMinutesPerCycle from
+        # args without wiping cycle/checkpoints. The interactive IDE handoff counts
+        # human time against maxMinutesPerCycle, so a low value (default 10) trips
+        # BUDGET_EXCEEDED while you think — re-running with a higher value must take
+        # effect even though the file already exists.
+        try:
+            data = json.loads(state_file.read_text(encoding="utf-8"))
+            budget = data.setdefault("budget", {})
+            if budget.get("maxCycles") != max_cycles or \
+               budget.get("maxMinutesPerCycle") != max_minutes_per_cycle:
+                budget["maxCycles"] = max_cycles
+                budget["maxMinutesPerCycle"] = max_minutes_per_cycle
+                state_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                print(f"[OK] execution-state.json budget actualizado "
+                      f"(maxCycles={max_cycles}, maxMinutesPerCycle={max_minutes_per_cycle})")
+            else:
+                print(f"[OK] execution-state.json already exists: {state_file}")
+        except Exception as exc:
+            print(f"[WARN] no pude actualizar el budget de {state_file}: {exc}")
         return state_file
 
     # Field names mirror what budget_enforcer.py (budget.maxCycles /
