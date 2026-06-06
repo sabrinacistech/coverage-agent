@@ -224,6 +224,29 @@ def main() -> int:
     if not repo.exists():
         raise SystemExit(f"[FAIL] target repo does not exist: {repo}")
 
+    # Safety guard: the state dir MUST be external to the target repo. Pointing
+    # --state-dir at the repo (or inside/around it) and then --clean would rmtree
+    # the project (incl. .git/src). Refuse loudly with a safe suggestion.
+    suggestion = repo.parent / f"coverage_{repo.name}"
+    if state_dir == repo or repo in state_dir.parents or state_dir in repo.parents:
+        raise SystemExit(
+            f"[FAIL] --state-dir no puede ser el repo, ni estar dentro/alrededor de él.\n"
+            f"        repo      = {repo}\n"
+            f"        state-dir = {state_dir}\n"
+            f"        El estado va FUERA del proyecto. Sugerido:\n"
+            f"          --state-dir {suggestion}"
+        )
+    if args.clean and (
+        (state_dir / ".git").exists()
+        or (state_dir / "pom.xml").exists()
+        or (state_dir / "src" / "main").exists()
+    ):
+        raise SystemExit(
+            f"[FAIL] --clean abortado: {state_dir} parece un proyecto real "
+            f"(.git/pom.xml/src). Me niego a borrarlo. Usá un --state-dir externo, p.ej.:\n"
+            f"          --state-dir {suggestion}"
+        )
+
     tools = agent_root / "tools" / "python"
     run_pipeline = tools / "run_pipeline.py"
     jacoco_guard = tools / "jacoco_pom_guard.py"
