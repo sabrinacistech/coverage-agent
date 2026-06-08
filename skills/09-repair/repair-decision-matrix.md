@@ -26,6 +26,30 @@
 | `E_OVERRIDE` | `FIX_REMOVE_OVERRIDE` | Quitar anotación o alinear firma. |
 | `E_ACCESS` | `FIX_USE_PUBLIC_API` | Reemplazar por API pública/builder. |
 
+## Compile Error Repair: Invalid Java String Literals
+
+> Determinístico vía [`repair-rules/string-literals.rules`](../../repair-rules/string-literals.rules)
+> — no escala al LLM salvo casos residuales.
+
+Si la compilación falla por un literal `String` Java inválido — `unclosed string
+literal`, `illegal line end in string literal`, escape malformado, o el guard
+previo a la escritura `INVALID_JAVA_STRING_LITERAL` — tratarlo como **bug de
+generación, no de la aplicación**:
+
+- **No** tocar código productivo.
+- Reemplazar newline/CR/tab/comilla/backslash **crudos** por sus escapes Java
+  (`\n`, `\r`, `\t`, `\"`, `\\`) dentro del literal afectado.
+- Mantener intacta la intención del test (mismos datos, mismo assert).
+- Re-correr el test tras la corrección.
+
+Mensaje accionable que recibe el agente reparador (cuando escala):
+
+```
+Generated Java test contains a raw newline inside a normal string literal.
+Regenerate the affected Java string using escaped sequences.
+Invalid: String value = "a⏎b";   Valid: String value = "a\nb";
+```
+
 ## Reglas
 - Cada intento registra en `state/failure-memory.json` `{hash, errorCode, symbolFQN, fixId, result}`.
 - Gate G7: si `hash` ya tiene `result: FAILED`, ese `fixId` queda prohibido para ese símbolo.

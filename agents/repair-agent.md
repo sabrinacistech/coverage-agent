@@ -206,7 +206,14 @@ Para cada compileError:
      a. ¿returnType en collaboratorUsage difiere del usado en el mock? → corregir en body
      b. ¿Parámetro no coincide con constructor evidenciado? → corregir en body
   4. errorCode == "package does not exist" → remover import erróneo de allowedImports
-  5. Otro error desconocido → BLOCKED
+  5. errorCode ∈ {"unclosed string literal", "illegal line end in string literal",
+     "INVALID_JAVA_STRING_LITERAL", escape malformado}:
+     → Bug de GENERACIÓN, no de la app. Re-emitir el `body` del método afectado
+       escapando los control-chars crudos dentro de cada literal String:
+       newline `\n`, CR `\r`, tab `\t`, comilla `\"`, backslash `\\`.
+       Conservar datos/intención del test; NO tocar código productivo.
+       (En el JSON, un `\n` Java se escribe `\\n`.)
+  6. Otro error desconocido → BLOCKED
 ```
 
 ### Reglas anti-loop (failureMemory)
@@ -226,6 +233,7 @@ Para cada compileError:
 
 - **PROHIBIDO** dentro de `body`: sentencias `import`, cláusulas `package`, declaraciones `public class`, `class`, `interface` o `enum`.
 - El body corregido debe conservar los comentarios `// given`, `// when`, `// then`.
+- **Java String Literal Safety**: ningún literal `String` puede contener newline/CR/tab **reales**; escapar siempre (`\n`,`\r`,`\t`,`\"`,`\\`). Sin text blocks (`"""`) salvo Java 15+.
 - Solo sustituir los símbolos erróneos con sus equivalentes evidenciados en `contextPack`.
 - `evidenceIds` debe referenciar los contratos que justifican cada corrección.
 

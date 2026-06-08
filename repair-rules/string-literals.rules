@@ -10,6 +10,12 @@
 # Unclosed string literal — escape sequences written as real control chars
 "unclosed string literal"                                => regeneratePatchBody("string-literal-escape")
 
+# Raw newline inside a literal (javac phrasing) — same root cause as above
+"illegal line end in string literal"                     => regeneratePatchBody("string-literal-escape")
+
+# Pre-write guard backstop (test_patch_applier raised before javac ran)
+"INVALID_JAVA_STRING_LITERAL"                            => regeneratePatchBody("string-literal-escape")
+
 # Illegal escape character inside string literal (e.g. \p, \q not valid in Java)
 "illegal escape character"                               => regeneratePatchBody("illegal-escape")
 

@@ -45,7 +45,14 @@ from typing import Any
 # unit tests set TPA_ALLOW_NO_GATES=1. Keeps the by-construction guarantee honest.
 _ALLOW_NO_GATES_ENV = "TPA_ALLOW_NO_GATES"
 
-from common import _TimedRun, atomic_write_json, emit_tool_summary, load_json, validate  # noqa: F401
+from common import (  # noqa: F401
+    _TimedRun,
+    atomic_write_json,
+    emit_tool_summary,
+    has_raw_newline_inside_java_string,
+    load_json,
+    validate,
+)
 
 # ── Safety constants ─────────────────────────────────────────────────────────
 _FORBIDDEN_SEGMENTS = ("src/main/java", "src\\main\\java")
@@ -619,6 +626,21 @@ def apply_patch(
     # the only code path that writes Java.
     new_text = _prune_unused_imports(new_text)
 
+    # Last-resort backstop before touching disk: a raw newline/CR inside a Java
+    # string literal is an "unclosed string literal" compile error. sanitize_java_
+    # body() already converts real control chars to escapes during render, so this
+    # normally never fires — but if that pass ever regresses or a future code path
+    # bypasses it, we want to fail loudly here (no broken Java written, clear
+    # signal to regenerate) instead of paying a full javac cycle to discover it.
+    # Treated as a generation defect, not an application bug. See string-literals
+    # .rules (repair) and skills/07-generation Java String Literal Safety.
+    if test_path.suffix == ".java" and has_raw_newline_inside_java_string(new_text):
+        raise ValueError(
+            "INVALID_JAVA_STRING_LITERAL: rendered test contains a raw newline "
+            "inside a Java string literal (would not compile). Regenerate the "
+            "affected literal using escaped sequences (\\n, \\r, \\t, \\\\, \\\")."
+        )
+
     if not dry_run:
         test_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = test_path.with_suffix(".java.tmp")
@@ -933,6 +955,12 @@ def main() -> int:
     except PermissionError as exc:
         print(f"[BLOCKED] {exc}", file=sys.stderr)
         return 3
+    except ValueError as exc:
+        # Repairable generation defect (e.g. INVALID_JAVA_STRING_LITERAL). No
+        # file was written. Exit 2 (FAIL, not BLOCKED) so the run-and-fix cycle
+        # regenerates with a clear, actionable message instead of crashing.
+        print(f"[FAIL] {exc}", file=sys.stderr)
+        return 2
     except FileNotFoundError as exc:
         print(f"[FAIL] {exc}", file=sys.stderr)
         return 2

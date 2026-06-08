@@ -60,6 +60,12 @@ Adicionalmente, específicas de este agente (constraints estructurales del patch
 
 1. Comentarios `// given`, `// when`, `// then` como separadores (skill `11-quality/02-test-structure-aaa`).
 2. PROHIBIDO en `body`: `import`, `package`, `public class`, `class`, `interface`, `enum`.
+2b. **Java String Literal Safety**: todo literal `String` debe ser Java válido de
+   una sola línea. PROHIBIDO escribir newline/CR/tab **reales** dentro de `"..."`;
+   escapar siempre: newline `\n`, CR `\r`, tab `\t`, backslash `\\`, comilla `\"`.
+   PROHIBIDO usar text blocks (`"""`) salvo Java 15+ confirmado. Inválido:
+   `String v = "a⏎b";` — Válido: `String v = "a\nb\tc";`. (Recordá que dentro del
+   JSON del patch, un `\n` Java se escribe como `\\n`.)
 3. given: fixtures con la `strategy` evidenciada (`builder|constructor|factory`);
    para `mock` → `Mockito.mock(Tipo.class)`.
 4. when: invocar el método del SUT con la firma exacta del target; capturar
@@ -88,6 +94,7 @@ Cada `methods[]` debe cumplir los siguientes contratos. Una violación implica
 | Skill | Regla aplicada al patch descriptor |
 |---|---|
 | [02-test-structure-aaa](../skills/11-quality/02-test-structure-aaa.md) | `body` contiene los tres separadores `// given`, `// when`, `// then` en orden. |
+| [07-generation/ast-patch-generation](../skills/07-generation/ast-patch-generation.md) (Java String Literal Safety) | Ningún literal `String` del `body` contiene newline/CR/tab **reales**; sólo escapes (`\n`,`\r`,`\t`,`\\`,`\"`). Sin text blocks salvo Java 15+. Violación ⇒ el aplicador rechaza con `INVALID_JAVA_STRING_LITERAL`. |
 | [03-test-naming](../skills/11-quality/03-test-naming.md) | `methods[].name` matchea `^should[A-Z]\w*_when[A-Z]\w*$` o `^[a-z]\w+_[a-z]\w+_[a-z]\w+$`. Sin nombres genéricos (`test1`, `testMethod`). |
 | [06-test-doubles](../skills/11-quality/06-test-doubles.md) | Stub (`when().thenReturn()`) sólo si el SUT invoca el método; mock (`verify()`) sólo para colaboradores cuyo efecto sea observable; nunca mockear value objects (`String`, `Optional`, `BigDecimal`, records). |
 | [09-antipattern-mystery-guest](../skills/11-quality/09-antipattern-mystery-guest-logic.md) | Cero `if/for/while/switch` en `body`. Cero `Math.random`, `LocalDate.now`, `UUID.randomUUID`. Datos relevantes deben aparecer literales en `given` (no ocultos detrás de helpers anónimos). |

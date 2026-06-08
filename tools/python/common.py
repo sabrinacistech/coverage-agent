@@ -350,3 +350,103 @@ def find_pom_modules(repo: Path, contract: Path | str | None = None) -> list[Pat
     # Skip generated/build dirs
     poms = [p for p in poms if "target" not in p.parts and "build" not in p.parts]
     return [p.parent for p in poms]
+
+
+# ── Java source-emission helpers ──────────────────────────────────────────────
+# Centralized so every place that emits Java test code escapes string literals
+# the same way. A raw control character inside a normal Java string literal is a
+# compile error ("unclosed string literal" / "illegal line end in string
+# literal"); these two helpers are the canonical produce-side (escape) and
+# verify-side (detect) of that invariant. Java text blocks (`\"\"\"`) are NOT
+# handled — callers must not emit them unless the source level is known ≥ 15.
+
+def java_string_literal(value: str) -> str:
+    """Return *value* as a valid Java ``String`` literal, quotes included.
+
+    Escapes the characters that would otherwise break a normal (single-line)
+    Java string literal. Order matters: backslash first so the escapes we add
+    afterwards are not double-escaped.
+
+        java_string_literal("a\\nb\\tc")  ->  '"a\\\\nb\\\\tc"'
+
+    Use this for any test *data* embedded in generated source. It does not
+    attempt to escape every Unicode control char (e.g. form-feed) — only the
+    ones the generators actually produce — but it always yields compilable Java
+    for the handled set and never emits a raw newline/CR/tab.
+    """
+    escaped = (
+        value
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+        .replace("\t", "\\t")
+    )
+    return '"' + escaped + '"'
+
+
+def has_raw_newline_inside_java_string(source: str) -> bool:
+    """True if *source* contains a raw newline/CR inside a normal Java string literal.
+
+    A minimal, comment-aware state machine — not a full Java parser. It tracks
+    string-literal and comment context so quotes inside ``// ...`` or ``/* ... */``
+    do not produce false positives, and so an escaped quote (``\\"``) does not
+    close the literal. A real ``\\n``/``\\r`` byte found while inside ``"..."`` is
+    the signature of the "unclosed string literal" compile error and returns True.
+
+    Java text blocks (``\"\"\"``) are intentionally NOT modeled: this guard runs
+    against generated test source, which must not contain them. A text block
+    would be (conservatively) seen as three adjacent empty/short literals; that
+    can only ever make this return True (reject), never hide a real defect.
+    """
+    in_string = False
+    escaped = False
+    in_line_comment = False
+    in_block_comment = False
+    i = 0
+    n = len(source)
+
+    while i < n:
+        ch = source[i]
+        nxt = source[i + 1] if i + 1 < n else ""
+
+        if in_line_comment:
+            if ch in ("\n", "\r"):
+                in_line_comment = False
+            i += 1
+            continue
+
+        if in_block_comment:
+            if ch == "*" and nxt == "/":
+                in_block_comment = False
+                i += 2
+                continue
+            i += 1
+            continue
+
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            elif ch in ("\n", "\r"):
+                return True
+            i += 1
+            continue
+
+        if ch == "/" and nxt == "/":
+            in_line_comment = True
+            i += 2
+            continue
+        if ch == "/" and nxt == "*":
+            in_block_comment = True
+            i += 2
+            continue
+        if ch == '"':
+            in_string = True
+
+        i += 1
+
+    return False
