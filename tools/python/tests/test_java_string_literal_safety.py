@@ -164,6 +164,49 @@ def case_render_real_control_chars_is_valid() -> None:
         )
 
 
+def case_render_from_template_preserves_escapes() -> None:
+    """Regression: _render_from_template must NOT re-interpret Java escape
+    sequences in the generated body.
+
+    Root cause (2026-06-09): the new-file render path substituted the body into
+    the template with ``re.sub(pattern, body, text)``. A STRING replacement makes
+    re.sub expand ``\\n``/``\\t``/``\\r`` (and backreferences like ``\\1``/``\\g``)
+    — so a VALID Java literal ``"a\\nb\\tc"`` was turned back into REAL control
+    characters, yielding an "unclosed string literal" (INVALID_JAVA_STRING_LITERAL)
+    on the very first test written to a class. The fix uses a function replacement
+    (inserted verbatim). The previous case exercised _render_method only and
+    therefore never caught this — this one goes through the full template path.
+    """
+    import test_patch_applier as T
+
+    patch = {
+        "schemaVersion": 1, "patchId": "patch:abcdef",
+        "sut": "com.acme.LogSanitizer", "testClass": "com.acme.LogSanitizerTest",
+        "testPackage": "com.acme", "template": "junit5-mockito",
+        "methods": [{
+            "name": "sanitizeForLog_controlChars_collapse",
+            "annotations": ["@Test"],
+            # Body already carries VALID Java escapes (backslash-n, -t, -r) inside
+            # the literal — these must survive the template substitution intact.
+            "body": ("// given\nString value = \"a\\nb\\tc\\rd\";\n"
+                     "// when\nString result = LogSanitizer.sanitizeForLog(value);\n"
+                     "// then\nassertThat(result).isEqualTo(\"a_b_c_d\");"),
+            "evidenceIds": ["sym:com.acme.LogSanitizer#sanitizeForLog:12345678"],
+        }],
+    }
+    tpl = (Path(__file__).resolve().parents[3] / "templates" / "junit5-mockito.java"
+           ).read_text(encoding="utf-8")
+    rendered = T._render_from_template(tpl, patch)
+    if has_raw_newline_inside_java_string(rendered):
+        FAILURES.append(
+            "render_from_template re-interpreted escape sequences → raw newline "
+            f"inside a literal:\n{rendered}")
+    if '"a\\nb\\tc\\rd"' not in rendered:
+        FAILURES.append(
+            "render_from_template did not preserve the escaped literal "
+            f'"a\\nb\\tc\\rd"; got:\n{rendered}')
+
+
 def main() -> int:
     cases = [v for k, v in sorted(globals().items()) if k.startswith("case_")]
     for c in cases:

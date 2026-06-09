@@ -390,8 +390,16 @@ def _render_from_template(tpl: str, patch: dict) -> str:
     result = result.replace("${PACKAGE}", pkg)
     result = result.replace("${SUT_SIMPLE}", sut_simple)
     result = result.replace("${SUT_FQN}", sut_fqn)
-    result = _COLLAB_BLOCK_RE.sub(collab_block, result)
-    result = _BODY_PLACEHOLDER_RE.sub("\n\n" + body_block, result)
+    # CRITICAL: use FUNCTION replacements, never string replacements. re.sub treats
+    # a string repl specially — it expands backreferences (\1, \g<n>) AND escape
+    # sequences (\n, \t, \r, \f...). The generated Java carries valid escapes
+    # inside string literals (e.g. "a\nb\tc"); a string repl would turn those back
+    # into REAL control characters, producing an "unclosed string literal" compile
+    # error (caught downstream as INVALID_JAVA_STRING_LITERAL) and could even raise
+    # on a stray "\g"/"\1". A lambda repl is inserted verbatim — no escape/group
+    # processing — so the rendered Java is byte-for-byte what _render_method emitted.
+    result = _COLLAB_BLOCK_RE.sub(lambda _m: collab_block, result)
+    result = _BODY_PLACEHOLDER_RE.sub(lambda _m: "\n\n" + body_block, result)
 
     # M2: drop the Mockito scaffolding when there is nothing to inject. With no
     # @Mock collaborators AND a SUT instance that the test body never touches

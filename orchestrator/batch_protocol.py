@@ -53,6 +53,39 @@ _GEN_ITEM_STATUSES = frozenset({"generated", "skipped", "failed"})
 _REPAIR_ITEM_STATUSES = frozenset({"repaired", "skipped", "abandoned", "failed"})
 
 # ── Generation / repair rules shipped to Claude Code in every request ──────────
+# The QUALITY_GATE_RULES mirror the deterministic G6 linter (tools/python/
+# test_linter.py, skills/11-quality). A test that breaks any of these is ROLLED
+# BACK by the patcher (G6_LINTER_FAIL) and bounced to a repair round — so stating
+# them up front is what makes a batch pass on the first handoff instead of after
+# one or two repair rounds. Keep this list in sync with test_linter's TQG_* kinds.
+QUALITY_GATE_RULES = [
+    # TQG_02_NO_AAA — every @Test body must contain the three AAA marker comments.
+    "Every @Test method body MUST contain the three Arrange/Act/Assert marker "
+    "comments, literally: `// given`, `// when`, `// then`.",
+    # TQG_11_EAGER_TEST — exactly one `// when` per test.
+    "Use exactly ONE `// when` marker per test method (one action under test); "
+    "split multiple actions into separate @Test methods.",
+    # TQG_03_NAMING — method names must match one of the two accepted forms.
+    "Name every @Test method as either `shouldX_whenY` (e.g. "
+    "`shouldReturnUnknown_whenInputBlank`) OR three lowercase-led snake_case parts "
+    "`method_condition_expected` (e.g. `getId_afterSetId_returnsValue`). No other "
+    "shape passes the naming gate.",
+    # TQG_11_NON_DETERMINISTIC — no wall-clock / randomness / sleeps.
+    "Never call non-deterministic APIs in a test: no Instant.now(), "
+    "LocalDate/LocalDateTime.now(), System.currentTimeMillis()/nanoTime(), "
+    "Math.random(), UUID.randomUUID(), or Thread.sleep(...). Use fixed values "
+    "(e.g. Instant.parse(\"2026-01-01T00:00:00Z\")).",
+    # TQG_12_OVER_MOCK / _SUT — never mock the class under test or value objects.
+    "Never mock the system under test (no @Mock/@Spy on the SUT type) nor value "
+    "objects/DTOs/enums/collections; construct them directly.",
+    # TQG_12_TAUTOLOGY — assert real behaviour.
+    "Assert the real behaviour; never assertTrue(true)/assertFalse(false) or "
+    "assert a value against itself.",
+    # TQG_09_LOGIC_IN_TEST — no control flow in test bodies.
+    "No control flow inside a test body (no if/for/while/switch); keep tests "
+    "straight-line Arrange/Act/Assert.",
+]
+
 GENERATION_RULES = [
     "Generate Java tests that compile.",
     "Do not modify production code.",
@@ -64,10 +97,12 @@ GENERATION_RULES = [
     "Prefer small deterministic unit tests; mock external dependencies.",
     "Avoid starting a full Spring context unless strictly necessary.",
     "Escape Java string literals correctly: \\n \\r \\t \\\\ \\\" — never a raw "
-    "newline/tab inside a normal String literal.",
+    "newline/tab inside a normal String literal. If you need a control character "
+    "in test input, prefer building it explicitly (e.g. \"a\" + (char) 10 + \"b\").",
     "For sanitizers/encoders/maskers/normalizers/parsers include edge cases when "
     "applicable: null, blank, newline, tab, CR, quotes, backslash, angle brackets, "
     "unicode/non-ASCII, already-sanitized input, very long input.",
+    *QUALITY_GATE_RULES,
 ]
 REPAIR_RULES = [
     "Do not modify production code; fix only the generated tests.",
@@ -75,6 +110,7 @@ REPAIR_RULES = [
     "Prefer minimal changes.",
     "If an expected value is wrong, infer it from the source behaviour.",
     "If a Java string literal is invalid, escape it (\\n \\r \\t \\\\ \\\").",
+    *QUALITY_GATE_RULES,
 ]
 
 
