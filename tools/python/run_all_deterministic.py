@@ -220,12 +220,38 @@ def main() -> int:
     parser.add_argument(
         "--start-cycle-loop",
         action="store_true",
-        help="Start cycle_loop after pre-stage",
+        help="Start the generation/repair loop after the pre-stage (cycle_loop for "
+        "handoff-single/auto, batch_runner for handoff-batch).",
+    )
+    parser.add_argument(
+        "--generation-mode",
+        default="handoff-single",
+        choices=["handoff-single", "handoff-batch", "auto"],
+        help="How tests are generated after the pre-stage. "
+        "'handoff-single' (default, debug): one target per handoff via cycle_loop. "
+        "'handoff-batch' (recommended): up to --batch-size targets per handoff, with "
+        "per-failure repair rounds. 'auto': autonomous via a configured LLM provider "
+        "(COVAGENT_LLM_PROVIDER=litellm + credentials); errors if not configured.",
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=10,
+        help="handoff-batch: max targets per batch request (default 10).",
+    )
+    parser.add_argument(
+        "--max-repair-rounds", type=int, default=2,
+        help="handoff-batch: repair rounds per batch before a target is abandoned "
+        "(default 2).",
+    )
+    parser.add_argument(
+        "--max-batches", type=int, default=None,
+        help="handoff-batch: cap the number of batches this run processes "
+        "(calibration). Default: no cap (budget/targets bound the run).",
     )
     parser.add_argument(
         "--llm-provider",
         default="ide",
-        help='Usually "ide" for VS Code/Claude/Copilot handoff',
+        help='Usually "ide" for VS Code/Claude/Copilot handoff. Set to "litellm" '
+        "for --generation-mode auto.",
     )
 
     args = parser.parse_args()
@@ -380,14 +406,47 @@ def main() -> int:
     if not args.start_cycle_loop:
         print(
             "\n[NEXT] To start the generation/repair loop, rerun with "
-            "--start-cycle-loop."
+            f"--start-cycle-loop (--generation-mode {args.generation_mode})."
         )
         return 0
 
     loop_env = dict(env)
     loop_env["COVAGENT_LLM_PROVIDER"] = args.llm_provider
+    loop_env["COVAGENT_GENERATION_MODE"] = args.generation_mode
 
-    print("\n==== [F] Cycle loop ====")
+    if args.generation_mode == "handoff-batch":
+        # Incremental batch handoff: up to --batch-size targets per request, with
+        # per-failure repair rounds. The minute budget is paused during each manual
+        # handoff (Claude Code generating JSON), so BUDGET_EXCEEDED only fires on
+        # the runner's automatic work.
+        loop_env["COVAGENT_BATCH_SIZE"] = str(args.batch_size)
+        loop_env["COVAGENT_MAX_REPAIR_ROUNDS"] = str(args.max_repair_rounds)
+        print("\n==== [F] Batch handoff loop (handoff-batch) ====")
+        batch_cmd = [
+            python, "-m", "orchestrator.batch_runner",
+            "--state-dir", str(state_dir),
+            "--repo", str(repo),
+            "--batch-size", str(args.batch_size),
+            "--max-repair-rounds", str(args.max_repair_rounds),
+        ]
+        if args.max_batches is not None:
+            batch_cmd += ["--max-batches", str(args.max_batches)]
+        run(batch_cmd, cwd=agent_root, env=loop_env)
+        return 0
+
+    if args.generation_mode == "auto":
+        # Autonomous: no file handoff, no input(). Requires a configured model
+        # provider; the default 'ide' provider is a manual handoff, not automation.
+        if args.llm_provider == "ide":
+            raise SystemExit(
+                "[FAIL] auto generation mode is not configured: it needs an "
+                "automatic model provider. Re-run with --llm-provider litellm and "
+                "the provider credentials in the environment, or use "
+                "--generation-mode handoff-batch for the manual handoff."
+            )
+        loop_env["COVAGENT_IDE_INTERACTIVE"] = "0"  # never prompt for ENTER
+
+    print(f"\n==== [F] Cycle loop (generation-mode={args.generation_mode}) ====")
     run(
         [
             python, str(cycle_loop),

@@ -10,6 +10,20 @@ Subcommands
   check-tokens → verify no SUT pack exceeds its input-token ceiling; exits 0 or 2
   tick         → increment cycle counter and stamp cycleStartedAt
   reset        → clear cycleStartedAt (used at end of cycle)
+  pause        → freeze the per-cycle minute clock while the loop waits on a
+                 MANUAL handoff (Claude Code generating JSON, the user pressing
+                 ENTER). Stamps cyclePausedAt.
+  resume       → unfreeze: shift cycleStartedAt forward by the paused span so the
+                 human wait never counts against maxMinutesPerCycle. Clears
+                 cyclePausedAt.
+
+The minute budget must measure the runner's AUTOMATIC work (target selection,
+request/response I/O, patch application, test runs, error analysis), never human
+time. Without pause/resume the interactive IDE handoff blocks inside a cycle with
+cycleStartedAt already stamped, so the test_patch_applier backstop trips
+BUDGET_EXCEEDED while the user is still thinking. `pause`/`resume` (and the
+`paused(...)` context manager) close that gap: the wait is wrapped so only
+automatic work accrues against the budget.
 
 The cost/token half of the budget lives in state/_summaries/llm-budget.json,
 which context_pack_builder.py already writes (estimatedTokensIn vs maxTokensIn
@@ -34,6 +48,7 @@ Exit codes
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 import time
@@ -75,7 +90,13 @@ def check(state_path: Path) -> tuple[int, dict]:
 
     started = state.get("cycleStartedAt")
     if started is not None:
-        elapsed_min = (time.time() - float(started)) / 60.0
+        # While a manual handoff is in progress (cyclePausedAt set) the minute clock
+        # is FROZEN: elapsed is measured up to the instant the pause began, not to
+        # now, so human wait never trips the budget. resume() later shifts
+        # cycleStartedAt forward so the same exclusion holds after the wait ends.
+        paused_at = state.get("cyclePausedAt")
+        ref = float(paused_at) if paused_at is not None else time.time()
+        elapsed_min = (ref - float(started)) / 60.0
         if elapsed_min > max_minutes:
             return EXIT_EXCEEDED, {
                 "ok": False, "reason": "maxMinutesPerCycle",
@@ -136,11 +157,68 @@ def tick(state_path: Path) -> tuple[int, dict]:
 def reset(state_path: Path) -> tuple[int, dict]:
     state = _load(state_path)
     state.pop("cycleStartedAt", None)
+    state.pop("cyclePausedAt", None)
     atomic_write_json(state_path, state)
     return EXIT_OK, {"ok": True, "cycle": int(state.get("cycle", 0))}
 
 
-_DISPATCH = {"check": check, "tick": tick, "reset": reset}
+def pause(state_path: Path) -> tuple[int, dict]:
+    """Freeze the per-cycle minute clock for a manual handoff.
+
+    Stamps ``cyclePausedAt`` (idempotent: a second pause keeps the first stamp, so
+    a nested/duplicate pause never loses paused time). If no cycle is in progress
+    (no ``cycleStartedAt``) this is a no-op — there is nothing to freeze.
+    """
+    state = _load(state_path)
+    if state.get("cycleStartedAt") is None:
+        return EXIT_OK, {"ok": True, "paused": False, "reason": "noCycleInProgress"}
+    if state.get("cyclePausedAt") is None:
+        state["cyclePausedAt"] = time.time()
+        atomic_write_json(state_path, state)
+    return EXIT_OK, {"ok": True, "paused": True, "cyclePausedAt": state.get("cyclePausedAt")}
+
+
+def resume(state_path: Path) -> tuple[int, dict]:
+    """Unfreeze the minute clock after a manual handoff.
+
+    Shifts ``cycleStartedAt`` forward by the paused span ``now - cyclePausedAt`` so
+    the wait is excluded from elapsed, then clears ``cyclePausedAt``. A resume with
+    no matching pause is a no-op.
+    """
+    state = _load(state_path)
+    paused_at = state.get("cyclePausedAt")
+    if paused_at is None:
+        return EXIT_OK, {"ok": True, "resumed": False}
+    started = state.get("cycleStartedAt")
+    if started is not None:
+        span = time.time() - float(paused_at)
+        state["cycleStartedAt"] = float(started) + max(0.0, span)
+    state.pop("cyclePausedAt", None)
+    atomic_write_json(state_path, state)
+    return EXIT_OK, {"ok": True, "resumed": True, "cycleStartedAt": state.get("cycleStartedAt")}
+
+
+@contextlib.contextmanager
+def paused(state_path: Path, reason: str = ""):
+    """Context manager that pauses the budget around a manual-handoff wait.
+
+    Emits the canonical ``[budget] paused: <reason>`` / ``[budget] resumed`` log
+    lines so the console makes clear that human time is NOT being charged. resume
+    always runs (finally), even if the wait raises (timeout, Ctrl+C)::
+
+        with budget_enforcer.paused(state_path, "waiting for manual Claude Code handoff"):
+            wait_for_user_or_response_json()
+    """
+    pause(state_path)
+    print(f"[budget] paused: {reason}" if reason else "[budget] paused", flush=True)
+    try:
+        yield
+    finally:
+        resume(state_path)
+        print("[budget] resumed", flush=True)
+
+
+_DISPATCH = {"check": check, "tick": tick, "reset": reset, "pause": pause, "resume": resume}
 
 
 def main(argv: list[str] | None = None) -> int:

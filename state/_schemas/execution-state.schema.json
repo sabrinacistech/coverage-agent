@@ -25,6 +25,7 @@
     "consecutiveZeroDeltaCycles": { "type": "integer" },
     "compileFailRateWindow": { "type": "array", "items": { "type": "number" } },
     "cycleStartedAt": { "type": "number", "description": "Epoch seconds stamped by budget_enforcer.tick at cycle entry; cleared by reset. Transient." },
+    "cyclePausedAt": { "type": "number", "description": "Epoch seconds stamped by budget_enforcer.pause while the loop waits on a manual handoff (Claude Code / ENTER). While set, check() freezes elapsed at this instant; resume() shifts cycleStartedAt forward by the paused span so human wait never counts against maxMinutesPerCycle. Transient." },
     "checkpoints": {
       "type": "array",
       "items": {

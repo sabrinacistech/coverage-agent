@@ -205,6 +205,29 @@ $env:COVAGENT_LLM_PROVIDER = "ide"
        --repo C:\repo\multi-clusters\cluster-status-service
 ```
 
+**Opción A.bis — pre-stage + loop en un solo comando (`run_all_deterministic.py`):**
+
+`run_all_deterministic.py` corre la fase 0 determinista y, con `--start-cycle-loop`,
+arranca el loop. El flag `--generation-mode` elige cómo se genera:
+
+- `handoff-single` (default, debug): un target por handoff (igual que la Opción A).
+- `handoff-batch` (**recomendado**): hasta `--batch-size` targets por request, con
+  rondas de repair solo para los fallidos. Escala a proyectos de 100+ clases.
+- `auto`: autónomo, sin handoff (requiere `--llm-provider litellm` + credenciales).
+
+```powershell
+.\.venv\Scripts\python.exe tools\python\run_all_deterministic.py `
+  --repo C:\repo\multi-clusters\cluster-status-service `
+  --state-dir C:\repo\agent-state-multiclusters `
+  --generation-mode handoff-batch --batch-size 10 --max-repair-rounds 2 `
+  --start-cycle-loop
+```
+
+En **todos** los modos de handoff la espera de Claude Code **pausa el budget** de
+minutos (no dispara `BUDGET_EXCEEDED` mientras pensás). Guía completa del flujo por
+batches, repair, estado persistente y cómo retomar un run:
+[`docs/batch-handoff.md`](batch-handoff.md).
+
 **Opción B — API FastAPI (arranque manual):**
 
 ```powershell
@@ -290,10 +313,14 @@ se llama al LLM** (exit 2).
 |---|---|---|
 | `COVAGENT_LLM_PROVIDER` | `ide` | `ide` (handoff Claude Code/Copilot) · `litellm` (API, etapa 2) |
 | `COVAGENT_IDE_TIMEOUT` | `1800` | segundos que el agente espera la respuesta del IDE |
-| `COVAGENT_IDE_DIR` | `<state>\_llm` | carpeta del handoff |
+| `COVAGENT_IDE_DIR` | `<state>\_llm` | carpeta del handoff (runs/batches viven acá) |
+| `COVAGENT_GENERATION_MODE` | `handoff-single` | `handoff-single` · `handoff-batch` · `auto` (lo fija `--generation-mode`) |
+| `COVAGENT_BATCH_SIZE` | `10` | targets por batch (`handoff-batch`; lo fija `--batch-size`) |
+| `COVAGENT_MAX_REPAIR_ROUNDS` | `2` | rondas de repair por batch antes de ABANDONED (`--max-repair-rounds`) |
 | `COVAGENT_MODEL_GENERATION` / `_REPAIR` | (Claude) | modelo por rol (solo aplica con `litellm`) |
 
-Presupuesto: en `execution-state.json` (ver 5.3).
+Presupuesto: en `execution-state.json` (ver 5.3). En los modos de handoff la espera
+manual **pausa** el budget de minutos — ver [`docs/batch-handoff.md`](batch-handoff.md).
 
 ---
 
@@ -305,6 +332,9 @@ Presupuesto: en `execution-state.json` (ver 5.3).
 | `Python 3.9+ not found` / errores de langgraph | Usá **Python 3.12** para el venv (`py -3.12 -m venv .venv`). |
 | `Maven not found` | Agregá Maven al PATH (o `mvn.cmd` en Windows). |
 | El ciclo "se cuelga" | Está esperando el **handoff**: resolvé el `request-*.md` con Claude Code, o subí/ bajá `COVAGENT_IDE_TIMEOUT`. |
+| `BUDGET_EXCEEDED (maxMinutesPerCycle)` apenas empezás | Ya **no** debería pasar por la espera manual: el handoff pausa el budget. Si pasa, es trabajo automático real (build/test lento): subí `maxMinutesPerCycle` en `execution-state.json`. |
+| Un proyecto falla mucho (pass rate < 50%) | El runner `handoff-batch` **frena solo** y lo recomienda: re-corré con `--batch-size` menor (p.ej. `3`) y `--max-batches 1` para calibrar. |
+| `auto generation mode is not configured` | `--generation-mode auto` necesita `--llm-provider litellm` + credenciales. Para handoff manual usá `--generation-mode handoff-batch`. |
 | `[BLOCKED] G1_NO_PERIMETER` | Falta el context-pack; re-corré la Fase 0 (genera `context-packs\`). |
 | Patch rechazado (exit 3) | El test propuesto viola un gate (import no permitido, símbolo inexistente, lint). Pedile a Claude Code que corrija según el `blockReason`. |
 | `target\classes` no existe | Construí el repo objetivo: `mvn -DskipTests package` (o `mvn test`). |

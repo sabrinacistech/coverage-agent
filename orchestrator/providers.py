@@ -15,7 +15,9 @@ gates ni toca disco del repo — de eso se encarga el patcher determinista.
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Protocol
@@ -23,6 +25,42 @@ from typing import Protocol
 from . import config
 
 _SKIP_PATCH = {"schemaVersion": 1, "status": "BLOCKED", "blockReason": "skipped by user from terminal"}
+
+
+@contextlib.contextmanager
+def _budget_paused(state_dir, reason: str):
+    """Pause the per-cycle minute budget around a MANUAL handoff wait.
+
+    The minute budget must measure the runner's automatic work, never the time a
+    human spends asking Claude Code to generate the patch and pressing ENTER.
+    Without this, the interactive handoff blocks inside a cycle whose
+    cycleStartedAt is already stamped, so the test_patch_applier backstop trips
+    BUDGET_EXCEEDED while the user is still thinking (the exact bug being fixed).
+
+    budget_enforcer lives in tools/python (the deterministic core, invoked by
+    path), so it is imported lazily here. If it cannot be imported (e.g. an
+    orchestrator-only unit test), this degrades to a no-op that still prints the
+    handoff markers — the wait simply is not budget-aware, never an error.
+    """
+    state_path = Path(state_dir) / "execution-state.json"
+    be = None
+    try:
+        if str(config.TOOLS_PYTHON) not in sys.path:
+            sys.path.insert(0, str(config.TOOLS_PYTHON))
+        import budget_enforcer as be  # noqa: F811
+    except Exception:  # pragma: no cover - core not importable in some unit tests
+        be = None
+
+    if be is None or not state_path.exists():
+        print(f"[budget] paused: {reason}", flush=True)
+        try:
+            yield
+        finally:
+            print("[budget] resumed", flush=True)
+        return
+
+    with be.paused(state_path, reason):
+        yield
 
 
 class ProviderError(RuntimeError):
@@ -90,9 +128,14 @@ class IDEProvider:
 
         print(_banner(req_json, resp, role, cycle), flush=True)
 
-        if config.ide_interactive():
-            return self._await_interactive(req_json, req_md, resp, done)
-        return self._await_polling(req_json, req_md, resp, done)
+        # The wait below is MANUAL handoff time (Claude Code generating the JSON,
+        # the user pressing ENTER). Pause the per-cycle minute budget so only the
+        # runner's automatic work is charged against maxMinutesPerCycle.
+        with _budget_paused(state_dir, "waiting for manual Claude Code handoff"):
+            print(f"[handoff] waiting for response JSON: {resp.name}", flush=True)
+            if config.ide_interactive():
+                return self._await_interactive(req_json, req_md, resp, done)
+            return self._await_polling(req_json, req_md, resp, done)
 
     # — modo interactivo: el usuario maneja cada paso desde la terminal —
     def _await_interactive(self, req_json, req_md, resp, done) -> str:

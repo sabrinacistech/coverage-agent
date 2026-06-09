@@ -8,6 +8,10 @@
 >
 > 🚀 **¿Cómo correrlo desde cero?** → [`docs/RUNBOOK.md`](docs/RUNBOOK.md)
 > (guía para equipos: VS Code + Claude Code, sin API key).
+>
+> 📦 **Generación por batches (proyectos grandes)** → [`docs/batch-handoff.md`](docs/batch-handoff.md):
+> `--generation-mode handoff-batch --batch-size 10`, repair solo para fallidos,
+> estado persistente por target, y el budget pausado durante el handoff manual.
 
 ---
 
