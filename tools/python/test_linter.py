@@ -114,6 +114,22 @@ ALLOWED_CALLS = {
     "contains", "add", "put", "get", "orElse", "orElseThrow",
 }
 
+# JDK standard-library import prefixes. Anything under these is ALWAYS on the
+# compile/runtime classpath, so an import under them can never be the kind of
+# hallucinated, non-resolvable import G1 exists to catch. Admitting them
+# unconditionally also decouples this linter from
+# `classpath_resolver._jdk_packages()`, whose jmod-based JDK introspection
+# silently yields an EMPTY set on a JRE (no jmods) or when JAVA_HOME is unset —
+# which would otherwise make G1 reject perfectly valid imports like
+# `java.util.Optional` even though the context-pack / pre-write gate allowed them.
+JDK_IMPORT_PREFIXES: tuple[str, ...] = ("java.", "javax.")
+
+
+def _is_jdk_import(target: str) -> bool:
+    """True for any standard-library import (java.* / javax.*), always resolvable."""
+    return target.startswith(JDK_IMPORT_PREFIXES)
+
+
 # Static-import owners always considered safe regardless of whitelist contents.
 # Avoids IMPORT_NOT_WHITELISTED churn on every regenerated test for ubiquitous
 # assertion / mocking helpers (AssertJ, Mockito static, Hamcrest, JUnit assertions).
@@ -615,7 +631,7 @@ def lint(
             continue
         if target.endswith(".*"):
             pkg = target[:-2]
-            if pkg not in packages:
+            if pkg not in packages and not _is_jdk_import(target):
                 violations.append({
                     "gate": "G1",
                     "kind": "IMPORT_PKG_NOT_WHITELISTED",
@@ -626,6 +642,9 @@ def lint(
         raw_imports.append(target)
         declared_imports[target.rsplit(".", 1)[-1]] = target
         if target in classes:
+            continue
+        # JDK stdlib is always on the classpath — never a hallucination.
+        if _is_jdk_import(target):
             continue
         pkg = target.rsplit(".", 1)[0]
         if pkg not in packages:

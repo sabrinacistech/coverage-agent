@@ -40,41 +40,77 @@ def _list_classes_in_jar(jar: Path) -> tuple[set[str], set[str]]:
     return packages, fqcns
 
 
+# Static fallback: standard-library packages that are ALWAYS on the classpath.
+# Used when JDK introspection yields nothing (JAVA_HOME unset, or a JRE with no
+# `jmods/` directory and no `bin/jmod`). Without this, `import-whitelist.json`
+# would silently omit every JDK package and the post-write linter (G1) would
+# reject valid imports like `java.util.Optional`. Not exhaustive by design — it
+# covers the packages tests realistically import; the WARN points at the real
+# fix (point JAVA_HOME at a full JDK so full introspection runs).
+_JDK_FALLBACK_PACKAGES: frozenset[str] = frozenset({
+    "java.lang", "java.lang.annotation", "java.lang.reflect", "java.lang.ref",
+    "java.util", "java.util.concurrent", "java.util.concurrent.atomic",
+    "java.util.concurrent.locks", "java.util.function", "java.util.stream",
+    "java.util.regex", "java.util.zip", "java.util.spi",
+    "java.io", "java.nio", "java.nio.file", "java.nio.file.attribute",
+    "java.nio.charset", "java.nio.channels",
+    "java.time", "java.time.format", "java.time.temporal", "java.time.zone",
+    "java.time.chrono", "java.math", "java.text", "java.net", "java.net.http",
+    "java.sql", "java.beans", "java.security", "java.security.cert",
+    "javax.crypto", "javax.crypto.spec", "javax.net", "javax.net.ssl",
+    "javax.sql", "javax.naming", "javax.security.auth", "javax.annotation",
+})
+
+
 def _jdk_packages() -> set[str]:
-    """Collect package names from JAVA_HOME (jrt-fs for 9+, rt.jar for 8)."""
+    """Collect package names from JAVA_HOME (jrt-fs for 9+, rt.jar for 8).
+
+    Falls back to a static standard-library package set when introspection finds
+    nothing — otherwise a JRE (no jmods) or a missing JAVA_HOME would silently
+    drop every JDK package from the whitelist.
+    """
     pkgs: set[str] = set()
     java_home = os.environ.get("JAVA_HOME")
-    if not java_home:
-        return pkgs
-    jh = Path(java_home)
-    # Java 8
-    rt = jh / "jre" / "lib" / "rt.jar"
-    if rt.exists():
-        p, _ = _list_classes_in_jar(rt)
-        pkgs |= p
-        return pkgs
-    # Java 9+: use `jrt:/` via `java --list-modules` + `jmod list`
-    try:
-        out = run([str(jh / "bin" / "java"), "--list-modules"]).stdout
-        modules = [line.split("@")[0].strip() for line in out.splitlines() if line.strip()]
-        for m in modules:
+    jh = Path(java_home) if java_home else None
+    if jh is not None:
+        # Java 8
+        rt = jh / "jre" / "lib" / "rt.jar"
+        if rt.exists():
+            p, _ = _list_classes_in_jar(rt)
+            pkgs |= p
+        else:
+            # Java 9+: use `jrt:/` via `java --list-modules` + `jmod list`
             try:
-                # jmod might not exist in JRE; ignore failures
-                jmod = jh / "bin" / "jmod"
-                if not jmod.exists():
-                    continue
-                r = run([str(jmod), "list", str(jh / "jmods" / f"{m}.jmod")])
-                for line in r.stdout.splitlines():
-                    if line.startswith("classes/") and line.endswith(".class") and "$" not in line:
-                        fq = line[len("classes/"):-6].replace("/", ".")
-                        if "module-info" in fq:
+                out = run([str(jh / "bin" / "java"), "--list-modules"]).stdout
+                modules = [line.split("@")[0].strip()
+                           for line in out.splitlines() if line.strip()]
+                for m in modules:
+                    try:
+                        # jmod might not exist in JRE; ignore failures
+                        jmod = jh / "bin" / "jmod"
+                        if not jmod.exists():
                             continue
-                        if "." in fq:
-                            pkgs.add(fq.rsplit(".", 1)[0])
-            except subprocess.CalledProcessError:
-                continue
-    except Exception:
-        pass
+                        r = run([str(jmod), "list", str(jh / "jmods" / f"{m}.jmod")])
+                        for line in r.stdout.splitlines():
+                            if line.startswith("classes/") and line.endswith(".class") and "$" not in line:
+                                fq = line[len("classes/"):-6].replace("/", ".")
+                                if "module-info" in fq:
+                                    continue
+                                if "." in fq:
+                                    pkgs.add(fq.rsplit(".", 1)[0])
+                    except subprocess.CalledProcessError:
+                        continue
+            except Exception:
+                pass
+    if not pkgs:
+        print(
+            "[WARN] classpath_resolver: JDK package introspection found nothing "
+            f"(JAVA_HOME={java_home!r}; need a full JDK with jmods/ for Java 9+). "
+            "Falling back to the static standard-library package list so "
+            "import-whitelist.json still admits java.*/javax.* imports.",
+            file=sys.stderr,
+        )
+        pkgs |= _JDK_FALLBACK_PACKAGES
     return pkgs
 
 
