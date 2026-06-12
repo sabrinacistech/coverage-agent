@@ -131,9 +131,15 @@ def testcase_from_target(item: dict) -> dict:
 
 # ── aplicación del patch (escritor sancionado) ────────────────────────────────
 
-def apply_patch(patch: dict, *, state_dir: Path, repo: Path, context_pack_path: Path) -> int:
+def apply_patch(patch: dict, *, state_dir: Path, repo: Path, context_pack_path: Path,
+                repair_attempts: list[dict] | None = None) -> int:
     """Materializa el patch vía test_patch_applier.py (gates + budget por
-    construcción). Devuelve su exit code (0 ok · 2 budget · 3 gate/perímetro)."""
+    construcción). Devuelve su exit code (0 ok · 2 budget · 3 gate/perímetro).
+
+    ``repair_attempts`` son los triplets anti-loop de G7 (errorCode, symbolFQN,
+    fixId) que el orquestador deriva para una reparación; se pasan como
+    ``--repair-attempt`` para que un repair patch no quede bloqueado con
+    G7_REPAIR_WITHOUT_TRIPLET. None/[] en generación normal."""
     with tempfile.NamedTemporaryFile("w", suffix=".patch.json", delete=False, encoding="utf-8") as fh:
         json.dump(patch, fh, ensure_ascii=False)
         patch_path = Path(fh.name)
@@ -146,6 +152,9 @@ def apply_patch(patch: dict, *, state_dir: Path, repo: Path, context_pack_path: 
             "--state", str(state_dir),
             "--context-pack", str(context_pack_path),
         ]
+        for tri in (repair_attempts or []):
+            cmd += ["--repair-attempt",
+                    f"{tri['errorCode']}|{tri['symbolFQN']}|{tri['fixId']}"]
         return subprocess.run(cmd, check=False).returncode
     finally:
         patch_path.unlink(missing_ok=True)

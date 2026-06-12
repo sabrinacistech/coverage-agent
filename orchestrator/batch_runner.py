@@ -169,13 +169,87 @@ def _wait_polling(response: Path) -> tuple[str, dict | None]:
 
 # ── patch application + test classification ──────────────────────────────────────
 
-def _apply_patch(patch: dict, *, state_dir: Path, repo: Path) -> int:
+def _apply_patch(patch: dict, *, state_dir: Path, repo: Path,
+                 repair_attempts: list[dict] | None = None) -> int:
     """Apply ONE patch descriptor through the sanctioned patcher (gates + budget +
     Java string-literal safety by construction). Returns its exit code
-    (0 ok · 2 budget · 3 gate/perimeter · other = patch failed)."""
+    (0 ok · 2 budget · 3 gate/perimeter · other = patch failed).
+
+    ``repair_attempts`` carries the G7 anti-loop triplets for a repair patch; see
+    _repair_triplets. None for first-time generation."""
     sut = bp_patch_sut(patch)
     pack_path = state_dir / "context-packs" / f"{sut}.json"
-    return one_cycle.apply_patch(patch, state_dir=state_dir, repo=repo, context_pack_path=pack_path)
+    return one_cycle.apply_patch(patch, state_dir=state_dir, repo=repo,
+                                 context_pack_path=pack_path,
+                                 repair_attempts=repair_attempts)
+
+
+# Default fixId per errorCode, from skills/09-repair/repair-decision-matrix.md.
+# Used only to make the G7 anti-loop triplet meaningful — the actual fix is the
+# model's; this just labels the attempt deterministically. Unknown codes get a
+# generic id.
+_FIX_BY_CODE = {
+    "E_IMPORT_UNRESOLVED":       "FIX_REPLACE_IMPORT_WHITELIST",
+    "E_PACKAGE_UNRESOLVED":      "FIX_DROP_IMPORT",
+    "E_METHOD_UNRESOLVED":       "FIX_USE_CONTRACT_METHOD",
+    "E_CONSTRUCTOR_UNRESOLVED":  "FIX_USE_CONTRACT_CTOR",
+    "E_INTERFACE_INSTANTIATION": "FIX_USE_MOCK_OR_BUILDER",
+    "E_TYPE_MISMATCH":           "FIX_ADJUST_FIXTURE_TYPE",
+    "E_GENERIC_INFERENCE":       "FIX_EXPLICIT_GENERICS",
+    "E_VARARGS":                 "FIX_CAST_FIRST_VARARG",
+    "E_OVERRIDE":                "FIX_REMOVE_OVERRIDE",
+    "E_ACCESS":                  "FIX_USE_PUBLIC_API",
+}
+_FIX_GENERIC = "FIX_REPAIR"
+
+
+def _repair_triplets(failed_items: list[dict], *, state_dir: Path) -> dict[str, list[dict]]:
+    """Derive the deterministic G7 anti-loop triplets (errorCode, symbolFQN,
+    fixId) for each failing target, so the sanctioned patcher can be invoked with
+    --repair-attempt. The ORCHESTRATOR owns this metadata — the model never sees
+    it — sourced from state/compile-error-index.json (written per failure by the
+    narrow test runner). A target with no indexed compile error (e.g. an
+    assertion failure, or the index is absent) gets a single generic triplet keyed
+    by its test class, so the attempt is still declared; G7 only blocks a triplet
+    that has already FAILED repeatedly, never a first-time, well-formed one."""
+    idx_path = state_dir / "compile-error-index.json"
+    errors: list[dict] = []
+    if idx_path.exists():
+        try:
+            errors = (_load_json(idx_path) or {}).get("errors", []) or []
+        except Exception:
+            errors = []
+
+    out: dict[str, list[dict]] = {}
+    for item in failed_items:
+        tid = item["targetId"]
+        test_class = item.get("testClass", "")
+        rel = (test_class.replace(".", "/") + ".java") if test_class else ""
+        triplets: list[dict] = []
+        seen: set[tuple[str, str, str]] = set()
+        if rel:
+            for e in errors:
+                fpath = str(e.get("file", "")).replace("\\", "/")
+                if not fpath.endswith(rel):
+                    continue
+                code = str(e.get("code") or "E_OTHER")
+                sym = str(e.get("symbolFQN") or "").strip() or test_class
+                fix = _FIX_BY_CODE.get(code, _FIX_GENERIC)
+                key = (code, sym, fix)
+                if key in seen:
+                    continue
+                seen.add(key)
+                triplets.append({"errorCode": code, "symbolFQN": sym, "fixId": fix})
+        if not triplets:
+            # No per-file compile error (test/assertion failure, or no index):
+            # declare one generic attempt so G7 sees a triplet.
+            code = ("E_OTHER" if item.get("failureKind") == "COMPILATION_ERROR"
+                    else "E_TEST_FAILURE")
+            triplets.append({"errorCode": code,
+                             "symbolFQN": test_class or tid,
+                             "fixId": _FIX_GENERIC})
+        out[tid] = triplets
+    return out
 
 
 def bp_patch_sut(patch: dict) -> str:
@@ -317,8 +391,14 @@ def _process_generation(
 
 def _process_repair(
     response_items: list[dict], manifest: dict, *, state_dir: Path, repo: Path,
+    triplets: dict[str, list[dict]] | None = None,
 ) -> dict[str, str]:
-    """Apply a repair response. Returns {targetId: testClass} for re-applied targets."""
+    """Apply a repair response. Returns {targetId: testClass} for re-applied targets.
+
+    ``triplets`` maps targetId → its G7 anti-loop attempts (see _repair_triplets);
+    they are forwarded to the patcher so a repair patch is not blocked with
+    G7_REPAIR_WITHOUT_TRIPLET."""
+    triplets = triplets or {}
     applied: dict[str, str] = {}
     for it in response_items:
         tid = it["targetId"]
@@ -331,7 +411,8 @@ def _process_repair(
             continue
         patch = it.get("patchDescriptor") or {}
         test_class = patch.get("testClass", manifest["targets"].get(tid, {}).get("testClass", ""))
-        rc = _apply_patch(patch, state_dir=state_dir, repo=repo)
+        rc = _apply_patch(patch, state_dir=state_dir, repo=repo,
+                          repair_attempts=triplets.get(tid))
         if rc == 0:
             bp.set_status(manifest, tid, bp.REPAIRED, testClass=test_class)
             applied[tid] = test_class
@@ -457,6 +538,10 @@ def run_batches(
                 break
             failed_payload = _failed_items_for_repair(manifest, state_dir=state_dir, repo=repo,
                                                        batch_ids=batch_ids, applied=applied)
+            # Orchestrator-owned G7 anti-loop triplets, derived from the compile-error
+            # index — forwarded to the patcher so the repair is not blocked with
+            # G7_REPAIR_WITHOUT_TRIPLET (the model never produces these).
+            repair_triplets = _repair_triplets(failed_payload, state_dir=state_dir)
             rreq = bp.build_repair_request(run_id, batch_id, rnd, failed_payload)
             rreq_path = batch_dir / f"request-repair-r{rnd}.json"
             rresp_path = batch_dir / f"response-repair-r{rnd}.json"
@@ -482,7 +567,8 @@ def run_batches(
                 _print(f"[batch] response-repair-r{rnd} inválida: {exc}; corto repair.")
                 break
 
-            reapplied = _process_repair(ritems, manifest, state_dir=state_dir, repo=repo)
+            reapplied = _process_repair(ritems, manifest, state_dir=state_dir, repo=repo,
+                                        triplets=repair_triplets)
             rc_tests = _run_tests(repo, state_dir, list(reapplied.values()))
             rcounts = _classify_batch(manifest, repo=repo, applied=reapplied, rc=rc_tests)
             _write_json(batch_dir / f"validation-result-r{rnd}.json",

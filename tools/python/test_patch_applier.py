@@ -792,6 +792,19 @@ def main() -> int:
         ),
     )
     ap.add_argument(
+        "--repair-attempt",
+        action="append",
+        default=None,
+        metavar="errorCode|symbolFQN|fixId",
+        help=(
+            "G7: declare a (errorCode, symbolFQN, fixId) anti-loop triplet for "
+            "this repair attempt. May be supplied multiple times. The orchestrator "
+            "owns this metadata (derived from the compile-error index); without it "
+            "a patch flagged as a repair (patchId 'repair:' / repairOf) is blocked "
+            "with G7_REPAIR_WITHOUT_TRIPLET."
+        ),
+    )
+    ap.add_argument(
         "--no-gates",
         action="store_true",
         help=(
@@ -914,7 +927,9 @@ def main() -> int:
     # the rendered file and runs post-write below.
     if not gates_disabled:
         from budget_enforcer import EXIT_EXCEEDED, check as _budget_check  # local
-        from gate_runner import evaluate_gates  # local import (same dir)
+        from gate_runner import _parse_cli_attempts, evaluate_gates  # local import (same dir)
+
+        cli_attempts = _parse_cli_attempts(args.repair_attempt)
 
         exec_state = state_dir / "execution-state.json"
         if exec_state.exists():
@@ -936,6 +951,7 @@ def main() -> int:
             context_pack or {},
             state_dir,
             test_file=None,  # G6 runs post-write (needs the rendered file)
+            cli_attempts=cli_attempts,
             context_pack_path=(
                 Path(args.context_pack).resolve() if args.context_pack else None
             ),

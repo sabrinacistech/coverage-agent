@@ -95,7 +95,7 @@ def _repair_resp(batch_id: str, rnd: int, statuses: dict[str, str]) -> dict:
 
 def _install_stubs(monkey_state: dict) -> None:
     """Patch the side-effecting edges. monkey_state carries the canned scripts."""
-    br._apply_patch = lambda patch, *, state_dir, repo: 0  # type: ignore
+    br._apply_patch = lambda patch, *, state_dir, repo, repair_attempts=None: 0  # type: ignore
     gen_q = monkey_state["gen_responses"]
     rep_q = monkey_state["repair_responses"]
     run_q = monkey_state["test_rcs"]
@@ -218,7 +218,7 @@ def case_budget_paused_during_handoff() -> None:
             return "ok", _gen_resp("batch-001", {"com.acme.C0#m": "generated"})
 
         try:
-            br._apply_patch = lambda patch, *, state_dir, repo: 0  # type: ignore
+            br._apply_patch = lambda patch, *, state_dir, repo, repair_attempts=None: 0  # type: ignore
             br._run_tests = lambda repo, state_dir, tcs: 0  # type: ignore
             br._wait_polling = fake_poll  # type: ignore
             br.run_batches(state, Path(td), batch_size=10, max_repair_rounds=0, max_batches=None)
