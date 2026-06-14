@@ -35,6 +35,7 @@ import sys
 from pathlib import Path
 
 from common import load_json
+from framework_imports import used_framework_symbols  # shared catalog (GATE side)
 
 # ── Base regexes ──────────────────────────────────────────────────────────────
 IMPORT_RE = re.compile(r"^\s*import\s+(static\s+)?([\w\.]+(?:\.\*)?)\s*;", re.MULTILINE)
@@ -339,6 +340,73 @@ def check_g5(stack: dict, imports_list: list[str], text: str) -> list[dict]:
             ),
         })
 
+    return violations
+
+
+# ── Reverse G1: framework symbol used but its import is absent (pre-Maven) ─────
+
+def check_g1_reverse(text: str) -> list[dict]:
+    """Inverse of G1: flag a JUnit/Mockito/AssertJ/Hamcrest symbol *used* in the
+    body whose import is *missing* — the exact compile failure
+    ("cannot find symbol: variable Assertions") that forward G1 cannot see.
+
+    Detection is by SIMPLE NAME (via the shared framework_imports catalog), so it
+    is independent of which assert library the stack resolved to: a statically
+    imported ``assertThat`` from AssertJ or Hamcrest both satisfy a bare call.
+    Conservative by construction — any wildcard import (static or package) is
+    treated as possibly supplying the symbol, so the gate never false-positives on
+    a legitimately wildcarded test. In the normal pipeline the patcher's
+    _ensure_required_imports has already injected these, so this is a backstop
+    against regressions and non-patcher write paths.
+    """
+    type_names, static_names = used_framework_symbols(text)
+    if not type_names and not static_names:
+        return []
+
+    nonstatic_simple: set[str] = set()
+    static_members: set[str] = set()
+    has_nonstatic_wildcard = False
+    has_static_wildcard = False
+    for m in IMPORT_RE.finditer(text):
+        is_static = bool(m.group(1))
+        target = m.group(2)
+        if target.endswith(".*"):
+            if is_static:
+                has_static_wildcard = True
+            else:
+                has_nonstatic_wildcard = True
+            continue
+        simple = target.rsplit(".", 1)[-1]
+        if is_static:
+            static_members.add(simple)
+        else:
+            nonstatic_simple.add(simple)
+
+    violations: list[dict] = []
+    for name in sorted(type_names):
+        if name in nonstatic_simple or has_nonstatic_wildcard:
+            continue
+        violations.append({
+            "gate": "G1",
+            "kind": "IMPORT_MISSING_FOR_SYMBOL",
+            "symbol": name,
+            "reason": (
+                f"type '{name}' is used but never imported — would fail to compile "
+                "with 'cannot find symbol'"
+            ),
+        })
+    for name in sorted(static_names):
+        if name in static_members or has_static_wildcard:
+            continue
+        violations.append({
+            "gate": "G1",
+            "kind": "STATIC_IMPORT_MISSING_FOR_SYMBOL",
+            "symbol": name,
+            "reason": (
+                f"static helper '{name}(...)' is called but never statically "
+                "imported — would fail to compile with 'cannot find symbol'"
+            ),
+        })
     return violations
 
 
@@ -667,6 +735,9 @@ def lint(
                 "kind": "STATIC_IMPORT_NOT_WHITELISTED",
                 "import": "static " + target,
             })
+
+    # ── G1 reverse: framework symbol used but its import is missing ───────────
+    violations.extend(check_g1_reverse(text))
 
     # ── G5: stack-profile compatibility ──────────────────────────────────────
     if stack_profile:

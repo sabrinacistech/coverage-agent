@@ -139,6 +139,12 @@ def _walk_source_packages(roots: list[Path]) -> set[str]:
     return pkgs
 
 
+def _classpath_degraded(rc: int, cp_text: str) -> bool:
+    """True when the classpath could not be resolved: a non-zero Maven exit or an
+    empty/absent cp.txt. Pure predicate so the warning path is unit-testable."""
+    return rc != 0 or not cp_text.strip()
+
+
 def resolve_module(mod_dir: Path) -> dict:
     cp_file = mod_dir / "target" / "cp.txt"
     cp_file.parent.mkdir(parents=True, exist_ok=True)
@@ -149,10 +155,24 @@ def resolve_module(mod_dir: Path) -> dict:
         "-DincludeScope=test", f"-Dmdep.outputFile={cp_file}",
     ]
     rc = run(cmd, cwd=mod_dir, timeout=900).returncode
+    cp_text = cp_file.read_text(encoding="utf-8") if cp_file.exists() else ""
+    # Loud, actionable WARN instead of swallowing the failure into _meta only:
+    # a degraded classpath leaves import-whitelist.json incomplete AND keeps the
+    # downstream stack-profile framework versions "unknown" (junit/mockito/assertj).
+    if _classpath_degraded(rc, cp_text):
+        print(
+            f"[WARN] classpath_resolver: `mvn dependency:build-classpath` degraded "
+            f"for module={mod_dir.name} (exit={rc}, cp.txt="
+            f"{'empty' if cp_file.exists() else 'missing'}). Dependency packages and "
+            "framework versions (junit/mockito/assertj) will be incomplete; the "
+            "stack-profile may stay 'unknown'. Check the Maven build (offline? "
+            "unresolved deps?) and re-run.",
+            file=sys.stderr,
+        )
     classes_out: list[dict] = []
     packages_out: dict[str, str] = {}  # name -> origin
     if cp_file.exists():
-        cp_text = cp_file.read_text(encoding="utf-8").strip()
+        cp_text = cp_text.strip()
         jars = [Path(p.strip()) for p in cp_text.split(os.pathsep) if p.strip()]
         for jar in jars:
             pkgs, fqcns = _list_classes_in_jar(jar)

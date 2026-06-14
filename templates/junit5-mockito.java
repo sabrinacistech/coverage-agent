@@ -1,6 +1,6 @@
 // Deterministic template — JUnit 5 + Mockito
 // Phase 5 of optimization roadmap.
-// Placeholders: ${PACKAGE}, ${SUT_SIMPLE}, ${SUT_FQN}, ${COLLABORATORS}, ${TEST_BODY}
+// Placeholders: PACKAGE, SUT_SIMPLE, SUT_FQN, COLLABORATORS, ASSERT_IMPORTS, TEST_BODY
 package ${PACKAGE};
 
 import org.junit.jupiter.api.BeforeEach;
@@ -10,8 +10,7 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+${ASSERT_IMPORTS}
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;

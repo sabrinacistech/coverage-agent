@@ -584,6 +584,74 @@ def detect(repo: Path, contract: Path | None = None) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Diagnostics — unresolved framework versions
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _unresolved_framework_versions(modules: list[dict]) -> list[dict]:
+    """Return, per module, the test/mock framework versions left "unknown" and
+    whether the resolved-classpath dump (target/cp.txt) was available.
+
+    A "unknown" test/mock version means the LLM (and mockito-strategy.md) cannot
+    pick the correct API — inline default, MockedStatic, MockitoExtension vs the
+    JUnit4 runner. The usual cause is a BOM-managed project (no explicit
+    ``<version>`` in the POM) whose ``cp.txt`` is missing because
+    classpath_resolver did not run or ``mvn dependency:build-classpath`` failed.
+    Pure (no I/O beyond a cp.txt existence probe) so it is unit-testable.
+    """
+    out: list[dict] = []
+    for m in modules:
+        test_v = (m.get("test") or {}).get("version")
+        mock_v = (m.get("mock") or {}).get("version")
+        unresolved = [
+            label
+            for label, ver in (("test", test_v), ("mock", mock_v))
+            if not ver or ver == "unknown"
+        ]
+        if not unresolved:
+            continue
+        mod_path = Path(m.get("path", ""))
+        out.append({
+            "module": mod_path.name or str(mod_path),
+            "unresolved": unresolved,
+            "testVersion": test_v,
+            "mockVersion": mock_v,
+            "cpPresent": (mod_path / "target" / "cp.txt").is_file(),
+        })
+    return out
+
+
+def _warn_unresolved_versions(modules: list[dict]) -> None:
+    """Emit a loud, actionable WARN for every module with an unknown framework
+    version, instead of letting the degradation pass silently."""
+    rows = _unresolved_framework_versions(modules)
+    if not rows:
+        return
+    print(
+        "[WARN] stack_profile_detector: unresolved framework version(s) — the LLM "
+        "cannot reliably select the Mockito/JUnit API:",
+        file=sys.stderr,
+    )
+    cp_missing_anywhere = False
+    for r in rows:
+        if not r["cpPresent"]:
+            cp_missing_anywhere = True
+        print(
+            f"  module={r['module']} unresolved={','.join(r['unresolved'])} "
+            f"test={r['testVersion']} mock={r['mockVersion']} "
+            f"cp.txt={'present' if r['cpPresent'] else 'ABSENT'}",
+            file=sys.stderr,
+        )
+    if cp_missing_anywhere:
+        print(
+            "  -> Run classpath_resolver first (it writes <module>/target/cp.txt "
+            "via `mvn dependency:build-classpath`) so BOM-managed junit/mockito/"
+            "assertj versions resolve. In run_pipeline this is step 4 (classpath) "
+            "and must succeed before step 5 (stack).",
+            file=sys.stderr,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -613,6 +681,10 @@ def main() -> int:
     profile = detect(repo, contract=state_dir / "build-tool-contract.json")
     validate("stack-profile", profile)
     atomic_write_json(state_dir / "stack-profile.json", profile)
+
+    # Loud, actionable diagnostic when a framework version could not be resolved
+    # (silent "unknown" otherwise degrades the LLM's Mockito/JUnit API selection).
+    _warn_unresolved_versions(profile.get("modules", []))
 
     n_modules = len(profile["modules"])
     java = profile["java"]

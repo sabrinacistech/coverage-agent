@@ -53,6 +53,7 @@ from common import (  # noqa: F401
     load_json,
     validate,
 )
+import framework_imports  # shared symbol→import catalog (FIX side); test_linter is the GATE side
 
 # ── Safety constants ─────────────────────────────────────────────────────────
 _FORBIDDEN_SEGMENTS = ("src/main/java", "src\\main\\java")
@@ -367,10 +368,42 @@ def _field_declaration(f: dict) -> str:
     return f"    {ann}\n    private {f['type']} {f['name']};"
 
 
-def _render_from_template(tpl: str, patch: dict) -> str:
+def _assert_imports_for(assert_fw: str | None) -> str:
+    """Seed import block for ``${ASSERT_IMPORTS}`` matching the project's assert lib.
+
+    junit-builtin returns '' on purpose: the reverse-import resolver
+    (_ensure_required_imports) adds the specific
+    ``org.junit.jupiter.api.Assertions.*`` statics on use, avoiding unused-import
+    churn. AssertJ stays the default for unknown/none so the historical template
+    behaviour is preserved for the common Spring Boot starter-test stack.
+    """
+    if assert_fw == "hamcrest":
+        return (
+            "import static org.hamcrest.MatcherAssert.assertThat;\n"
+            "import static org.hamcrest.Matchers.is;"
+        )
+    if assert_fw == "junit-builtin":
+        return ""
+    return (
+        "import static org.assertj.core.api.Assertions.assertThat;\n"
+        "import static org.assertj.core.api.Assertions.assertThatThrownBy;"
+    )
+
+
+def _assert_not_null_for(assert_fw: str | None, expr: str = "sut") -> str:
+    """Render a ``<expr> is not null`` assertion in the project's assert dialect."""
+    if assert_fw == "hamcrest":
+        return f"assertThat({expr}, org.hamcrest.Matchers.notNullValue());"
+    if assert_fw == "junit-builtin":
+        return f"assertNotNull({expr});"
+    return f"assertThat({expr}).isNotNull();"
+
+
+def _render_from_template(tpl: str, patch: dict, stack: dict | None = None) -> str:
     sut_fqn: str = patch["sut"]
     sut_simple = sut_fqn.rsplit(".", 1)[-1]
     pkg = patch.get("testPackage") or sut_fqn.rsplit(".", 1)[0]
+    assert_fw = (stack or {}).get("assertFramework") or "assertj"
 
     fields = patch.get("fields") or []
     methods = patch.get("methods") or []
@@ -390,6 +423,10 @@ def _render_from_template(tpl: str, patch: dict) -> str:
     result = result.replace("${PACKAGE}", pkg)
     result = result.replace("${SUT_SIMPLE}", sut_simple)
     result = result.replace("${SUT_FQN}", sut_fqn)
+    # Assert dialect is chosen from the detected stack, never hardcoded. These are
+    # literal str.replace() (no regex) so escapes inside the values are untouched.
+    result = result.replace("${ASSERT_IMPORTS}", _assert_imports_for(assert_fw))
+    result = result.replace("${ASSERT_NOT_NULL}", _assert_not_null_for(assert_fw))
     # CRITICAL: use FUNCTION replacements, never string replacements. re.sub treats
     # a string repl specially — it expands backreferences (\1, \g<n>) AND escape
     # sequences (\n, \t, \r, \f...). The generated Java carries valid escapes
@@ -442,24 +479,44 @@ def _existing_field_names(text: str) -> set[str]:
 
 # ── Injection into existing files ─────────────────────────────────────────────
 
-def _inject_imports(text: str, new_imports: list[str]) -> str:
-    existing = _existing_imports(text)
-    to_add = []
-    for imp in new_imports:
-        stmt = f"import {imp};"
-        if stmt not in existing and f"import static {imp};" not in existing:
-            to_add.append(stmt)
-    if not to_add:
+def _insert_import_lines(text: str, lines: list[str]) -> str:
+    """Insert ready-made `import ...;` lines after the last existing import.
+
+    Shared insertion point for both the regular (`_inject_imports`) and the
+    static (`_inject_static_imports`) injectors so they place imports identically.
+    """
+    if not lines:
         return text
     matches = list(_LAST_IMPORT_RE.finditer(text))
     if matches:
         pos = matches[-1].end()
-        return text[:pos] + "\n" + "\n".join(to_add) + text[pos:]
+        return text[:pos] + "\n" + "\n".join(lines) + text[pos:]
     pkg_m = _PACKAGE_RE.search(text)
     if pkg_m:
         pos = pkg_m.end()
-        return text[:pos] + "\n\n" + "\n".join(to_add) + text[pos:]
-    return "\n".join(to_add) + "\n\n" + text
+        return text[:pos] + "\n\n" + "\n".join(lines) + text[pos:]
+    return "\n".join(lines) + "\n\n" + text
+
+
+def _inject_imports(text: str, new_imports: list[str]) -> str:
+    existing = _existing_imports(text)
+    to_add = []
+    for imp in dict.fromkeys(new_imports):  # de-dup, preserve order
+        stmt = f"import {imp};"
+        if stmt not in existing and f"import static {imp};" not in existing:
+            to_add.append(stmt)
+    return _insert_import_lines(text, to_add)
+
+
+def _inject_static_imports(text: str, new_imports: list[str]) -> str:
+    """Inject `import static <owner>.<member>;` lines (skip those already present)."""
+    existing = _existing_imports(text)
+    to_add = []
+    for imp in dict.fromkeys(new_imports):  # de-dup, preserve order
+        stmt = f"import static {imp};"
+        if stmt not in existing:
+            to_add.append(stmt)
+    return _insert_import_lines(text, to_add)
 
 
 def _inject_fields(text: str, fields: list[dict], existing_names: set[str]) -> str:
@@ -575,6 +632,54 @@ def _prune_unused_imports(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", pruned)
 
 
+# ── Reverse import resolution (symbol used → import required) ──────────────────
+# The LLM declares patch.allowedImports, but a body that references a framework
+# symbol it forgot to declare — classically `Assertions.assertEquals(...)` with no
+# `import org.junit.jupiter.api.Assertions;` — fails to compile with
+# "cannot find symbol: variable Assertions". G1 only checks declared→whitelisted,
+# never used→declared, so the gap slips past every gate straight to Maven.
+#
+# This deterministic pass closes it: it resolves (via the shared framework_imports
+# catalog — also used by test_linter's reverse-G1 gate, so the fixer and the gate
+# never drift) the imports the well-known JUnit / Mockito / AssertJ / Hamcrest
+# symbols in the body require, and injects the missing ones. It ONLY ever adds
+# framework imports — never project types — so it can never mask a real
+# hallucination (those still fail G1/G2).
+
+
+def _ensure_required_imports(text: str, stack: dict | None) -> str:
+    """Inject the framework imports that symbols used in the body actually need.
+
+    Idempotent and additive: already-present imports are skipped (handled by the
+    injectors), and only the curated framework symbol set is ever resolved.
+    """
+    test_fw = (stack or {}).get("testFramework") or "junit5"
+    assert_fw = (stack or {}).get("assertFramework") or "assertj"
+    type_imports, static_imports = framework_imports.resolve_imports(
+        text, test_fw, assert_fw
+    )
+    text = _inject_imports(text, type_imports)
+    text = _inject_static_imports(text, static_imports)
+    return text
+
+
+def _stack_view(context_pack: dict | None) -> dict | None:
+    """Extract {testFramework, assertFramework} from a verbose or compact pack."""
+    if not context_pack:
+        return None
+    st = context_pack.get("stack")
+    if isinstance(st, dict):
+        return {
+            "testFramework": st.get("testFramework"),
+            "assertFramework": st.get("assertFramework"),
+        }
+    # compact stk: [java, testFw, mockFw, assertFw, springEnabled, ns, ...]
+    stk = context_pack.get("stk")
+    if isinstance(stk, list) and len(stk) >= 4:
+        return {"testFramework": stk[1], "assertFramework": stk[3]}
+    return None
+
+
 # ── Core apply function ───────────────────────────────────────────────────────
 
 def apply_patch(
@@ -582,6 +687,7 @@ def apply_patch(
     repo: Path,
     templates_dir: Path,
     dry_run: bool = False,
+    stack: dict | None = None,
 ) -> dict:
     patch_id: str = patch.get("patchId") or f"patch:{uuid.uuid4().hex[:12]}"
     sut = _normalize_sut(patch.get("sut"))
@@ -623,7 +729,7 @@ def apply_patch(
     else:
         template_name: str = patch.get("template") or "junit5-mockito"
         tpl_src = _load_template(template_name, templates_dir)
-        new_text = _render_from_template(tpl_src, patch)
+        new_text = _render_from_template(tpl_src, patch, stack=stack)
         new_text = _inject_imports(new_text, allowed_imports)
         injected_methods = [m["name"] for m in methods]
         action = "INITIALIZED"
@@ -633,6 +739,13 @@ def apply_patch(
     # otherwise blocks the OpenShift deploy gate. Single insertion point: this is
     # the only code path that writes Java.
     new_text = _prune_unused_imports(new_text)
+
+    # Reverse import resolution: add framework imports that symbols used in the
+    # body need but the LLM forgot to declare (e.g. `Assertions.assertEquals`
+    # without its import). Runs AFTER pruning so these additions are never
+    # stripped, and only adds the curated JUnit/Mockito/AssertJ set — turning the
+    # most common "cannot find symbol" compile failure into an impossibility.
+    new_text = _ensure_required_imports(new_text, stack)
 
     # Last-resort backstop before touching disk: a raw newline/CR inside a Java
     # string literal is an "unclosed string literal" compile error. sanitize_java_
@@ -975,7 +1088,13 @@ def main() -> int:
             prior_text = None
 
     try:
-        result = apply_patch(patch, repo, templates_dir, dry_run=args.dry_run)
+        result = apply_patch(
+            patch,
+            repo,
+            templates_dir,
+            dry_run=args.dry_run,
+            stack=_stack_view(context_pack),
+        )
     except PermissionError as exc:
         print(f"[BLOCKED] {exc}", file=sys.stderr)
         return 3

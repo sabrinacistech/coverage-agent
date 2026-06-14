@@ -78,9 +78,19 @@ Adicionalmente, específicas de este agente (constraints estructurales del patch
 8. Cada `testCase.mockSetup[i]` → un `when(...).thenReturn(...)` o `doThrow(...)`.
 9. `evidenceIds[]` enumera los símbolos citados con sus `evidenceId` del pack.
 
-`allowedImports`: importar estáticos (`when`, `verify`, `assertThat`,
-`assertThrows`); no duplicar los del template. `fields`: SUT con `@InjectMocks`
-cuando aplique; cada dependencia `instantiationStrategy == mock` → `@Mock`.
+`allowedImports`: importar **todo** símbolo de framework que el `body` use, con su
+import exacto (estático para helpers `when`/`verify`/`assertThat`/`assertEquals`/
+`assertThrows`; **no** estático para tipos como `Assertions`, `ArgumentCaptor`,
+`MockedStatic`). No duplicar los del template. Olvidar un import ⇒ `cannot find
+symbol`. `fields`: SUT con `@InjectMocks` cuando aplique; cada dependencia
+`instantiationStrategy == mock` → `@Mock`.
+
+**Dialecto de aserción — uno solo, dictado por `stack.assertFramework`** (no
+elegir libremente, no mezclar): `assertj` ⇒ `assertThat(...).isEqualTo(...)`;
+`junit-builtin` ⇒ `assertEquals/assertTrue/...`; `hamcrest` ⇒ `assertThat(x, is(...))`.
+Detalle y mapa import↔API en
+[`skills/07-generation/assert-strategy.md`](../skills/07-generation/assert-strategy.md).
+La aserción de excepciones sigue `stack.testFramework` (`assertThrows` en JUnit 5).
 
 Para la selección de API de Mockito (runner JUnit 4/5, `@InjectMocks` vs
 instanciación explícita, stubbing de `void`, `ArgumentCaptor`, `any(Type.class)`)
