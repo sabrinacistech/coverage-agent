@@ -663,6 +663,57 @@ def _ensure_required_imports(text: str, stack: dict | None) -> str:
     return text
 
 
+def _resolve_authorized_type_imports(text: str, authorized_imports: list[str] | None) -> str:
+    """Inject non-static imports for AUTHORIZED project/dependency types whose
+    simple name is used in the body but left unimported by the LLM.
+
+    Framework symbols are handled by _ensure_required_imports; this closes the
+    *project-type* half of "cannot find symbol" (e.g. a body that references
+    `ClusterConfigProperties` / `ClusterProjection` from another package without
+    importing them). It is the exact mirror of _prune_unused_imports: a type
+    counts as used when its simple name appears as a bare identifier (comments,
+    strings and import lines stripped). Only context-pack ``allowedImports`` FQCNs
+    are eligible — never an invented symbol — and only when a simple name maps to
+    exactly ONE authorized FQCN (ambiguous names are left to the LLM/compiler).
+    Same-package and java.lang types need no import and are skipped.
+    """
+    if not authorized_imports:
+        return text
+
+    pkg_match = re.search(r"package\s+([\w.]+)\s*;", text)
+    same_pkg = pkg_match.group(1) if pkg_match else ""
+
+    # Simple names already imported (non-static, non-wildcard) — never re-add.
+    already: set[str] = set()
+    for m in _IMPORT_CAPTURE_RE.finditer(text):
+        if m.group(1):  # static
+            continue
+        path = m.group(2)
+        if path.endswith(".*"):
+            continue
+        already.add(path.rsplit(".", 1)[-1])
+
+    by_simple: dict[str, set[str]] = {}
+    for fq in authorized_imports:
+        if "." not in fq:
+            continue
+        by_simple.setdefault(fq.rsplit(".", 1)[-1], set()).add(fq)
+
+    scan = _strip_comments_and_strings(_IMPORT_CAPTURE_RE.sub("", text))
+    to_add: list[str] = []
+    for simple, fqcns in by_simple.items():
+        if simple in already or len(fqcns) != 1:
+            continue
+        fq = next(iter(fqcns))
+        pkg = fq.rsplit(".", 1)[0]
+        if pkg == "java.lang" or pkg == same_pkg:
+            continue
+        if re.search(rf"(?<![\w.]){re.escape(simple)}\b", scan):
+            to_add.append(fq)
+
+    return _inject_imports(text, to_add)
+
+
 def _stack_view(context_pack: dict | None) -> dict | None:
     """Extract {testFramework, assertFramework} from a verbose or compact pack."""
     if not context_pack:
@@ -688,6 +739,7 @@ def apply_patch(
     templates_dir: Path,
     dry_run: bool = False,
     stack: dict | None = None,
+    authorized_imports: list[str] | None = None,
 ) -> dict:
     patch_id: str = patch.get("patchId") or f"patch:{uuid.uuid4().hex[:12]}"
     sut = _normalize_sut(patch.get("sut"))
@@ -746,6 +798,10 @@ def apply_patch(
     # stripped, and only adds the curated JUnit/Mockito/AssertJ set — turning the
     # most common "cannot find symbol" compile failure into an impossibility.
     new_text = _ensure_required_imports(new_text, stack)
+    # Same idea for the project/dependency TYPES the body references (collaborators,
+    # fixtures) that the LLM left unimported — backfilled from the context-pack's
+    # authorized import set so they cannot trip "cannot find symbol" either.
+    new_text = _resolve_authorized_type_imports(new_text, authorized_imports)
 
     # Last-resort backstop before touching disk: a raw newline/CR inside a Java
     # string literal is an "unclosed string literal" compile error. sanitize_java_
@@ -1094,6 +1150,7 @@ def main() -> int:
             templates_dir,
             dry_run=args.dry_run,
             stack=_stack_view(context_pack),
+            authorized_imports=(context_pack or {}).get("allowedImports"),
         )
     except PermissionError as exc:
         print(f"[BLOCKED] {exc}", file=sys.stderr)

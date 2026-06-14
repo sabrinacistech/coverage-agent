@@ -19,7 +19,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
-from test_patch_applier import _ensure_required_imports, _stack_view  # noqa: E402
+from test_patch_applier import (  # noqa: E402
+    _ensure_required_imports,
+    _resolve_authorized_type_imports,
+    _stack_view,
+)
 
 
 def _wrap(body: str, imports: str = "") -> str:
@@ -157,6 +161,71 @@ def case_stack_view_reads_compact() -> None:
         raise AssertionError(f"verbose stack not parsed: {sv2}")
 
 
+# ── (g) authorized project/dependency type backfill ───────────────────────────
+
+_PKG = "ar.com.bancogalicia.pass.arqs.cluster.availability.service.infrastructure.adapter.in.schedule"
+_AUTH = [
+    "ar.com.bancogalicia.pass.arqs.cluster.availability.service.infrastructure.config.property.ClusterConfigProperties",
+    "ar.com.bancogalicia.pass.arqs.cluster.availability.service.infrastructure.adapter.out.persistence.ClusterStatusEntityRepository",
+    "ar.com.bancogalicia.pass.arqs.cluster.availability.service.infrastructure.adapter.out.persistence.ClusterProjection",
+    f"{_PKG}.ClusterPollingIntervalProvider",  # SUT — same package, must NOT be imported
+]
+
+
+def _file(body: str, imports: str = "") -> str:
+    return (
+        f"package {_PKG};\n\n"
+        "import org.mockito.Mockito;\n"
+        f"{imports}"
+        "\nclass ClusterPollingIntervalProviderTest {\n"
+        "    void m() {\n"
+        f"{body}\n"
+        "    }\n}\n"
+    )
+
+
+def case_backfills_used_project_types() -> None:
+    body = (
+        "        ClusterConfigProperties cfg = new ClusterConfigProperties();\n"
+        "        ClusterStatusEntityRepository repo = Mockito.mock(ClusterStatusEntityRepository.class);\n"
+        "        ClusterProjection p = Mockito.mock(ClusterProjection.class);\n"
+        "        ClusterPollingIntervalProvider sut = new ClusterPollingIntervalProvider(cfg, repo);"
+    )
+    out = _resolve_authorized_type_imports(_file(body), _AUTH)
+    for needed in (
+        "import ar.com.bancogalicia.pass.arqs.cluster.availability.service.infrastructure.config.property.ClusterConfigProperties;",
+        "import ar.com.bancogalicia.pass.arqs.cluster.availability.service.infrastructure.adapter.out.persistence.ClusterStatusEntityRepository;",
+        "import ar.com.bancogalicia.pass.arqs.cluster.availability.service.infrastructure.adapter.out.persistence.ClusterProjection;",
+    ):
+        if needed not in out:
+            raise AssertionError(f"missing project import: {needed}")
+    # SUT is in the same package → must never be imported.
+    if f"import {_PKG}.ClusterPollingIntervalProvider;" in out:
+        raise AssertionError("same-package SUT must not be imported")
+
+
+def case_ambiguous_simple_name_skipped() -> None:
+    auth = ["com.a.Status", "com.b.Status"]
+    out = _resolve_authorized_type_imports(_file("        Status s = null;"), auth)
+    if "import com.a.Status;" in out or "import com.b.Status;" in out:
+        raise AssertionError("ambiguous simple name must be left to the compiler/LLM")
+
+
+def case_unused_authorized_type_not_added() -> None:
+    out = _resolve_authorized_type_imports(_file("        int x = 1;"), _AUTH)
+    if "ClusterProjection" in out or "ClusterConfigProperties" in out:
+        raise AssertionError("authorized but unused types must not be imported")
+
+
+def case_already_imported_not_duplicated() -> None:
+    imp = "import ar.com.bancogalicia.pass.arqs.cluster.availability.service.infrastructure.adapter.out.persistence.ClusterProjection;\n"
+    out = _resolve_authorized_type_imports(
+        _file("        ClusterProjection p = null;", imports=imp), _AUTH
+    )
+    if out.count("persistence.ClusterProjection;") != 1:
+        raise AssertionError("already-imported project type was duplicated")
+
+
 def main() -> int:
     cases = [
         ("qualified-assertions-adds-class-import",  case_qualified_assertions_adds_class_import),
@@ -170,6 +239,10 @@ def main() -> int:
         ("comment-and-string-do-not-trigger",       case_comment_and_string_do_not_trigger),
         ("project-symbols-untouched",               case_project_symbols_untouched),
         ("stack-view-reads-compact",                case_stack_view_reads_compact),
+        ("backfills-used-project-types",            case_backfills_used_project_types),
+        ("ambiguous-simple-name-skipped",           case_ambiguous_simple_name_skipped),
+        ("unused-authorized-type-not-added",        case_unused_authorized_type_not_added),
+        ("already-imported-not-duplicated",         case_already_imported_not_duplicated),
     ]
     failed = 0
     for name, fn in cases:
