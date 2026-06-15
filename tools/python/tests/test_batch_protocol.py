@@ -34,7 +34,9 @@ def _assert(label: str, cond: bool, detail: str = "") -> None:
 
 def _plan(n: int) -> list[dict]:
     return [{"targetId": f"com.acme.C{i}#m", "sut": f"com.acme.C{i}", "method": "m",
-             "score": 100 - i} for i in range(n)]
+             "score": 100 - i,
+             "allowedImports": ["org.junit.jupiter.api.Test"],
+             "allowedEvidenceIds": [f"sym:com.acme.C{i}#m:12345678"]} for i in range(n)]
 
 
 # ── select_batch ────────────────────────────────────────────────────────────────
@@ -53,7 +55,7 @@ def _patch(sut: str, *, prefix: str = "patch") -> dict:
             "name": "m_whenCondition_returnsExpected",
             "annotations": ["@Test"],
             "body": "// given\nObject value = new Object();\n// when\nObject actual = value;\n// then\norg.junit.jupiter.api.Assertions.assertSame(value, actual);",
-            "evidenceIds": ["sym:com.acme.C0#m:12345678"],
+            "evidenceIds": [f"sym:{sut}#m:12345678"],
         }],
     }
 
@@ -193,6 +195,97 @@ def case_response_noncanonical_test_class_rejected() -> None:
         _assert("noncanonical generation testClass rejected", "must be canonical" in str(exc), str(exc))
 
 
+def case_response_nonwhitelisted_import_rejected() -> None:
+    targets = bp.select_batch(_plan(1), set(), 10)
+    bad_patch = _patch("com.acme.C0")
+    bad_patch["allowedImports"] = ["org.junit.jupiter.api.Test", "org.junit.jupiter.api.DisplayName"]
+    resp = {
+        "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
+        "batchId": "batch-001", "role": "generation",
+        "items": [{"targetId": "com.acme.C0#m", "status": "generated",
+                   "patchDescriptor": bad_patch}],
+    }
+    try:
+        bp.validate_generation_response(resp, targets, batch_id="batch-001")
+        _assert("nonwhitelisted import rejected", False, "did not raise")
+    except bp.BatchResponseError as exc:
+        _assert("nonwhitelisted import rejected", "non-whitelisted import" in str(exc), str(exc))
+
+
+def case_response_nonwhitelisted_annotation_rejected() -> None:
+    targets = bp.select_batch(_plan(1), set(), 10)
+    bad_patch = _patch("com.acme.C0")
+    bad_patch["methods"][0]["annotations"] = ["@Test", "@DisplayName(\"x\")"]
+    resp = {
+        "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
+        "batchId": "batch-001", "role": "generation",
+        "items": [{"targetId": "com.acme.C0#m", "status": "generated",
+                   "patchDescriptor": bad_patch}],
+    }
+    try:
+        bp.validate_generation_response(resp, targets, batch_id="batch-001")
+        _assert("nonwhitelisted annotation rejected", False, "did not raise")
+    except bp.BatchResponseError as exc:
+        _assert("nonwhitelisted annotation rejected", "uses annotation" in str(exc), str(exc))
+
+
+def case_response_unknown_evidence_rejected() -> None:
+    targets = bp.select_batch(_plan(1), set(), 10)
+    bad_patch = _patch("com.acme.C0")
+    bad_patch["methods"][0]["evidenceIds"] = ["sym:com.acme.C0#ghost:deadbeef"]
+    resp = {
+        "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
+        "batchId": "batch-001", "role": "generation",
+        "items": [{"targetId": "com.acme.C0#m", "status": "generated",
+                   "patchDescriptor": bad_patch}],
+    }
+    try:
+        bp.validate_generation_response(resp, targets, batch_id="batch-001")
+        _assert("unknown evidence rejected", False, "did not raise")
+    except bp.BatchResponseError as exc:
+        _assert("unknown evidence rejected", "unknown evidenceId" in str(exc), str(exc))
+
+
+def case_response_missing_target_evidence_rejected() -> None:
+    targets = bp.select_batch(_plan(1), set(), 10)
+    targets[0]["targetEvidenceRequired"] = True
+    targets[0]["targetEvidenceIds"] = []
+    resp = {
+        "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
+        "batchId": "batch-001", "role": "generation",
+        "items": [{"targetId": "com.acme.C0#m", "status": "generated",
+                   "patchDescriptor": _patch("com.acme.C0")}],
+    }
+    try:
+        bp.validate_generation_response(resp, targets, batch_id="batch-001")
+        _assert("missing target evidence rejected", False, "did not raise")
+    except bp.BatchResponseError as exc:
+        _assert("missing target evidence rejected", "targetEvidenceIds is empty" in str(exc), str(exc))
+
+
+def case_response_must_cite_target_evidence() -> None:
+    targets = bp.select_batch(_plan(1), set(), 10)
+    targets[0]["allowedEvidenceIds"] = [
+        "ctor:com.acme.C0:11111111",
+        "sym:com.acme.C0#m:12345678",
+    ]
+    targets[0]["targetEvidenceRequired"] = True
+    targets[0]["targetEvidenceIds"] = ["sym:com.acme.C0#m:12345678"]
+    bad_patch = _patch("com.acme.C0")
+    bad_patch["methods"][0]["evidenceIds"] = ["ctor:com.acme.C0:11111111"]
+    resp = {
+        "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
+        "batchId": "batch-001", "role": "generation",
+        "items": [{"targetId": "com.acme.C0#m", "status": "generated",
+                   "patchDescriptor": bad_patch}],
+    }
+    try:
+        bp.validate_generation_response(resp, targets, batch_id="batch-001")
+        _assert("target evidence must be cited", False, "did not raise")
+    except bp.BatchResponseError as exc:
+        _assert("target evidence must be cited", "targetEvidenceIds" in str(exc), str(exc))
+
+
 def case_repair_patch_must_use_repair_prefix() -> None:
     resp = {
         "schemaVersion": bp.SCHEMA_REPAIR_RESPONSE, "runId": "run-1",
@@ -217,7 +310,9 @@ def case_repair_noncanonical_test_class_rejected() -> None:
                    "patchDescriptor": patch}],
     }
     requested = [{"targetId": "com.acme.C0#m", "sut": "com.acme.C0",
-                  "canonicalTestClass": "com.acme.C0Test"}]
+                  "canonicalTestClass": "com.acme.C0Test",
+                  "allowedImports": ["org.junit.jupiter.api.Test"],
+                  "allowedEvidenceIds": ["sym:com.acme.C0#m:12345678"]}]
     try:
         bp.validate_repair_response(
             resp,

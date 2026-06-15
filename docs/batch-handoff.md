@@ -97,6 +97,18 @@ Mientras espera, el budget está PAUSADO (no dispara BUDGET_EXCEEDED).
    `target.canonicalTestClass`. El runner rechaza variantes inventadas como
    `*CtorTest`, `*ConstructorTest`, `*GeneratedTest` o `*UnitTest` antes de llegar
    al patcher, para evitar `G6_LINTER_FAIL` por clases de test no canÃ³nicas.
+   La misma estrategia aplica para imports: cada target lleva `allowedImports`,
+   `forbiddenImports` e `importPolicy`. El runner rechaza cualquier
+   `patchDescriptor.allowedImports` que no sea subconjunto de `target.allowedImports`
+   y tambiÃ©n anotaciones conocidas que implican imports prohibidos, como
+   `@DisplayName`, `@Autowired` o `@SpringBootTest`.
+   Para G2, cada target tambiÃ©n lleva `allowedEvidenceIds`, `evidenceRefs` y
+   `evidencePolicy`. El runner rechaza cualquier `methods[].evidenceIds` vacÃ­o o
+   fuera de `target.allowedEvidenceIds` antes de llegar al patcher. Ademas, cuando
+   `target.targetEvidenceRequired` es true, cada test generado debe citar al menos
+   un id de `target.targetEvidenceIds`; si esa lista esta vacia, el LLM debe
+   marcar el item como `skipped`/`failed` en vez de generar codigo contra un metodo
+   no evidenciado.
 2. Volvé a la consola y presioná **ENTER**. El runner valida el JSON, **aplica
    cada patch** (gates G1–G8 + presupuesto + seguridad de literales Java, por
    construcción), **corre los tests** y clasifica cada target en PASSED /
@@ -118,6 +130,12 @@ Mientras espera, el budget está PAUSADO (no dispara BUDGET_EXCEEDED).
    `failedItem.canonicalTestClass`. Si el intento anterior usÃ³ una variante
    rechazada, queda informada como `failedItem.rejectedTestClass`, pero no debe
    reutilizarse.
+   Repair tambiÃ©n recibe `failedItem.allowedImports`; cualquier import fuera de
+   esa lista se considera respuesta invÃ¡lida antes del patcher.
+   Lo mismo aplica a `failedItem.allowedEvidenceIds`: si el repair no puede citar
+   Si `failedItem.targetEvidenceRequired` es true, cada metodo reparado tambien
+   debe citar `failedItem.targetEvidenceIds`.
+   evidencia vÃ¡lida, debe abandonar el item en vez de inventar sÃ­mbolos.
 4. Un target que sigue fallando tras `--max-repair-rounds` se marca **ABANDONED** y
    el run continúa.
 

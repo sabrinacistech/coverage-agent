@@ -159,7 +159,18 @@ Reglas:
   - status "failed" con reason claro.
 - No modificar código productivo.
 - No inventar imports, métodos, constructores ni clases.
-- Respetar allowed imports, evidenceIds, context packs y reglas del request.
+- Respetar target.allowedImports, evidenceIds, context packs y reglas del request.
+- patchDescriptor.allowedImports debe ser subconjunto exacto de target.allowedImports.
+- Cada method.evidenceIds debe ser subconjunto exacto de target.allowedEvidenceIds.
+- Si target.targetEvidenceRequired es true, cada method.evidenceIds debe incluir
+  al menos un id de target.targetEvidenceIds.
+- Si target.targetEvidenceRequired es true y target.targetEvidenceIds está vacío,
+  no generes código: marcá el item como "skipped" o "failed" con reason claro.
+- No uses símbolos, métodos, constructores, clases, constantes, exceptions ni
+  asserts sin evidencia. Si target.allowedEvidenceIds no alcanza, marcá el item
+  como "skipped" o "failed" con reason claro.
+- No uses @DisplayName, @Autowired, @SpringBootTest, imports Spring ni excepciones
+  de dominio salvo que el FQCN exacto aparezca en target.allowedImports.
 - Cada método @Test debe tener // given, // when, // then.
 
 Regla importante para lambdas sintéticas:
@@ -183,6 +194,10 @@ Contrato obligatorio de patchDescriptor:
 - patchDescriptor.testClass debe ser EXACTAMENTE target.canonicalTestClass.
 - No inventes variantes como *CtorTest, *ConstructorTest, *GeneratedTest o
   *UnitTest.
+- patchDescriptor.allowedImports debe contener solo imports de target.allowedImports.
+- Cada method.evidenceIds debe contener solo ids de target.allowedEvidenceIds.
+- Cada method.evidenceIds debe citar también target.targetEvidenceIds cuando el
+  target lo exige.
 - patchId debe empezar con "patch:".
 - methods debe ser una lista no vacia. Cada metodo debe tener:
   name, annotations, body, evidenceIds.
@@ -254,6 +269,16 @@ Reglas:
 - Repará solo los tests generados, nunca src/main.
 - Mantené la intención original del test.
 - Hacé el cambio mínimo para compilar y pasar.
+- Usá exclusivamente failedItem.allowedImports.
+- Usá exclusivamente failedItem.allowedEvidenceIds.
+- Si failedItem.targetEvidenceRequired es true, cada method.evidenceIds debe
+  incluir al menos un id de failedItem.targetEvidenceIds.
+- Eliminá imports reportados como no whitelisted; no los reemplaces por otros
+  imports inventados.
+- Si no hay evidenceIds suficientes para justificar el repair, marcá el item
+  como "abandoned" con reason claro.
+- No uses @DisplayName, @Autowired, @SpringBootTest, imports Spring ni excepciones
+  de dominio salvo que el FQCN exacto aparezca en failedItem.allowedImports.
 - Si no se puede reparar con evidencia, marcá el item como "abandoned" con reason.
 
 Contrato obligatorio de patchDescriptor para repair:
@@ -265,6 +290,10 @@ Contrato obligatorio de patchDescriptor para repair:
 - patchDescriptor.testClass debe ser EXACTAMENTE failedItem.canonicalTestClass.
 - No mantengas ni inventes variantes como *CtorTest, *ConstructorTest,
   *GeneratedTest o *UnitTest.
+- patchDescriptor.allowedImports debe contener solo imports de failedItem.allowedImports.
+- Cada method.evidenceIds debe contener solo ids de failedItem.allowedEvidenceIds.
+- Cada method.evidenceIds debe citar también failedItem.targetEvidenceIds cuando
+  failedItem.targetEvidenceRequired sea true.
 - En repair, patchId debe empezar con "repair:".
 - Cada method debe tener name, annotations, body, evidenceIds.
 - Si el error anterior fue "patchDescriptor missing required keys" o

@@ -263,6 +263,105 @@ def _canonical_test_class(sut: str) -> str:
     return f"{sut}Test" if sut else ""
 
 
+def _context_allowed_imports(state_dir: Path, sut: str) -> list[str]:
+    data = _load_context_pack(state_dir, sut)
+    imports = data.get("allowedImports") or []
+    if not isinstance(imports, list):
+        return []
+    return [str(i) for i in imports if isinstance(i, str) and i]
+
+
+def _load_context_pack(state_dir: Path, sut: str) -> dict:
+    if not sut:
+        return {}
+    pack = state_dir / "context-packs" / f"{sut}.json"
+    if not pack.exists():
+        return {}
+    try:
+        loaded = _load_json(pack)
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _context_evidence(state_dir: Path, sut: str) -> tuple[list[str], list[dict]]:
+    data = _load_context_pack(state_dir, sut)
+    ids: list[str] = []
+    refs: list[dict] = []
+
+    def add_ref(kind: str, entry: dict) -> None:
+        evidence_id = entry.get("evidenceId")
+        if not isinstance(evidence_id, str) or not evidence_id:
+            return
+        if evidence_id not in ids:
+            ids.append(evidence_id)
+        refs.append({
+            "evidenceId": evidence_id,
+            "kind": kind,
+            "name": entry.get("name") or kind,
+            "returnType": entry.get("returnType"),
+            "params": entry.get("params", []),
+        })
+
+    for ctor in data.get("constructors") or []:
+        if isinstance(ctor, dict):
+            add_ref("constructor", ctor)
+    for method in data.get("methods") or []:
+        if isinstance(method, dict):
+            add_ref("method", method)
+    return ids, refs
+
+
+def _target_method_name(target: dict, sut: str) -> str:
+    raw = str(target.get("method") or "")
+    if not raw and "#" in str(target.get("targetId") or ""):
+        raw = str(target.get("targetId")).split("#", 1)[1]
+    name = raw.split("(", 1)[0].strip()
+    if " " in name:
+        name = name.rsplit(" ", 1)[-1]
+    if name == sut.rsplit(".", 1)[-1]:
+        return "<init>"
+    return name
+
+
+def _target_evidence_ids(target: dict, sut: str, evidence_refs: list[dict]) -> tuple[str, bool, list[str]]:
+    name = _target_method_name(target, sut)
+    if not name or name == "<clinit>" or name.startswith("lambda$"):
+        return name, False, []
+
+    matched: list[str] = []
+    for ref in evidence_refs:
+        evidence_id = ref.get("evidenceId")
+        if not isinstance(evidence_id, str) or not evidence_id:
+            continue
+        kind = ref.get("kind")
+        ref_name = ref.get("name")
+        if name == "<init>" and kind == "constructor":
+            matched.append(evidence_id)
+        elif kind == "method" and ref_name == name:
+            matched.append(evidence_id)
+    return name, True, matched
+
+
+def _enrich_targets_with_imports(targets: list[dict], *, state_dir: Path) -> list[dict]:
+    enriched: list[dict] = []
+    for target in targets:
+        row = dict(target)
+        sut = str(row.get("sut") or "")
+        evidence_ids, evidence_refs = _context_evidence(state_dir, sut)
+        target_method, target_required, target_evidence = _target_evidence_ids(
+            row, sut, evidence_refs
+        )
+        row["allowedImports"] = _context_allowed_imports(state_dir, sut)
+        row["allowedEvidenceIds"] = evidence_ids
+        row["evidenceRefs"] = evidence_refs
+        row["targetMethodName"] = target_method
+        row["targetEvidenceRequired"] = target_required
+        row["targetEvidenceIds"] = target_evidence
+        enriched.append(row)
+    return enriched
+
+
 def _run_tests(repo: Path, state_dir: Path, test_classes: list[str]) -> int:
     """Run all applied test classes in ONE narrow invocation (M5 batching).
     Returns the runner's exit code; 0 = every class passed. -1 if Maven absent."""
@@ -333,6 +432,13 @@ def _failed_items_for_repair(manifest: dict, *, state_dir: Path, repo: Path,
     for tid in bp.failing_target_ids(manifest, batch_ids):
         rec = manifest["targets"].get(tid, {})
         sut = rec.get("sut", "")
+        allowed_imports = _context_allowed_imports(state_dir, sut)
+        allowed_evidence_ids, evidence_refs = _context_evidence(state_dir, sut)
+        target_method, target_required, target_evidence = _target_evidence_ids(
+            {"targetId": tid, "method": rec.get("method", "")},
+            sut,
+            evidence_refs,
+        )
         rejected_test_class = applied.get(tid, rec.get("testClass", ""))
         canonical_test_class = _canonical_test_class(sut)
         test_class = canonical_test_class or rejected_test_class
@@ -355,6 +461,15 @@ def _failed_items_for_repair(manifest: dict, *, state_dir: Path, repo: Path,
                 "src/test/java/" + canonical_test_class.replace(".", "/") + ".java"
                 if canonical_test_class else ""
             ),
+            "allowedImports": allowed_imports,
+            "forbiddenImports": bp._import_policy(allowed_imports)["forbiddenUnlessExplicitlyAllowed"],
+            "importPolicy": bp._import_policy(allowed_imports),
+            "allowedEvidenceIds": allowed_evidence_ids,
+            "evidenceRefs": evidence_refs,
+            "targetMethodName": target_method,
+            "targetEvidenceRequired": target_required,
+            "targetEvidenceIds": target_evidence,
+            "evidencePolicy": bp._evidence_policy(allowed_evidence_ids),
             "rejectedTestClass": (
                 rejected_test_class
                 if rejected_test_class and rejected_test_class != canonical_test_class
@@ -493,7 +608,8 @@ def run_batches(
             return budget_enforcer.EXIT_EXCEEDED  # RC 2 == budget exceeded
 
         # ── generation handoff ──────────────────────────────────────────────────
-        req = bp.build_generation_request(run_id, batch_id, targets, batch_size=batch_size)
+        request_targets = _enrich_targets_with_imports(targets, state_dir=state_dir)
+        req = bp.build_generation_request(run_id, batch_id, request_targets, batch_size=batch_size)
         req_path = batch_dir / "request-generation.json"
         resp_path = batch_dir / "response-generation.json"
         _write_json(req_path, req)
@@ -515,7 +631,7 @@ def run_batches(
             continue
 
         try:
-            items = bp.validate_generation_response(resp, targets, batch_id=batch_id)
+            items = bp.validate_generation_response(resp, request_targets, batch_id=batch_id)
         except bp.BatchResponseError as exc:
             _print(f"[batch] response-generation inválida: {exc}; salto el batch.")
             for tid in batch_ids:

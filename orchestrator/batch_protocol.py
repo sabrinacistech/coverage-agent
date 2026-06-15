@@ -66,6 +66,19 @@ _FULL_FILE_PATCH_KEYS = frozenset({
     "coveredMethod",
     "testMethods",
 })
+_ANNOTATION_IMPORTS = {
+    "@DisplayName": "org.junit.jupiter.api.DisplayName",
+    "DisplayName": "org.junit.jupiter.api.DisplayName",
+    "@Autowired": "org.springframework.beans.factory.annotation.Autowired",
+    "Autowired": "org.springframework.beans.factory.annotation.Autowired",
+    "@SpringBootTest": "org.springframework.boot.test.context.SpringBootTest",
+    "SpringBootTest": "org.springframework.boot.test.context.SpringBootTest",
+}
+_COMMON_FORBIDDEN_IMPORTS = [
+    "org.junit.jupiter.api.DisplayName",
+    "org.springframework.beans.factory.annotation.Autowired",
+    "org.springframework.boot.test.context.SpringBootTest",
+]
 
 # ── Generation / repair rules shipped to Claude Code in every request ──────────
 # The QUALITY_GATE_RULES mirror the deterministic G6 linter (tools/python/
@@ -114,6 +127,16 @@ GENERATION_RULES = [
     "Use the canonical test class exactly: patchDescriptor.testClass MUST equal "
     "target.canonicalTestClass. Do not create suffix variants such as *CtorTest, "
     "*ConstructorTest, *GeneratedTest, or *UnitTest.",
+    "Use ONLY target.allowedImports in patchDescriptor.allowedImports. Do not add "
+    "DisplayName, Autowired, SpringBootTest, Spring injection annotations, or "
+    "domain exceptions unless they are explicitly listed in target.allowedImports.",
+    "Use ONLY target.allowedEvidenceIds in every method.evidenceIds. If no "
+    "allowedEvidenceIds justify a test method, mark that target skipped/failed "
+    "instead of inventing symbols.",
+    "When target.targetEvidenceRequired is true, every generated test method MUST "
+    "include at least one id from target.targetEvidenceIds in method.evidenceIds. "
+    "If target.targetEvidenceIds is empty, mark the target skipped/failed instead "
+    "of generating code for an unevidenced method.",
     "If a target includes context.syntheticCoverageTargets, DO NOT skip it as a "
     "lambda. Generate tests for the listed real parent method and cover the "
     "internal lambda branch behaviour through that parent method. Prefer at "
@@ -137,6 +160,15 @@ REPAIR_RULES = [
     "Use the canonical test class exactly: patchDescriptor.testClass MUST equal "
     "failedItem.canonicalTestClass. Do not keep or create suffix variants such "
     "as *CtorTest, *ConstructorTest, *GeneratedTest, or *UnitTest.",
+    "Use ONLY failedItem.allowedImports in patchDescriptor.allowedImports. Remove "
+    "any import reported as not whitelisted. Do not add DisplayName, Autowired, "
+    "SpringBootTest, Spring injection annotations, or domain exceptions unless "
+    "they are explicitly listed in failedItem.allowedImports.",
+    "Use ONLY failedItem.allowedEvidenceIds in every method.evidenceIds. If no "
+    "allowedEvidenceIds justify a repair, mark that item abandoned with a reason.",
+    "When failedItem.targetEvidenceRequired is true, every repaired test method "
+    "MUST include at least one id from failedItem.targetEvidenceIds. If that list "
+    "is empty, abandon the item instead of repairing with invented symbols.",
     *QUALITY_GATE_RULES,
 ]
 
@@ -175,6 +207,33 @@ def _production_file(sut: str) -> str:
     return "src/main/java/" + sut.replace(".", "/") + ".java"
 
 
+def _import_policy(allowed_imports: list[str] | None) -> dict:
+    allowed = set(allowed_imports or [])
+    forbidden = [imp for imp in _COMMON_FORBIDDEN_IMPORTS if imp not in allowed]
+    return {
+        "rule": "patchDescriptor.allowedImports must be a subset of allowedImports.",
+        "forbiddenUnlessExplicitlyAllowed": forbidden,
+        "notes": [
+            "Do not use @DisplayName unless org.junit.jupiter.api.DisplayName is allowed.",
+            "Do not use @Autowired or Spring injection in unit tests unless explicitly allowed.",
+            "Do not import domain exceptions unless the exact FQCN appears in allowedImports.",
+        ],
+    }
+
+
+def _evidence_policy(allowed_evidence_ids: list[str] | None) -> dict:
+    return {
+        "rule": "Every method.evidenceIds entry must exist in allowedEvidenceIds.",
+        "allowedCount": len(allowed_evidence_ids or []),
+        "notes": [
+            "Do not cite evidenceIds not listed in this request.",
+            "Do not use symbols, constructors, methods, exceptions, constants, or assertions without evidence.",
+            "When targetEvidenceRequired is true, cite targetEvidenceIds in every generated/repaired method.",
+            "If evidence is insufficient, skip/abandon the item instead of guessing.",
+        ],
+    }
+
+
 def build_generation_request(
     run_id: str,
     batch_id: str,
@@ -192,6 +251,9 @@ def build_generation_request(
     out_targets = []
     for i, item in enumerate(targets, start=1):
         sut = item.get("sut", "")
+        allowed_imports = list(item.get("allowedImports") or [])
+        allowed_evidence_ids = list(item.get("allowedEvidenceIds") or [])
+        target_evidence_ids = list(item.get("targetEvidenceIds") or [])
         out_targets.append({
             "targetId": item.get("targetId", sut),
             "sut": sut,
@@ -199,6 +261,15 @@ def build_generation_request(
             "productionFile": _production_file(sut) if sut else "",
             "canonicalTestClass": _suggested_test_class(sut),
             "suggestedTestFile": _suggested_test_file(sut) if sut else "",
+            "allowedImports": allowed_imports,
+            "forbiddenImports": _import_policy(allowed_imports)["forbiddenUnlessExplicitlyAllowed"],
+            "importPolicy": _import_policy(allowed_imports),
+            "allowedEvidenceIds": allowed_evidence_ids,
+            "evidenceRefs": list(item.get("evidenceRefs") or []),
+            "targetMethodName": item.get("targetMethodName", ""),
+            "targetEvidenceRequired": bool(item.get("targetEvidenceRequired", False)),
+            "targetEvidenceIds": target_evidence_ids,
+            "evidencePolicy": _evidence_policy(allowed_evidence_ids),
             "template": item.get("template"),
             "priority": item.get("score", i),
             "fixtureIds": item.get("fixtureIds", []),
@@ -247,6 +318,10 @@ def _validate_patch_descriptor(
     expected_prefix: str,
     expected_sut: str | None = None,
     expected_test_class: str | None = None,
+    expected_allowed_imports: list[str] | None = None,
+    expected_evidence_ids: list[str] | None = None,
+    expected_target_evidence_ids: list[str] | None = None,
+    target_evidence_required: bool = False,
 ) -> None:
     """Validate the canonical patch-descriptor shape before the patcher runs.
 
@@ -320,6 +395,68 @@ def _validate_patch_descriptor(
             f"{target_id!r} patchDescriptor.methods must be a non-empty list"
         )
 
+    if expected_allowed_imports is not None:
+        allowed = set(expected_allowed_imports)
+        patch_imports = patch.get("allowedImports") or []
+        if not isinstance(patch_imports, list):
+            raise BatchResponseError(
+                f"{target_id!r} patchDescriptor.allowedImports must be a list"
+            )
+        for imp in patch_imports:
+            if imp not in allowed:
+                raise BatchResponseError(
+                    f"{target_id!r} patchDescriptor.allowedImports contains "
+                    f"non-whitelisted import {imp!r}. Use only target/failedItem.allowedImports."
+                )
+
+        annotations: list[str] = []
+        for field in patch.get("fields") or []:
+            if isinstance(field, dict) and field.get("annotation"):
+                annotations.append(str(field.get("annotation")))
+        for method in methods:
+            if isinstance(method, dict):
+                annotations.extend(str(a) for a in (method.get("annotations") or []))
+        for ann in annotations:
+            normalized = ann.split("(", 1)[0].strip()
+            fqcn = _ANNOTATION_IMPORTS.get(normalized)
+            if fqcn and fqcn not in allowed:
+                raise BatchResponseError(
+                    f"{target_id!r} uses annotation {normalized!r}, which requires "
+                    f"non-whitelisted import {fqcn!r}"
+                )
+
+    if expected_evidence_ids is not None:
+        allowed_evidence = set(expected_evidence_ids)
+        required_target_evidence = set(expected_target_evidence_ids or [])
+        if target_evidence_required and not required_target_evidence:
+            raise BatchResponseError(
+                f"{target_id!r} requires target method evidence but targetEvidenceIds is empty. "
+                "Skip/fail the item instead of generating code for an unevidenced method."
+            )
+        for idx, method in enumerate(methods):
+            if not isinstance(method, dict):
+                continue
+            evidence_ids = method.get("evidenceIds")
+            if not isinstance(evidence_ids, list) or not evidence_ids:
+                raise BatchResponseError(
+                    f"{target_id!r} patchDescriptor.methods[{idx}].evidenceIds "
+                    "must be a non-empty list from allowedEvidenceIds"
+                )
+            for evidence_id in evidence_ids:
+                if evidence_id not in allowed_evidence:
+                    raise BatchResponseError(
+                        f"{target_id!r} patchDescriptor.methods[{idx}].evidenceIds "
+                        f"contains unknown evidenceId {evidence_id!r}. Use only "
+                        "target/failedItem.allowedEvidenceIds."
+                    )
+            if target_evidence_required and required_target_evidence:
+                if not (set(evidence_ids) & required_target_evidence):
+                    raise BatchResponseError(
+                        f"{target_id!r} patchDescriptor.methods[{idx}].evidenceIds "
+                        "must include at least one targetEvidenceIds entry for the "
+                        "method under test."
+                    )
+
     for idx, method in enumerate(methods):
         if not isinstance(method, dict):
             raise BatchResponseError(
@@ -392,6 +529,10 @@ def validate_generation_response(resp: dict, batch_targets: list[dict], *, batch
                 expected_prefix="patch:",
                 expected_sut=sut,
                 expected_test_class=_suggested_test_class(sut) if sut else None,
+                expected_allowed_imports=target.get("allowedImports"),
+                expected_evidence_ids=target.get("allowedEvidenceIds"),
+                expected_target_evidence_ids=target.get("targetEvidenceIds"),
+                target_evidence_required=bool(target.get("targetEvidenceRequired")),
             )
     return items
 
@@ -418,6 +559,13 @@ def build_repair_request(
         "repairRound": repair_round,
         "failedItems": list(failed_items),
         "rules": list(REPAIR_RULES),
+        "importPolicy": {
+            "rule": "Each repaired patchDescriptor.allowedImports must be a subset of failedItem.allowedImports.",
+            "forbiddenByDefault": list(_COMMON_FORBIDDEN_IMPORTS),
+        },
+        "evidencePolicy": {
+            "rule": "Each repaired method.evidenceIds must be a non-empty subset of failedItem.allowedEvidenceIds.",
+        },
         "testClassPolicy": {
             "canonical": "Use failedItem.canonicalTestClass exactly for patchDescriptor.testClass.",
             "forbidden": [
@@ -479,6 +627,10 @@ def validate_repair_response(
                 expected_prefix="repair:",
                 expected_sut=requested.get("sut") or None,
                 expected_test_class=requested.get("canonicalTestClass") or None,
+                expected_allowed_imports=requested.get("allowedImports"),
+                expected_evidence_ids=requested.get("allowedEvidenceIds"),
+                expected_target_evidence_ids=requested.get("targetEvidenceIds"),
+                target_evidence_required=bool(requested.get("targetEvidenceRequired")),
             )
     return items
 

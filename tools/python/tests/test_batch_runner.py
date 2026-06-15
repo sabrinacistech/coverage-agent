@@ -53,8 +53,27 @@ def _assert(label: str, cond: bool, detail: str = "") -> None:
 def _setup(td: Path, n: int = 3) -> Path:
     state = td / "state"
     state.mkdir(parents=True, exist_ok=True)
+    packs = state / "context-packs"
+    packs.mkdir(parents=True, exist_ok=True)
     items = [{"targetId": f"com.acme.C{i}#m", "sut": f"com.acme.C{i}", "method": "m",
               "score": 100 - i} for i in range(n)]
+    for item in items:
+        (packs / f"{item['sut']}.json").write_text(
+            json.dumps({
+                "schemaVersion": 1,
+                "sut": item["sut"],
+                "allowedImports": ["org.junit.jupiter.api.Test"],
+                "constructors": [],
+                "methods": [{
+                    "evidenceId": f"sym:{item['sut']}#m:12345678",
+                    "name": "m",
+                    "returnType": "void",
+                    "params": [],
+                    "usable": True,
+                }],
+            }),
+            encoding="utf-8",
+        )
     (state / "batch-plan.json").write_text(
         json.dumps({"schemaVersion": 1, "cycle": 0, "mode": "coverage",
                     "sizeChosen": n, "items": items}), encoding="utf-8")
@@ -79,7 +98,7 @@ def _patch(sut: str, *, prefix: str = "patch") -> dict:
             "name": "m_whenCondition_returnsExpected",
             "annotations": ["@Test"],
             "body": "// given\nObject value = new Object();\n// when\nObject actual = value;\n// then\norg.junit.jupiter.api.Assertions.assertSame(value, actual);",
-            "evidenceIds": ["sym:com.acme.C0#m:12345678"],
+            "evidenceIds": [f"sym:{sut}#m:12345678"],
         }],
     }
 
@@ -248,6 +267,33 @@ def case_repair_payload_uses_canonical_test_class() -> None:
                 item["canonicalTestClass"] == "com.acme.C0Test", str(item))
 
 
+def case_runner_enriches_target_method_evidence() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        state = _setup(Path(td), 1)
+        target = {"targetId": "com.acme.C0#m", "sut": "com.acme.C0", "method": "m()V"}
+        enriched = br._enrich_targets_with_imports([target], state_dir=state)
+        row = enriched[0]
+        _assert("runner target method name", row["targetMethodName"] == "m", str(row))
+        _assert("runner target evidence required", row["targetEvidenceRequired"] is True, str(row))
+        _assert("runner target evidence ids",
+                row["targetEvidenceIds"] == ["sym:com.acme.C0#m:12345678"], str(row))
+
+
+def case_runner_marks_unevidenced_target_method() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        state = _setup(Path(td), 1)
+        target = {
+            "targetId": "com.acme.C0#withActive",
+            "sut": "com.acme.C0",
+            "method": "withActive(Z)Lcom/acme/C0;",
+        }
+        enriched = br._enrich_targets_with_imports([target], state_dir=state)
+        row = enriched[0]
+        _assert("runner unevidenced method name", row["targetMethodName"] == "withActive", str(row))
+        _assert("runner unevidenced method requires evidence", row["targetEvidenceRequired"] is True, str(row))
+        _assert("runner unevidenced method has no target ids", row["targetEvidenceIds"] == [], str(row))
+
+
 def case_budget_paused_during_handoff() -> None:
     with tempfile.TemporaryDirectory() as td:
         state = _setup(Path(td), 1)
@@ -279,6 +325,8 @@ def main() -> int:
     cases = [
         case_all_pass, case_repaired_round1, case_abandoned_after_rounds,
         case_skipped_not_fatal, case_repair_payload_uses_canonical_test_class,
+        case_runner_enriches_target_method_evidence,
+        case_runner_marks_unevidenced_target_method,
         case_budget_paused_during_handoff,
     ]
     for c in cases:
