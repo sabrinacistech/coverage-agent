@@ -31,10 +31,12 @@ SCHEMAS_DIR = ARCH_ROOT / "state" / "_schemas"
 _DEFAULT_MODELS = {
     "generation": "anthropic/claude-opus-4-8",
     "repair": "anthropic/claude-sonnet-4-6",
+    "architecture": "anthropic/claude-sonnet-4-6",
 }
 _ENV_BY_ROLE = {
     "generation": "COVAGENT_MODEL_GENERATION",
     "repair": "COVAGENT_MODEL_REPAIR",
+    "architecture": "COVAGENT_MODEL_ARCHITECTURE",
 }
 
 

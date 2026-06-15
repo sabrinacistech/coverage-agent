@@ -41,6 +41,7 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,6 +69,8 @@ _RISK_PENALTY: dict[str, int] = {
 
 _INCREMENTAL_BOOST = 20
 _FAILURE_PENALTY_PER_ATTEMPT = 5
+
+_SYNTHETIC_LAMBDA_RE = re.compile(r"^lambda\$(?P<parent>[A-Za-z_$][A-Za-z0-9_$]*)\$\d+\(")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -156,6 +159,11 @@ def _compute_score(
 ) -> int:
     missed_lines    = int(target.get("missedLines",    0) or 0)
     missed_branches = int(target.get("missedBranches", 0) or 0)
+    # Synthetic lambda bodies are not useful test targets by themselves. When a
+    # lambda$parent$N target is collapsed onto parent(...), keep its missed
+    # coverage in the parent's score so the public method rises in the batch.
+    missed_lines += int(target.get("_syntheticMissedLines", 0) or 0)
+    missed_branches += int(target.get("_syntheticMissedBranches", 0) or 0)
     missed_method   = 1 if (missed_lines > 0 or missed_branches > 0) else 0
 
     raw = (
@@ -168,6 +176,78 @@ def _compute_score(
 
 def _next_cycle(existing_plan: dict) -> int:
     return int(existing_plan.get("cycle", 0)) + 1
+
+
+def _method_name(method_descriptor: str) -> str:
+    return str(method_descriptor or "").split("(", 1)[0]
+
+
+def _synthetic_lambda_parent(method_descriptor: str) -> str | None:
+    match = _SYNTHETIC_LAMBDA_RE.match(str(method_descriptor or ""))
+    return match.group("parent") if match else None
+
+
+def _collapse_synthetic_lambdas(targets: list[dict]) -> list[dict]:
+    """Move lambda$parent$N coverage to parent(...) targets when possible.
+
+    JaCoCo reports lambda bodies as methods. They are implementation details and
+    the generator correctly avoids testing them directly. The useful target is
+    the public/package method that owns the lambda, e.g.:
+
+      lambda$requireConfiguredCluster$0 -> requireConfiguredCluster()
+
+    When that parent method exists in the same SUT, drop the synthetic target and
+    annotate/boost the parent target with the lambda coverage gap.
+    """
+    by_sut_and_method: dict[tuple[str, str], dict] = {}
+    for target in targets:
+        parent = _synthetic_lambda_parent(target.get("method", ""))
+        if parent:
+            continue
+        method_name = _method_name(target.get("method", ""))
+        if method_name:
+            by_sut_and_method[(target.get("sut", ""), method_name)] = target
+
+    result: list[dict] = []
+    collapsed = 0
+    for target in targets:
+        parent_name = _synthetic_lambda_parent(target.get("method", ""))
+        if not parent_name:
+            result.append(target)
+            continue
+
+        parent = by_sut_and_method.get((target.get("sut", ""), parent_name))
+        if parent is None:
+            parent = dict(target)
+            parent["method"] = f"{parent_name}()"
+            parent["_syntheticParentFallback"] = True
+            parent["_syntheticTargets"] = [{
+                "targetId": target.get("id", ""),
+                "method": target.get("method", ""),
+                "missedLines": int(target.get("missedLines", 0) or 0),
+                "missedBranches": int(target.get("missedBranches", 0) or 0),
+            }]
+            result.append(parent)
+            collapsed += 1
+            continue
+
+        synthetic_targets = parent.setdefault("_syntheticTargets", [])
+        synthetic_targets.append({
+            "targetId": target.get("id", ""),
+            "method": target.get("method", ""),
+            "missedLines": int(target.get("missedLines", 0) or 0),
+            "missedBranches": int(target.get("missedBranches", 0) or 0),
+        })
+        parent["_syntheticMissedLines"] = int(parent.get("_syntheticMissedLines", 0) or 0) + int(target.get("missedLines", 0) or 0)
+        parent["_syntheticMissedBranches"] = int(parent.get("_syntheticMissedBranches", 0) or 0) + int(target.get("missedBranches", 0) or 0)
+        collapsed += 1
+
+    if collapsed:
+        print(
+            f"[INFO] synthetic lambda target collapse active: "
+            f"collapsed {collapsed} lambda target(s) into parent method targets"
+        )
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -257,6 +337,8 @@ def plan(
         )
     if not targets:
         print("[INFO] no coverage targets; batch-plan will be empty")
+    else:
+        targets = _collapse_synthetic_lambdas(targets)
 
     # ── Score every target ────────────────────────────────────────────────────
     scored: list[tuple[int, dict]] = []
@@ -293,6 +375,21 @@ def plan(
             "template":   template,
             "fixtureIds": fids,
         }
+        if tgt.get("_syntheticTargets"):
+            item["context"] = {
+                "syntheticCoverageTargets": tgt["_syntheticTargets"],
+                "generationHint": (
+                    "Generate tests for this real parent method and cover the "
+                    "internal lambda branch(es). Do not generate or skip a "
+                    "lambda$... method as a standalone SUT."
+                ),
+            }
+            if tgt.get("_syntheticParentFallback"):
+                item["context"]["syntheticParentFallback"] = True
+                item["context"]["generationHint"] += (
+                    " The parent method was inferred from the lambda name because "
+                    "JaCoCo did not report it as a separate uncovered target."
+                )
 
         # Mode-specific fields
         if mode == "branch-coverage" and tgt.get("missedBranches", 0):
@@ -346,6 +443,7 @@ def _update_schema(schema_path: Path) -> None:
     for field, defn in [
         ("score",      {"type": "integer", "description": "Computed coverage priority score"}),
         ("template",   {"type": ["string", "null"], "description": "Recommended test template path"}),
+        ("context",    {"type": "object", "description": "Planner hints for generation"}),
         ("generatedAt",{"type": "string"}),
     ]:
         if field not in item_props:

@@ -94,6 +94,76 @@ def case_planner_keeps_targets_without_classification() -> None:
             raise AssertionError("target dropped despite no classification present")
 
 
+def case_planner_collapses_lambda_targets_to_parent_method() -> None:
+    sut = "com.acme.ClusterQueries"
+    with tempfile.TemporaryDirectory() as td:
+        state = Path(td)
+        _write(state / "coverage-targets.json", {
+            "targets": [
+                {
+                    "id": "lambda-target",
+                    "sut": sut,
+                    "method": "lambda$requireConfiguredCluster$0()Lcom/acme/ClusterNotFoundException;",
+                    "missedLines": 3,
+                    "missedBranches": 2,
+                },
+                {
+                    "id": "parent-target",
+                    "sut": sut,
+                    "method": "requireConfiguredCluster()Lcom/acme/Cluster;",
+                    "missedLines": 1,
+                    "missedBranches": 0,
+                },
+            ],
+        })
+        _write(state / "classification-index.json", {
+            "schemaVersion": 1,
+            "classes": [{"fqcn": sut, "type": "service", "testabilityRisk": "low"}],
+        })
+
+        result = plan(state, batch_size=10)
+        ids = [it["targetId"] for it in result["items"]]
+        if "lambda-target" in ids:
+            raise AssertionError(f"synthetic lambda leaked into batch-plan: {ids}")
+        parent = next((it for it in result["items"] if it["targetId"] == "parent-target"), None)
+        if parent is None:
+            raise AssertionError(f"parent target missing after lambda collapse: {ids}")
+        if parent.get("score", 0) <= 5:
+            raise AssertionError(f"synthetic coverage was not folded into parent score: {parent}")
+        ctx = parent.get("context", {})
+        synthetic = ctx.get("syntheticCoverageTargets", [])
+        if not synthetic or synthetic[0].get("targetId") != "lambda-target":
+            raise AssertionError(f"missing synthetic context on parent target: {parent}")
+
+
+def case_planner_infers_parent_when_only_lambda_target_exists() -> None:
+    sut = "com.acme.ClusterStatusStore"
+    with tempfile.TemporaryDirectory() as td:
+        state = Path(td)
+        _write(state / "coverage-targets.json", {
+            "targets": [{
+                "id": "lambda-only",
+                "sut": sut,
+                "method": "lambda$getCurrentStatus$1()Lcom/acme/ClusterStatusIsActiveDTO;",
+                "missedLines": 3,
+                "missedBranches": 0,
+            }],
+        })
+        _write(state / "classification-index.json", {
+            "schemaVersion": 1,
+            "classes": [{"fqcn": sut, "type": "service", "testabilityRisk": "low"}],
+        })
+
+        result = plan(state, batch_size=10)
+        item = result["items"][0]
+        if item["method"] != "getCurrentStatus()":
+            raise AssertionError(f"parent method was not inferred from lambda: {item}")
+        if item["targetId"] != "lambda-only":
+            raise AssertionError(f"synthetic target id should be retained for processing: {item}")
+        if not item.get("context", {}).get("syntheticParentFallback"):
+            raise AssertionError(f"missing fallback context: {item}")
+
+
 # ── M2a: unused-import pruning ────────────────────────────────────────────────
 
 def case_prune_removes_unused_keeps_used_and_wildcard() -> None:
@@ -224,6 +294,8 @@ def main() -> int:
     cases = [
         ("planner-drops-generated-targets",        case_planner_drops_generated_targets),
         ("planner-keeps-without-classification",    case_planner_keeps_targets_without_classification),
+        ("planner-collapses-lambda-targets",        case_planner_collapses_lambda_targets_to_parent_method),
+        ("planner-infers-parent-for-lambda-only",   case_planner_infers_parent_when_only_lambda_target_exists),
         ("prune-unused-keeps-used-and-wildcard",    case_prune_removes_unused_keeps_used_and_wildcard),
         ("prune-ignores-comment-and-string-usage",  case_prune_ignores_comment_and_string_usage),
         ("getter-keeps-scaffold-prunes-extras",     case_getter_keeps_scaffold_prunes_extras),

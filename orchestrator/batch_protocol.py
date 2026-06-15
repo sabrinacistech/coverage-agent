@@ -51,6 +51,21 @@ REPAIRABLE_STATES = frozenset({COMPILE_FAILED, TEST_FAILED, PATCH_FAILED})
 # Item-level statuses inside the LLM responses.
 _GEN_ITEM_STATUSES = frozenset({"generated", "skipped", "failed"})
 _REPAIR_ITEM_STATUSES = frozenset({"repaired", "skipped", "abandoned", "failed"})
+_PATCH_DESCRIPTOR_REQUIRED = frozenset({
+    "schemaVersion",
+    "patchId",
+    "sut",
+    "testClass",
+    "methods",
+})
+_FULL_FILE_PATCH_KEYS = frozenset({
+    "operation",
+    "targetFile",
+    "language",
+    "content",
+    "coveredMethod",
+    "testMethods",
+})
 
 # ── Generation / repair rules shipped to Claude Code in every request ──────────
 # The QUALITY_GATE_RULES mirror the deterministic G6 linter (tools/python/
@@ -96,6 +111,15 @@ GENERATION_RULES = [
     "tests, the symbol contract, execution feedback, or explicit evidence.",
     "Prefer small deterministic unit tests; mock external dependencies.",
     "Avoid starting a full Spring context unless strictly necessary.",
+    "Use the canonical test class exactly: patchDescriptor.testClass MUST equal "
+    "target.canonicalTestClass. Do not create suffix variants such as *CtorTest, "
+    "*ConstructorTest, *GeneratedTest, or *UnitTest.",
+    "If a target includes context.syntheticCoverageTargets, DO NOT skip it as a "
+    "lambda. Generate tests for the listed real parent method and cover the "
+    "internal lambda branch behaviour through that parent method. Prefer at "
+    "least one success-path test and one missing/fallback/exception-path test "
+    "when the parent method branches through Optional.orElse*, suppliers, or "
+    "similar deferred lambdas.",
     "Escape Java string literals correctly: \\n \\r \\t \\\\ \\\" — never a raw "
     "newline/tab inside a normal String literal. If you need a control character "
     "in test input, prefer building it explicitly (e.g. \"a\" + (char) 10 + \"b\").",
@@ -110,6 +134,9 @@ REPAIR_RULES = [
     "Prefer minimal changes.",
     "If an expected value is wrong, infer it from the source behaviour.",
     "If a Java string literal is invalid, escape it (\\n \\r \\t \\\\ \\\").",
+    "Use the canonical test class exactly: patchDescriptor.testClass MUST equal "
+    "failedItem.canonicalTestClass. Do not keep or create suffix variants such "
+    "as *CtorTest, *ConstructorTest, *GeneratedTest, or *UnitTest.",
     *QUALITY_GATE_RULES,
 ]
 
@@ -139,6 +166,11 @@ def _suggested_test_file(sut: str) -> str:
     return "src/test/java/" + sut.replace(".", "/") + "Test.java"
 
 
+def _suggested_test_class(sut: str) -> str:
+    """Conventional test FQCN for a SUT FQCN (<pkg>.<Name>Test)."""
+    return f"{sut}Test" if sut else ""
+
+
 def _production_file(sut: str) -> str:
     return "src/main/java/" + sut.replace(".", "/") + ".java"
 
@@ -165,6 +197,7 @@ def build_generation_request(
             "sut": sut,
             "method": item.get("method", ""),
             "productionFile": _production_file(sut) if sut else "",
+            "canonicalTestClass": _suggested_test_class(sut),
             "suggestedTestFile": _suggested_test_file(sut) if sut else "",
             "template": item.get("template"),
             "priority": item.get("score", i),
@@ -180,6 +213,13 @@ def build_generation_request(
         "batchSize": batch_size,
         "targets": out_targets,
         "rules": list(GENERATION_RULES),
+        "testClassPolicy": {
+            "canonical": "Use target.canonicalTestClass exactly for patchDescriptor.testClass.",
+            "forbidden": [
+                "Do not create suffix variants such as *CtorTest, *ConstructorTest, *GeneratedTest, or *UnitTest.",
+                "Do not derive testClass from the target method name.",
+            ],
+        },
         "expectedResponse": {
             "schemaVersion": SCHEMA_GENERATION_RESPONSE,
             "runId": run_id,
@@ -200,6 +240,112 @@ class BatchResponseError(ValueError):
     """The batch response does not satisfy the minimal protocol contract."""
 
 
+def _validate_patch_descriptor(
+    patch: Any,
+    *,
+    target_id: str,
+    expected_prefix: str,
+    expected_sut: str | None = None,
+    expected_test_class: str | None = None,
+) -> None:
+    """Validate the canonical patch-descriptor shape before the patcher runs.
+
+    This intentionally mirrors the stable, handoff-facing contract instead of
+    importing the side-effecting patcher. The goal is to reject common LLM drift
+    (full-file patches with operation/targetFile/content) at response validation
+    time, with a message the user can hand back to the generator.
+    """
+    if not isinstance(patch, dict) or not patch:
+        raise BatchResponseError(f"{target_id!r} has an empty or non-object patchDescriptor")
+
+    full_file_keys = sorted(k for k in _FULL_FILE_PATCH_KEYS if k in patch)
+    if full_file_keys:
+        raise BatchResponseError(
+            f"{target_id!r} patchDescriptor uses full-file patch keys {full_file_keys}; "
+            "expected canonical patch-descriptor keys "
+            "schemaVersion, patchId, sut, testClass, methods"
+        )
+
+    missing = sorted(_PATCH_DESCRIPTOR_REQUIRED - patch.keys())
+    if missing:
+        raise BatchResponseError(
+            f"{target_id!r} patchDescriptor missing required keys: {missing}"
+        )
+
+    if patch.get("schemaVersion") != 1:
+        raise BatchResponseError(
+            f"{target_id!r} patchDescriptor.schemaVersion must be 1, "
+            f"got {patch.get('schemaVersion')!r}"
+        )
+
+    patch_id = patch.get("patchId")
+    if not isinstance(patch_id, str) or not patch_id.startswith(expected_prefix):
+        raise BatchResponseError(
+            f"{target_id!r} patchDescriptor.patchId must start with "
+            f"{expected_prefix!r}, got {patch_id!r}"
+        )
+
+    sut = patch.get("sut")
+    if isinstance(sut, dict):
+        sut_ok = bool(sut.get("fqcn"))
+    else:
+        sut_ok = isinstance(sut, str) and bool(sut.strip())
+    if not sut_ok:
+        raise BatchResponseError(
+            f"{target_id!r} patchDescriptor.sut must be a non-empty FQCN "
+            "string or {fqcn: ...}"
+        )
+    patch_sut = sut.get("fqcn") if isinstance(sut, dict) else sut.strip()
+    if expected_sut and patch_sut != expected_sut:
+        raise BatchResponseError(
+            f"{target_id!r} patchDescriptor.sut must be {expected_sut!r}, "
+            f"got {patch_sut!r}"
+        )
+
+    test_class = patch.get("testClass")
+    if not isinstance(test_class, str) or not test_class.strip():
+        raise BatchResponseError(
+            f"{target_id!r} patchDescriptor.testClass must be a non-empty string"
+        )
+    if expected_test_class and test_class.strip() != expected_test_class:
+        raise BatchResponseError(
+            f"{target_id!r} patchDescriptor.testClass must be canonical "
+            f"{expected_test_class!r}, got {test_class!r}. Do not create "
+            "suffix variants such as *CtorTest."
+        )
+
+    methods = patch.get("methods")
+    if not isinstance(methods, list) or not methods:
+        raise BatchResponseError(
+            f"{target_id!r} patchDescriptor.methods must be a non-empty list"
+        )
+
+    for idx, method in enumerate(methods):
+        if not isinstance(method, dict):
+            raise BatchResponseError(
+                f"{target_id!r} patchDescriptor.methods[{idx}] must be an object"
+            )
+        for key in ("name", "body", "evidenceIds"):
+            if key not in method:
+                raise BatchResponseError(
+                    f"{target_id!r} patchDescriptor.methods[{idx}] missing {key!r}"
+                )
+        if not isinstance(method.get("name"), str) or not method["name"].strip():
+            raise BatchResponseError(
+                f"{target_id!r} patchDescriptor.methods[{idx}].name must be a non-empty string"
+            )
+        if not isinstance(method.get("body"), str):
+            raise BatchResponseError(
+                f"{target_id!r} patchDescriptor.methods[{idx}].body must be a string"
+            )
+        evidence_ids = method.get("evidenceIds")
+        if not isinstance(evidence_ids, list) or not evidence_ids:
+            raise BatchResponseError(
+                f"{target_id!r} patchDescriptor.methods[{idx}].evidenceIds "
+                "must be a non-empty list"
+            )
+
+
 def validate_generation_response(resp: dict, batch_targets: list[dict], *, batch_id: str) -> list[dict]:
     """Validate a generation response against the batch it answers.
 
@@ -208,7 +354,7 @@ def validate_generation_response(resp: dict, batch_targets: list[dict], *, batch
       * ``items`` is a list,
       * every item names a target that belongs to THIS batch (unknown ⇒ reject),
       * each item.status ∈ {generated, skipped, failed},
-      * a ``generated`` item carries a non-empty patchDescriptor.
+      * a ``generated`` item carries a canonical patchDescriptor.
 
     A per-item ``skipped``/``failed`` is VALID — it must not fail the batch; the
     caller maps it to SKIPPED / GENERATION_FAILED. Returns the validated items.
@@ -226,7 +372,8 @@ def validate_generation_response(resp: dict, batch_targets: list[dict], *, batch
     if not isinstance(items, list):
         raise BatchResponseError("items must be a list")
 
-    known = {t.get("targetId") for t in batch_targets}
+    target_by_id = {t.get("targetId"): t for t in batch_targets}
+    known = set(target_by_id)
     for it in items:
         if not isinstance(it, dict):
             raise BatchResponseError("each item must be an object")
@@ -236,8 +383,16 @@ def validate_generation_response(resp: dict, batch_targets: list[dict], *, batch
         status = it.get("status")
         if status not in _GEN_ITEM_STATUSES:
             raise BatchResponseError(f"invalid item status {status!r} for {tid!r}")
-        if status == "generated" and not it.get("patchDescriptor"):
-            raise BatchResponseError(f"'generated' item {tid!r} lacks a patchDescriptor")
+        if status == "generated":
+            target = target_by_id.get(tid, {})
+            sut = target.get("sut") or None
+            _validate_patch_descriptor(
+                it.get("patchDescriptor"),
+                target_id=tid,
+                expected_prefix="patch:",
+                expected_sut=sut,
+                expected_test_class=_suggested_test_class(sut) if sut else None,
+            )
     return items
 
 
@@ -263,6 +418,13 @@ def build_repair_request(
         "repairRound": repair_round,
         "failedItems": list(failed_items),
         "rules": list(REPAIR_RULES),
+        "testClassPolicy": {
+            "canonical": "Use failedItem.canonicalTestClass exactly for patchDescriptor.testClass.",
+            "forbidden": [
+                "Do not keep previously rejected suffix variants such as *CtorTest.",
+                "Do not create *ConstructorTest, *GeneratedTest, or *UnitTest variants.",
+            ],
+        },
         "expectedResponse": {
             "schemaVersion": SCHEMA_REPAIR_RESPONSE,
             "runId": run_id,
@@ -278,7 +440,14 @@ def build_repair_request(
     }
 
 
-def validate_repair_response(resp: dict, requested_ids: set[str], *, batch_id: str, repair_round: int) -> list[dict]:
+def validate_repair_response(
+    resp: dict,
+    requested_ids: set[str],
+    *,
+    batch_id: str,
+    repair_round: int,
+    requested_items: list[dict] | None = None,
+) -> list[dict]:
     """Validate a repair response. Same contract as generation, with repair statuses."""
     if not isinstance(resp, dict):
         raise BatchResponseError("response is not a JSON object")
@@ -292,6 +461,7 @@ def validate_repair_response(resp: dict, requested_ids: set[str], *, batch_id: s
     items = resp.get("items")
     if not isinstance(items, list):
         raise BatchResponseError("items must be a list")
+    requested_by_id = {i.get("targetId"): i for i in (requested_items or [])}
     for it in items:
         if not isinstance(it, dict):
             raise BatchResponseError("each item must be an object")
@@ -301,8 +471,15 @@ def validate_repair_response(resp: dict, requested_ids: set[str], *, batch_id: s
         status = it.get("status")
         if status not in _REPAIR_ITEM_STATUSES:
             raise BatchResponseError(f"invalid repair status {status!r} for {tid!r}")
-        if status == "repaired" and not it.get("patchDescriptor"):
-            raise BatchResponseError(f"'repaired' item {tid!r} lacks a patchDescriptor")
+        if status == "repaired":
+            requested = requested_by_id.get(tid, {})
+            _validate_patch_descriptor(
+                it.get("patchDescriptor"),
+                target_id=tid,
+                expected_prefix="repair:",
+                expected_sut=requested.get("sut") or None,
+                expected_test_class=requested.get("canonicalTestClass") or None,
+            )
     return items
 
 

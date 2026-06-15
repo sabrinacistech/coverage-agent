@@ -72,6 +72,10 @@
             ],
             "description": "Recommended test template path"
           },
+          "context": {
+            "type": "object",
+            "description": "Planner hints for generation, such as synthetic lambda coverage folded into a parent method"
+          },
           "generatedAt": {
             "type": "string"
           }

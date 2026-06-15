@@ -36,11 +36,13 @@ FAILURES: list[str] = []
 _ORIG = {n: getattr(br, n) for n in
          ("_apply_patch", "_run_tests", "_surefire_status", "_wait_for_response",
           "_wait_polling", "_wait_interactive")}
+_ORIG_RUN_TOOL = br.one_cycle._run_tool
 
 
 def _restore() -> None:
     for n, fn in _ORIG.items():
         setattr(br, n, fn)
+    br.one_cycle._run_tool = _ORIG_RUN_TOOL
 
 
 def _assert(label: str, cond: bool, detail: str = "") -> None:
@@ -63,14 +65,31 @@ def _setup(td: Path, n: int = 3) -> Path:
     return state
 
 
+def _patch(sut: str, *, prefix: str = "patch") -> dict:
+    return {
+        "schemaVersion": 1,
+        "patchId": f"{prefix}:abcdef",
+        "cycle": 1,
+        "sut": sut,
+        "testClass": sut + "Test",
+        "testPackage": sut.rsplit(".", 1)[0],
+        "template": "junit5-mockito",
+        "allowedImports": ["org.junit.jupiter.api.Test"],
+        "methods": [{
+            "name": "m_whenCondition_returnsExpected",
+            "annotations": ["@Test"],
+            "body": "// given\nObject value = new Object();\n// when\nObject actual = value;\n// then\norg.junit.jupiter.api.Assertions.assertSame(value, actual);",
+            "evidenceIds": ["sym:com.acme.C0#m:12345678"],
+        }],
+    }
+
+
 def _gen_resp(batch_id: str, statuses: dict[str, str]) -> dict:
     items = []
     for tid, st in statuses.items():
         it = {"targetId": tid, "status": st}
         if st == "generated":
-            it["patchDescriptor"] = {"schemaVersion": 1, "patchId": "patch:abcdef",
-                                     "sut": tid.split("#")[0],
-                                     "testClass": tid.split("#")[0] + "Test"}
+            it["patchDescriptor"] = _patch(tid.split("#")[0], prefix="patch")
         else:
             it["reason"] = "stub"
         items.append(it)
@@ -83,9 +102,7 @@ def _repair_resp(batch_id: str, rnd: int, statuses: dict[str, str]) -> dict:
     for tid, st in statuses.items():
         it = {"targetId": tid, "status": st}
         if st == "repaired":
-            it["patchDescriptor"] = {"schemaVersion": 1, "patchId": "repair:abcdef",
-                                     "sut": tid.split("#")[0],
-                                     "testClass": tid.split("#")[0] + "Test"}
+            it["patchDescriptor"] = _patch(tid.split("#")[0], prefix="repair")
         else:
             it["reason"] = "stub"
         items.append(it)
@@ -96,6 +113,7 @@ def _repair_resp(batch_id: str, rnd: int, statuses: dict[str, str]) -> dict:
 def _install_stubs(monkey_state: dict) -> None:
     """Patch the side-effecting edges. monkey_state carries the canned scripts."""
     br._apply_patch = lambda patch, *, state_dir, repo, repair_attempts=None: 0  # type: ignore
+    br.one_cycle._run_tool = lambda script, args: 0  # type: ignore
     gen_q = monkey_state["gen_responses"]
     rep_q = monkey_state["repair_responses"]
     run_q = monkey_state["test_rcs"]
@@ -203,6 +221,33 @@ def case_skipped_not_fatal() -> None:
 
 # ── budget paused during handoff (no exceed while waiting) ───────────────────
 
+def case_repair_payload_uses_canonical_test_class() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        state = _setup(root, 1)
+        repo = root / "repo"
+        repo.mkdir()
+        manifest = bp.new_manifest("run-1", str(repo), generation_mode="handoff-batch",
+                                   batch_size=10, max_repair_rounds=2)
+        tid = "com.acme.C0#m"
+        bp.ensure_target(manifest, tid, sut="com.acme.C0", batch_id="batch-001")
+        bp.set_status(manifest, tid, bp.PATCH_FAILED, testClass="com.acme.C0CtorTest")
+        payload = br._failed_items_for_repair(
+            manifest,
+            state_dir=state,
+            repo=repo,
+            batch_ids=[tid],
+            applied={},
+        )
+        item = payload[0]
+        _assert("repair payload canonical testClass",
+                item["testClass"] == "com.acme.C0Test", str(item))
+        _assert("repair payload records rejected testClass",
+                item["rejectedTestClass"] == "com.acme.C0CtorTest", str(item))
+        _assert("repair payload canonicalTestClass",
+                item["canonicalTestClass"] == "com.acme.C0Test", str(item))
+
+
 def case_budget_paused_during_handoff() -> None:
     with tempfile.TemporaryDirectory() as td:
         state = _setup(Path(td), 1)
@@ -220,6 +265,7 @@ def case_budget_paused_during_handoff() -> None:
         try:
             br._apply_patch = lambda patch, *, state_dir, repo, repair_attempts=None: 0  # type: ignore
             br._run_tests = lambda repo, state_dir, tcs: 0  # type: ignore
+            br.one_cycle._run_tool = lambda script, args: 0  # type: ignore
             br._wait_polling = fake_poll  # type: ignore
             br.run_batches(state, Path(td), batch_size=10, max_repair_rounds=0, max_batches=None)
         finally:
@@ -232,7 +278,8 @@ def case_budget_paused_during_handoff() -> None:
 def main() -> int:
     cases = [
         case_all_pass, case_repaired_round1, case_abandoned_after_rounds,
-        case_skipped_not_fatal, case_budget_paused_during_handoff,
+        case_skipped_not_fatal, case_repair_payload_uses_canonical_test_class,
+        case_budget_paused_during_handoff,
     ]
     for c in cases:
         _restore()  # each case installs its own stubs over the real edges

@@ -93,6 +93,10 @@ Mientras espera, el budget está PAUSADO (no dispara BUDGET_EXCEEDED).
      `patch-descriptor.schema.json`), o
    - `status: "skipped"` + `reason` (p.ej. requiere un servicio externo), o
    - `status: "failed"` + `reason`.
+   AdemÃ¡s, el `patchDescriptor.testClass` debe coincidir exactamente con
+   `target.canonicalTestClass`. El runner rechaza variantes inventadas como
+   `*CtorTest`, `*ConstructorTest`, `*GeneratedTest` o `*UnitTest` antes de llegar
+   al patcher, para evitar `G6_LINTER_FAIL` por clases de test no canÃ³nicas.
 2. Volvé a la consola y presioná **ENTER**. El runner valida el JSON, **aplica
    cada patch** (gates G1–G8 + presupuesto + seguridad de literales Java, por
    construcción), **corre los tests** y clasifica cada target en PASSED /
@@ -110,8 +114,18 @@ Mientras espera, el budget está PAUSADO (no dispara BUDGET_EXCEEDED).
 
    Claude Code escribe `response-repair-r1.json` (`repaired` + `patchDescriptor`,
    o `abandoned`/`skipped`/`failed`). El runner re-aplica y re-testea.
+   En repair aplica la misma regla: `patchDescriptor.testClass` debe ser
+   `failedItem.canonicalTestClass`. Si el intento anterior usÃ³ una variante
+   rechazada, queda informada como `failedItem.rejectedTestClass`, pero no debe
+   reutilizarse.
 4. Un target que sigue fallando tras `--max-repair-rounds` se marca **ABANDONED** y
    el run continúa.
+
+5. Cuando ya no quedan targets pendientes y el manifest termina en `DONE`, el
+   runner ejecuta el post-stage deterministico `batch_final_report.py`: vuelve a
+   correr Maven + JaCoCo, calcula `coverage-delta.json` contra
+   `state/jacoco-baseline.xml` y escribe `_summaries/batch-final-report.md` +
+   `_summaries/batch-final-report.json`.
 
 ### Reglas de avance entre batches
 

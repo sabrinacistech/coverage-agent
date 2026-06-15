@@ -428,6 +428,7 @@ def main() -> int:
             "--repo", str(repo),
             "--batch-size", str(args.batch_size),
             "--max-repair-rounds", str(args.max_repair_rounds),
+            "--module", args.module,
         ]
         if args.max_batches is not None:
             batch_cmd += ["--max-batches", str(args.max_batches)]

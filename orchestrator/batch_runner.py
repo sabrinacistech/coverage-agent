@@ -259,6 +259,10 @@ def bp_patch_sut(patch: dict) -> str:
     return sut
 
 
+def _canonical_test_class(sut: str) -> str:
+    return f"{sut}Test" if sut else ""
+
+
 def _run_tests(repo: Path, state_dir: Path, test_classes: list[str]) -> int:
     """Run all applied test classes in ONE narrow invocation (M5 batching).
     Returns the runner's exit code; 0 = every class passed. -1 if Maven absent."""
@@ -328,7 +332,10 @@ def _failed_items_for_repair(manifest: dict, *, state_dir: Path, repo: Path,
             build_output = ""
     for tid in bp.failing_target_ids(manifest, batch_ids):
         rec = manifest["targets"].get(tid, {})
-        test_class = applied.get(tid, rec.get("testClass", ""))
+        sut = rec.get("sut", "")
+        rejected_test_class = applied.get(tid, rec.get("testClass", ""))
+        canonical_test_class = _canonical_test_class(sut)
+        test_class = canonical_test_class or rejected_test_class
         test_file = "src/test/java/" + test_class.replace(".", "/") + ".java" if test_class else ""
         current_src = ""
         if test_file:
@@ -342,6 +349,17 @@ def _failed_items_for_repair(manifest: dict, *, state_dir: Path, repo: Path,
         items.append({
             "targetId": tid,
             "failureKind": kind,
+            "sut": sut,
+            "canonicalTestClass": canonical_test_class,
+            "canonicalTestFile": (
+                "src/test/java/" + canonical_test_class.replace(".", "/") + ".java"
+                if canonical_test_class else ""
+            ),
+            "rejectedTestClass": (
+                rejected_test_class
+                if rejected_test_class and rejected_test_class != canonical_test_class
+                else ""
+            ),
             "testClass": test_class,
             "testFile": test_file,
             "errorSummary": rec.get("note", kind),
@@ -424,6 +442,7 @@ def _process_repair(
 def run_batches(
     state_dir: Path, repo: Path, *,
     batch_size: int, max_repair_rounds: int, max_batches: int | None,
+    module: str = ".",
 ) -> int:
     state_dir = state_dir.resolve()
     repo = repo.resolve()
@@ -562,7 +581,12 @@ def run_batches(
                 break
             try:
                 ritems = bp.validate_repair_response(
-                    rresp, set(failing), batch_id=batch_id, repair_round=rnd)
+                    rresp,
+                    set(failing),
+                    batch_id=batch_id,
+                    repair_round=rnd,
+                    requested_items=failed_payload,
+                )
             except bp.BatchResponseError as exc:
                 _print(f"[batch] response-repair-r{rnd} inválida: {exc}; corto repair.")
                 break
@@ -608,6 +632,17 @@ def run_batches(
     if manifest.get("status") == "RUNNING":
         manifest["status"] = "DONE"
     _save_manifest(run_dir, manifest)
+    if manifest.get("status") == "DONE" and final_rc == RC_DONE:
+        _print("[batch] generando reporte final con JaCoCo...")
+        rc_report = one_cycle._run_tool("batch_final_report.py", [
+            "--state-dir", str(state_dir),
+            "--repo", str(repo),
+            "--run-dir", str(run_dir),
+            "--module", module,
+        ])
+        if rc_report != 0:
+            _print(f"[batch] reporte final no pudo completarse (rc={rc_report}); "
+                   "el manifest queda disponible.")
     _print(f"[batch] manifest: {_manifest_path(run_dir)}")
     _print(f"[batch] totals: {json.dumps(manifest['totals'], ensure_ascii=False)}")
     return final_rc
@@ -623,13 +658,17 @@ def main(argv: list[str] | None = None) -> int:
                     help="Rondas de reparación por batch (default: config / 2).")
     ap.add_argument("--max-batches", type=int, default=None,
                     help="Tope de batches por corrida (calibración). Default: sin tope.")
+    ap.add_argument("--module", default=".",
+                    help="Maven module for the final JaCoCo report (default '.').")
     args = ap.parse_args(argv)
 
     batch_size = args.batch_size if args.batch_size is not None else config.batch_size()
     max_repair_rounds = (args.max_repair_rounds if args.max_repair_rounds is not None
                          else config.max_repair_rounds())
     return run_batches(args.state_dir, args.repo, batch_size=batch_size,
-                       max_repair_rounds=max_repair_rounds, max_batches=args.max_batches)
+                       max_repair_rounds=max_repair_rounds,
+                       max_batches=args.max_batches,
+                       module=args.module)
 
 
 if __name__ == "__main__":

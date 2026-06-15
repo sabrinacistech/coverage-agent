@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "architecture/dependency-map.schema.json",
+  "type": "object",
+  "required": ["schemaVersion", "edges", "edge_count"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "edge_count": { "type": "integer", "minimum": 0 },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source", "target_import"],
+        "properties": {
+          "source": { "type": "string" },
+          "target_import": { "type": "string" }
+        }
+      }
+    }
+  }
+}

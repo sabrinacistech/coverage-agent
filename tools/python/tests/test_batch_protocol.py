@@ -39,6 +39,25 @@ def _plan(n: int) -> list[dict]:
 
 # ── select_batch ────────────────────────────────────────────────────────────────
 
+def _patch(sut: str, *, prefix: str = "patch") -> dict:
+    return {
+        "schemaVersion": 1,
+        "patchId": f"{prefix}:abcdef",
+        "cycle": 1,
+        "sut": sut,
+        "testClass": f"{sut}Test",
+        "testPackage": sut.rsplit(".", 1)[0],
+        "template": "junit5-mockito",
+        "allowedImports": ["org.junit.jupiter.api.Test"],
+        "methods": [{
+            "name": "m_whenCondition_returnsExpected",
+            "annotations": ["@Test"],
+            "body": "// given\nObject value = new Object();\n// when\nObject actual = value;\n// then\norg.junit.jupiter.api.Assertions.assertSame(value, actual);",
+            "evidenceIds": ["sym:com.acme.C0#m:12345678"],
+        }],
+    }
+
+
 def case_select_caps_at_batch_size() -> None:
     got = bp.select_batch(_plan(25), set(), 10)
     _assert("select caps at batch_size", len(got) == 10, f"len={len(got)}")
@@ -62,6 +81,7 @@ def case_request_has_at_most_batch_size_targets() -> None:
     t0 = req["targets"][0]
     _assert("target has productionFile", t0["productionFile"].startswith("src/main/java/"))
     _assert("target has suggestedTestFile", t0["suggestedTestFile"].endswith("Test.java"))
+    _assert("target has canonicalTestClass", t0["canonicalTestClass"] == "com.acme.C0Test")
     _assert("request ships rules", isinstance(req["rules"], list) and len(req["rules"]) >= 5)
 
 
@@ -74,8 +94,7 @@ def case_response_skipped_item_does_not_break_batch() -> None:
         "batchId": "batch-001", "role": "generation",
         "items": [
             {"targetId": "com.acme.C0#m", "status": "generated",
-             "patchDescriptor": {"schemaVersion": 1, "patchId": "patch:abcdef",
-                                 "sut": "com.acme.C0", "testClass": "com.acme.C0Test"}},
+             "patchDescriptor": _patch("com.acme.C0")},
             {"targetId": "com.acme.C1#m", "status": "skipped",
              "reason": "requires external service"},
         ],
@@ -116,6 +135,101 @@ def case_response_generated_without_patch_rejected() -> None:
 
 
 # ── manifest + state machine ─────────────────────────────────────────────────────
+
+def case_response_full_file_patch_rejected_before_patcher() -> None:
+    targets = bp.select_batch(_plan(1), set(), 10)
+    resp = {
+        "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
+        "batchId": "batch-001", "role": "generation",
+        "items": [{
+            "targetId": "com.acme.C0#m",
+            "status": "generated",
+            "patchDescriptor": {
+                "operation": "create",
+                "targetFile": "src/test/java/com/acme/C0Test.java",
+                "language": "java",
+                "content": "class C0Test {}",
+            },
+        }],
+    }
+    try:
+        bp.validate_generation_response(resp, targets, batch_id="batch-001")
+        _assert("full-file patch rejected before patcher", False, "did not raise")
+    except bp.BatchResponseError as exc:
+        _assert("full-file patch rejected before patcher", "full-file patch keys" in str(exc), str(exc))
+
+
+def case_response_patch_missing_methods_rejected() -> None:
+    targets = bp.select_batch(_plan(1), set(), 10)
+    bad_patch = _patch("com.acme.C0")
+    bad_patch.pop("methods")
+    resp = {
+        "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
+        "batchId": "batch-001", "role": "generation",
+        "items": [{"targetId": "com.acme.C0#m", "status": "generated",
+                   "patchDescriptor": bad_patch}],
+    }
+    try:
+        bp.validate_generation_response(resp, targets, batch_id="batch-001")
+        _assert("patch missing methods rejected", False, "did not raise")
+    except bp.BatchResponseError as exc:
+        _assert("patch missing methods rejected", "missing required keys" in str(exc), str(exc))
+
+
+def case_response_noncanonical_test_class_rejected() -> None:
+    targets = bp.select_batch(_plan(1), set(), 10)
+    bad_patch = _patch("com.acme.C0")
+    bad_patch["testClass"] = "com.acme.C0CtorTest"
+    resp = {
+        "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
+        "batchId": "batch-001", "role": "generation",
+        "items": [{"targetId": "com.acme.C0#m", "status": "generated",
+                   "patchDescriptor": bad_patch}],
+    }
+    try:
+        bp.validate_generation_response(resp, targets, batch_id="batch-001")
+        _assert("noncanonical generation testClass rejected", False, "did not raise")
+    except bp.BatchResponseError as exc:
+        _assert("noncanonical generation testClass rejected", "must be canonical" in str(exc), str(exc))
+
+
+def case_repair_patch_must_use_repair_prefix() -> None:
+    resp = {
+        "schemaVersion": bp.SCHEMA_REPAIR_RESPONSE, "runId": "run-1",
+        "batchId": "batch-001", "role": "repair", "repairRound": 1,
+        "items": [{"targetId": "com.acme.C0#m", "status": "repaired",
+                   "patchDescriptor": _patch("com.acme.C0", prefix="patch")}],
+    }
+    try:
+        bp.validate_repair_response(resp, {"com.acme.C0#m"}, batch_id="batch-001", repair_round=1)
+        _assert("repair patch must use repair prefix", False, "did not raise")
+    except bp.BatchResponseError as exc:
+        _assert("repair patch must use repair prefix", "must start with 'repair:'" in str(exc), str(exc))
+
+
+def case_repair_noncanonical_test_class_rejected() -> None:
+    patch = _patch("com.acme.C0", prefix="repair")
+    patch["testClass"] = "com.acme.C0CtorTest"
+    resp = {
+        "schemaVersion": bp.SCHEMA_REPAIR_RESPONSE, "runId": "run-1",
+        "batchId": "batch-001", "role": "repair", "repairRound": 1,
+        "items": [{"targetId": "com.acme.C0#m", "status": "repaired",
+                   "patchDescriptor": patch}],
+    }
+    requested = [{"targetId": "com.acme.C0#m", "sut": "com.acme.C0",
+                  "canonicalTestClass": "com.acme.C0Test"}]
+    try:
+        bp.validate_repair_response(
+            resp,
+            {"com.acme.C0#m"},
+            batch_id="batch-001",
+            repair_round=1,
+            requested_items=requested,
+        )
+        _assert("noncanonical repair testClass rejected", False, "did not raise")
+    except bp.BatchResponseError as exc:
+        _assert("noncanonical repair testClass rejected", "must be canonical" in str(exc), str(exc))
+
 
 def case_state_transitions_update_totals() -> None:
     m = bp.new_manifest("run-1", "/repo", generation_mode="handoff-batch",

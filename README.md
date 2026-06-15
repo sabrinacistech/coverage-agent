@@ -71,6 +71,255 @@ La corrida tiene **dos partes bien separadas**:
    y `repair` consumiendo los artefactos que dejó la parte 1 (ver
    [§Ejecución desde VS Code + Copilot](#ejecución-desde-vs-code--copilot-paso-a-paso)).
 
+## Quickstart: prueba desde cero con generación batch
+
+Este es el flujo recomendado para probar el agente desde cero contra un repo Java
+local. Ejemplo real usando Git Bash:
+
+```bash
+cd /c/repoVC/coverage-agent
+```
+
+### 1. Fase determinística limpia
+
+Esto borra y reconstruye el `state-dir`, genera JaCoCo, contracts, context packs,
+`batch-plan.json` y el reporte consolidado. No usa LLM.
+
+```bash
+python tools/python/run_all_deterministic.py \
+  --repo /c/repoVC/multi-clusters/cluster-status-service \
+  --state-dir /c/repoVC/coverage_cluster-status-service \
+  --module . \
+  --clean
+```
+
+Salidas principales:
+
+```text
+/c/repoVC/coverage_cluster-status-service/_summaries/analysis-report.md
+/c/repoVC/coverage_cluster-status-service/batch-plan.json
+/c/repoVC/coverage_cluster-status-service/context-packs-compact/
+```
+
+Verificá antes de seguir:
+
+```bash
+cat /c/repoVC/coverage_cluster-status-service/_summaries/analysis-report.md
+cat /c/repoVC/coverage_cluster-status-service/batch-plan.json
+```
+
+### 2. Primer batch de generación
+
+Para calibrar, arrancá con un batch chico y un solo batch:
+
+```bash
+python tools/python/run_all_deterministic.py \
+  --repo /c/repoVC/multi-clusters/cluster-status-service \
+  --state-dir /c/repoVC/coverage_cluster-status-service \
+  --module . \
+  --skip-jacoco \
+  --start-cycle-loop \
+  --generation-mode handoff-batch \
+  --batch-size 3 \
+  --max-batches 1 \
+  --max-repair-rounds 2
+```
+
+El runner va a imprimir algo como:
+
+```text
+[HANDOFF-BATCH] Falta generar tests para batch batch-001.
+Claude Code debe leer:
+  C:\repoVC\coverage_cluster-status-service\_llm\runs\run-YYYYMMDD-HHMMSS\batches\batch-001\request-generation.json
+y escribir:
+  C:\repoVC\coverage_cluster-status-service\_llm\runs\run-YYYYMMDD-HHMMSS\batches\batch-001\response-generation.json
+```
+
+### 3. Prompt correcto para Claude Code / Codex
+
+Pegá este prompt en el agente que va a resolver el handoff, reemplazando las rutas
+por las que imprimió tu consola:
+
+```text
+Resolvé el handoff batch de coverage-agent.
+
+Leé este request:
+C:\repoVC\coverage_cluster-status-service\_llm\runs\run-YYYYMMDD-HHMMSS\batches\batch-001\request-generation.json
+
+Escribí la respuesta aquí:
+C:\repoVC\coverage_cluster-status-service\_llm\runs\run-YYYYMMDD-HHMMSS\batches\batch-001\response-generation.json
+
+Reglas:
+- La respuesta debe ser SOLO JSON válido.
+- Debe tener schemaVersion "test-generation-batch-response-v1".
+- Debe incluir un item por cada target del request.
+- Para cada target usar:
+  - status "generated" con patchDescriptor válido, o
+  - status "skipped" con reason claro, o
+  - status "failed" con reason claro.
+- No modificar código productivo.
+- No inventar imports, métodos, constructores ni clases.
+- Respetar allowed imports, evidenceIds, context packs y reglas del request.
+- Cada método @Test debe tener // given, // when, // then.
+
+Regla importante para lambdas sintéticas:
+- Si el target trae context.syntheticCoverageTargets, NO lo saltees por ser lambda.
+- Generá tests para el método padre real indicado en target.method.
+- Cubrí la rama interna de la lambda a través del método padre.
+- Para Optional.orElseThrow/orElseGet o suppliers similares, preferí al menos:
+  1) un test de camino feliz;
+  2) un test de fallback/excepción.
+
+Ejemplo esperado para ClusterQueries.requireConfiguredCluster:
+- repository.findByAlias(alias) devuelve Optional.of(cluster) => retorna el cluster.
+- repository.findByAlias(alias) devuelve Optional.empty() => lanza ClusterNotFoundException.
+
+Contrato obligatorio de patchDescriptor:
+- patchDescriptor NO es un archivo completo. No uses operation, targetFile,
+  language, content, coveredMethod ni testMethods.
+- patchDescriptor debe usar el contrato canonico:
+  schemaVersion, patchId, cycle, sut, testClass, testPackage, template,
+  allowedImports, methods.
+- patchDescriptor.testClass debe ser EXACTAMENTE target.canonicalTestClass.
+- No inventes variantes como *CtorTest, *ConstructorTest, *GeneratedTest o
+  *UnitTest.
+- patchId debe empezar con "patch:".
+- methods debe ser una lista no vacia. Cada metodo debe tener:
+  name, annotations, body, evidenceIds.
+- El body de cada metodo contiene SOLO el cuerpo del metodo Java, no la clase
+  completa, no package, no imports.
+
+Ejemplo minimo de shape, adaptando valores y evidenceIds al request real:
+
+{
+  "schemaVersion": "test-generation-batch-response-v1",
+  "runId": "run-YYYYMMDD-HHMMSS",
+  "batchId": "batch-001",
+  "role": "generation",
+  "items": [
+    {
+      "targetId": "tgt:0001",
+      "status": "generated",
+      "patchDescriptor": {
+        "schemaVersion": 1,
+        "patchId": "patch:abcdef",
+        "cycle": 1,
+        "sut": "com.acme.ClusterQueries",
+        "testClass": "com.acme.ClusterQueriesTest",
+        "testPackage": "com.acme",
+        "template": "junit5-mockito",
+        "allowedImports": [
+          "org.junit.jupiter.api.Test"
+        ],
+        "methods": [
+          {
+            "name": "requireConfiguredCluster_whenClusterExists_returnsCluster",
+            "annotations": ["@Test"],
+            "body": "// given\n// when\n// then",
+            "evidenceIds": ["sym:com.acme.ClusterQueries#requireConfiguredCluster:12345678"]
+          }
+        ]
+      }
+    }
+  ]
+}
+
+Cuando termines, no expliques nada: solo escribí response-generation.json.
+```
+
+Después de que el agente escriba `response-generation.json`, volvé a la terminal
+donde quedó pausado el runner y presioná **ENTER**. El runner va a:
+
+1. validar el JSON;
+2. aplicar los patches con `test_patch_applier.py`;
+3. correr los tests estrechos;
+4. crear `request-repair-r1.json` si algo falla.
+
+### 4. Prompt correcto para repair
+
+Si aparece un handoff de repair, usá este prompt:
+
+```text
+Resolvé el repair batch de coverage-agent.
+
+Leé este request:
+C:\repoVC\coverage_cluster-status-service\_llm\runs\run-YYYYMMDD-HHMMSS\batches\batch-001\request-repair-r1.json
+
+Escribí la respuesta aquí:
+C:\repoVC\coverage_cluster-status-service\_llm\runs\run-YYYYMMDD-HHMMSS\batches\batch-001\response-repair-r1.json
+
+Reglas:
+- La respuesta debe ser SOLO JSON válido.
+- Debe tener schemaVersion "test-repair-batch-response-v1".
+- Repará solo los tests generados, nunca src/main.
+- Mantené la intención original del test.
+- Hacé el cambio mínimo para compilar y pasar.
+- Si no se puede reparar con evidencia, marcá el item como "abandoned" con reason.
+
+Contrato obligatorio de patchDescriptor para repair:
+- Cada item reparado debe tener status "repaired" y patchDescriptor canonico.
+- patchDescriptor NO es un archivo completo. No uses operation, targetFile,
+  language, content, coveredMethod ni testMethods.
+- patchDescriptor debe tener schemaVersion, patchId, cycle, sut, testClass,
+  testPackage, template, allowedImports, methods.
+- patchDescriptor.testClass debe ser EXACTAMENTE failedItem.canonicalTestClass.
+- No mantengas ni inventes variantes como *CtorTest, *ConstructorTest,
+  *GeneratedTest o *UnitTest.
+- En repair, patchId debe empezar con "repair:".
+- Cada method debe tener name, annotations, body, evidenceIds.
+- Si el error anterior fue "patchDescriptor missing required keys" o
+  "full-file patch keys", no repares Java: reescribi la respuesta con el formato
+  correcto del patchDescriptor.
+
+Cuando termines, no expliques nada: solo escribí response-repair-r1.json.
+```
+
+### 5. Continuar con más batches
+
+Si el primer batch pasa bien, continuá sin `--max-batches 1` o subilo:
+
+```bash
+python tools/python/run_all_deterministic.py \
+  --repo /c/repoVC/multi-clusters/cluster-status-service \
+  --state-dir /c/repoVC/coverage_cluster-status-service \
+  --module . \
+  --skip-jacoco \
+  --start-cycle-loop \
+  --generation-mode handoff-batch \
+  --batch-size 5 \
+  --max-repair-rounds 2
+```
+
+Los tests generados quedan en el repo objetivo:
+
+```text
+C:\repoVC\multi-clusters\cluster-status-service\src\test\java\...
+```
+
+El estado, requests, responses y reportes quedan fuera del repo objetivo:
+
+```text
+C:\repoVC\coverage_cluster-status-service\...
+```
+
+Cuando el batch runner termina con todos los targets procesados, ejecuta un
+post-stage deterministico:
+
+1. vuelve a correr Maven + JaCoCo;
+2. compara `jacoco-baseline.xml` contra el nuevo `target/site/jacoco/jacoco.xml`;
+3. escribe:
+
+```text
+C:\repoVC\coverage_cluster-status-service\_summaries\batch-final-report.md
+C:\repoVC\coverage_cluster-status-service\_summaries\batch-final-report.json
+```
+
+El reporte incluye tests generados, totals del manifest y delta de cobertura por
+lineas/branches.
+
+> Nota: el architecture review (`run_architecture_review.py`) es otro flujo. Sirve
+> para analizar arquitectura y generar `architecture-report.md`; no genera tests.
+
 ## Pre-stage Python (parte determinista, obligatorio)
 
 Antes de cualquier ciclo LLM, correr el pipeline determinista que produce todos los `state/*.json`. Esto **reduce drásticamente los tokens** consumidos y acelera la generación (ver [`docs/performance-tuning.md`](docs/performance-tuning.md) y [`docs/python-pipeline.md`](docs/python-pipeline.md)).

@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "architecture/architecture-map.schema.json",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "packages",
+    "components",
+    "framework_signals",
+    "ci_delivery"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "packages": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": { "type": "string" }
+      }
+    },
+    "components": {
+      "type": "object",
+      "required": [
+        "controllers",
+        "services",
+        "repositories",
+        "entities",
+        "dtos",
+        "configs",
+        "other_java"
+      ],
+      "properties": {
+        "controllers": { "type": "array", "items": { "type": "string" } },
+        "services": { "type": "array", "items": { "type": "string" } },
+        "repositories": { "type": "array", "items": { "type": "string" } },
+        "entities": { "type": "array", "items": { "type": "string" } },
+        "dtos": { "type": "array", "items": { "type": "string" } },
+        "configs": { "type": "array", "items": { "type": "string" } },
+        "other_java": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "framework_signals": { "type": "object" },
+    "analysis": { "type": "object" },
+    "ci_delivery": {
+      "type": "object",
+      "properties": {
+        "github_actions": { "type": "array", "items": { "type": "string" } },
+        "dockerfiles": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}
