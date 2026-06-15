@@ -133,6 +133,7 @@ Mientras espera, el budget está PAUSADO (no dispara BUDGET_EXCEEDED).
    Repair tambiÃ©n recibe `failedItem.allowedImports`; cualquier import fuera de
    esa lista se considera respuesta invÃ¡lida antes del patcher.
    Lo mismo aplica a `failedItem.allowedEvidenceIds`: si el repair no puede citar
+   evidencia valida, debe abandonar el item en vez de inventar simbolos.
    Si `failedItem.targetEvidenceRequired` es true, cada metodo reparado tambien
    debe citar `failedItem.targetEvidenceIds`.
    evidencia vÃ¡lida, debe abandonar el item en vez de inventar sÃ­mbolos.
