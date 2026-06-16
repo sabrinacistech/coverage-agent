@@ -19,6 +19,7 @@ plain dicts.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
 
@@ -49,9 +50,46 @@ TERMINAL_STATES = frozenset({PASSED, SKIPPED, ABANDONED})
 # States that still count as "failed and repairable" (a repair round may fix them).
 REPAIRABLE_STATES = frozenset({COMPILE_FAILED, TEST_FAILED, PATCH_FAILED})
 
-# Item-level statuses inside the LLM responses.
+# Item-level statuses inside the LLM responses. NEED_MORE_CONTEXT is the answer
+# the contextPolicy mandates when a needed symbol is absent from the request — the
+# model must NOT invent it (task 3). It is accepted case-insensitively (the spec
+# writes it upper-case) via _is_needs_context and maps to SKIPPED(MISSING_CONTEXT).
 _GEN_ITEM_STATUSES = frozenset({"generated", "skipped", "failed"})
 _REPAIR_ITEM_STATUSES = frozenset({"repaired", "skipped", "abandoned", "failed"})
+
+
+def _is_needs_context(status: Any) -> bool:
+    """True when an item status is the NEED_MORE_CONTEXT signal (any casing/dashes)."""
+    if not isinstance(status, str):
+        return False
+    return status.strip().upper().replace("-", "_") in (
+        "NEED_MORE_CONTEXT", "NEEDS_MORE_CONTEXT")
+
+
+# ── Context policy (batch-only) + pre-flight / repair-loop vocabulary ──────────
+# Shipped verbatim in every generation/repair request. It is the machine-readable
+# form of SELF_CONTAINED_RULE: the model must NOT read the repository or production
+# code, and when a needed symbol is absent from the request it must answer
+# NEED_MORE_CONTEXT instead of inventing a constructor/method/getter/constant.
+CONTEXT_POLICY = {
+    "scope": "batch_only",
+    "allowRepositoryRead": False,
+    "allowProductionCodeRead": False,
+    "onMissingContext": "NEED_MORE_CONTEXT",
+}
+
+# Reason persisted on a target the pre-flight evidence gate skips before any LLM
+# call (task 2): there is not enough symbol/type evidence in the request metadata
+# to generate a test without reading the repository.
+PREFLIGHT_SKIP_REASON = "Falta de evidencia de tipos/parámetros en metadatos"
+
+# Repair-loop abandon reasons (task 6): why an item is dropped instead of spending
+# another handoff/round of tokens on it.
+ABANDON_NO_ACTIONABLE_LOGS = "NO_ACTIONABLE_LOGS"
+ABANDON_PATCHER_NO_DIAGNOSTICS = "PATCHER_REJECTED_WITHOUT_DIAGNOSTICS"
+ABANDON_NO_PROGRESS = "NO_PROGRESS_AFTER_REPAIR"
+ABANDON_REPEATED_SIGNATURE = "REPEATED_FAILURE_SIGNATURE"
+ABANDON_MISSING_CONTEXT = "MISSING_CONTEXT"
 _PATCH_DESCRIPTOR_REQUIRED = frozenset({
     "schemaVersion",
     "patchId",
@@ -227,6 +265,174 @@ def select_batch(plan_items: list[dict], processed_ids: set[str], batch_size: in
     return out
 
 
+# ── Pre-flight evidence gate (task 2) ────────────────────────────────────────────
+
+def preflight_evidence_gate(target: dict) -> str | None:
+    """Decide, BEFORE the LLM is called, whether a target carries enough evidence
+    in its OWN request fields to be tested batch-only (no repository read). Returns
+    a skip reason when context is insufficient, else None.
+
+    The runner already projects every usable symbol of the SUT into
+    ``allowedEvidenceIds`` / ``evidenceRefs`` (constructors, public methods,
+    getters/setters, repository methods, constants/enum values, inherited Throwable
+    getters, …) and the method under test into ``targetEvidenceIds``. So the
+    presence of evidence is a faithful proxy for "can be generated from the request
+    alone". A target with NO evidence at all — or whose method-under-test requires
+    evidence that was not found — cannot be generated without reading production
+    code, so it is skipped here instead of being sent to the model and later rolled
+    back by G2 (a wasted handoff)."""
+    evidence_ids = target.get("allowedEvidenceIds") or []
+    evidence_refs = target.get("evidenceRefs") or []
+    if not evidence_ids and not evidence_refs:
+        return PREFLIGHT_SKIP_REASON
+    if target.get("targetEvidenceRequired") and not (target.get("targetEvidenceIds") or []):
+        return PREFLIGHT_SKIP_REASON
+    return None
+
+
+# ── Repair-loop control (task 6) ─────────────────────────────────────────────────
+
+# Summary strings that carry no actionable cause (the loop must not re-send on them).
+_GENERIC_SUMMARIES = frozenset({"PATCH_REJECTED", "TEST_FAILURE", "COMPILATION_ERROR", ""})
+
+
+def _has_actionable_diagnostics(failed_item: dict) -> bool:
+    """True when the failure carries a concrete, model-actionable cause: a verbatim
+    compiler error, a patcher gate/perimeter rejection, or raw build output."""
+    return bool(
+        (failed_item.get("compilerErrorDetails") or "").strip()
+        or (failed_item.get("patcherErrorDetails") or "").strip()
+        or (failed_item.get("buildOutput") or "").strip()
+    )
+
+
+def failure_signature(failed_item: dict) -> str:
+    """Stable short hash of a failure's actionable cause, so the loop can detect the
+    SAME failure recurring across repair rounds (same signature ⇒ abandon, never
+    re-send — REPEATED_FAILURE_SIGNATURE). Built from the failure kind, the concise
+    error summary, the first compiler-error lines and the patcher [BLOCKED] lines —
+    the parts that change only when the underlying cause changes."""
+    comp = (failed_item.get("compilerErrorDetails") or "")
+    patcher = (failed_item.get("patcherErrorDetails") or "")
+    blocked = [ln for ln in patcher.splitlines() if "[BLOCKED]" in ln]
+    parts = [
+        str(failed_item.get("failureKind") or ""),
+        str(failed_item.get("errorSummary") or "").strip(),
+        "\n".join(comp.splitlines()[:5]),
+        "\n".join(blocked[:3]),
+    ]
+    raw = "||".join(p.strip() for p in parts)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def repair_admission(failed_item: dict, *, previous_signature: str | None = None) -> tuple[bool, str | None]:
+    """Decide whether a failed item is worth a NEW repair handoff. Returns
+    ``(should_repair, abandon_reason)``; ``False`` ⇒ abandon with that reason so no
+    tokens are spent on a request the model cannot act on (task 6):
+
+      * same failure signature as the previous round → REPEATED_FAILURE_SIGNATURE
+      * a patcher rejection with no patcher/compiler diagnostics → it is a bare
+        ``patcher rc=3`` with no semantic cause → PATCHER_REJECTED_WITHOUT_DIAGNOSTICS
+      * no actionable logs and only a generic summary → NO_ACTIONABLE_LOGS
+
+    The NO_PROGRESS_AFTER_REPAIR rule is decided by the loop (it needs the round's
+    re-apply/re-test outcome), not here."""
+    signature = failure_signature(failed_item)
+    if previous_signature is not None and signature == previous_signature:
+        return False, ABANDON_REPEATED_SIGNATURE
+
+    # A patcher rejection (rc=3) with no patcher/compiler diagnostics is a bare
+    # "patcher rc=3" with no semantic cause → never re-send.
+    if failed_item.get("failureKind") == "PATCH_REJECTED" and not (
+        (failed_item.get("patcherErrorDetails") or "").strip()
+        or (failed_item.get("compilerErrorDetails") or "").strip()
+    ):
+        return False, ABANDON_PATCHER_NO_DIAGNOSTICS
+
+    # A genuine test failure always produced a surefire report and carries the
+    # current test source to reason about, so it is actionable on its own (it gets
+    # at most ONE round via weak_diagnostics if no logs accompany it).
+    if failed_item.get("failureKind") == "TEST_FAILURE":
+        return True, None
+
+    summary = str(failed_item.get("errorSummary") or "").strip()
+    generic = summary in _GENERIC_SUMMARIES or summary.lower().startswith("patcher rc=")
+    if not (_has_actionable_diagnostics(failed_item) or not generic):
+        # rc != 0 but stdout/stderr/diagnostics empty and only a generic summary.
+        return False, ABANDON_NO_ACTIONABLE_LOGS
+    return True, None
+
+
+def weak_diagnostics(failed_item: dict) -> bool:
+    """True when an item was admitted to repair on a non-generic summary alone (no
+    compiler/patcher/build logs). Such an item gets AT MOST one repair round: if it
+    is still failing afterwards the loop abandons it rather than guessing again."""
+    return not _has_actionable_diagnostics(failed_item)
+
+
+# ── Structured repair cause (task 7) ─────────────────────────────────────────────
+
+def classify_repair_cause(failed_item: dict) -> str:
+    """Label the dominant cause so the repair request is not a bare 'patcher rc=3'.
+
+    Order matters: a verbatim compiler error is the most specific; then a patcher
+    gate (naming/imports/schema/evidence/patch-descriptor) made legible from its
+    [BLOCKED] line; then the lifecycle failure kind."""
+    if (failed_item.get("compilerErrorDetails") or "").strip():
+        return "COMPILER_ERROR"
+    patcher = (failed_item.get("patcherErrorDetails") or "")
+    blocked = " ".join(ln for ln in patcher.splitlines() if "[BLOCKED]" in ln).upper()
+    if blocked:
+        if "G6" in blocked or "LINTER" in blocked or "NAMING" in blocked:
+            return "NAMING_OR_QUALITY_RULE"
+        if "IMPORT" in blocked:
+            return "IMPORT_RULE"
+        if "G2" in blocked or "EVIDENCE" in blocked or "SYMBOL" in blocked:
+            return "EVIDENCE_RULE"
+        if "SCHEMA" in blocked or "DESCRIPTOR" in blocked:
+            return "PATCH_DESCRIPTOR_RULE"
+        return "PATCHER_GATE"
+    kind = failed_item.get("failureKind")
+    if kind == "TEST_FAILURE":
+        return "ASSERTION_OR_RUNTIME"
+    if kind == "COMPILATION_ERROR":
+        return "COMPILER_ERROR"
+    return "UNKNOWN"
+
+
+def _rejected_files(failed_item: dict) -> list[str]:
+    out = []
+    for key in ("testFile", "canonicalTestFile"):
+        v = failed_item.get(key)
+        if v and v not in out:
+            out.append(v)
+    return out
+
+
+def build_repair_cause(failed_item: dict, *, previous_signature: str | None = None) -> dict:
+    """Structured diagnostic block embedded in each repair item (task 7). Replaces a
+    bare 'patcher rc=3' with the cause kind, a one-line summary, the verbatim
+    stdout/stderr the runner captured, the patcher diagnostics, the failed rules and
+    the rejected files/methods, plus the previous-round signature."""
+    patcher = (failed_item.get("patcherErrorDetails") or "")
+    patcher_diagnostics = [ln for ln in patcher.splitlines() if "[BLOCKED]" in ln]
+    compiler = (failed_item.get("compilerErrorDetails") or "")
+    failed_rules = [ln.split("]", 1)[0].lstrip("[")
+                    for ln in compiler.splitlines() if ln.startswith("[")]
+    return {
+        "kind": classify_repair_cause(failed_item),
+        "summary": str(failed_item.get("errorSummary") or "").strip(),
+        "stdout": (failed_item.get("buildOutput") or ""),
+        "stderr": compiler,
+        "patcherDiagnostics": patcher_diagnostics,
+        "failedRules": sorted(set(failed_rules)),
+        "rejectedFiles": _rejected_files(failed_item),
+        "rejectedMethods": ([failed_item["rejectedTestClass"]]
+                            if failed_item.get("rejectedTestClass") else []),
+        "previousFailureSignature": previous_signature or "",
+    }
+
+
 # ── Generation request envelope ─────────────────────────────────────────────────
 
 def _suggested_test_file(sut: str) -> str:
@@ -374,6 +580,23 @@ def build_generation_request(
             "priority": item.get("score", i),
             "fixtureIds": item.get("fixtureIds", []),
             "context": item.get("context", {}),
+            # Self-sufficient, batch-only structured context (task 3): the same
+            # facts as the flat fields above, grouped so the model can see at a
+            # glance that the request is its ONLY world. If a fact it needs is not
+            # here, it must answer NEED_MORE_CONTEXT, never read the repo.
+            "structuredContext": {
+                "targetSource": {
+                    "sut": sut,
+                    "productionFile": _production_file(sut) if sut else "",
+                    "sourceCode": item.get("sutSourceCode", ""),
+                    "truncated": bool(item.get("sutSourceTruncated", False)),
+                },
+                "dependencySources": list(item.get("dependencySignatures") or []),
+                "allowedApi": list(item.get("evidenceRefs") or []),
+                "existingRelatedTests": list(item.get("existingRelatedTests") or []),
+                "expectedBehavior": list(item.get("expectedBehavior") or []),
+                "missingContextPolicy": {"allowedStatus": "NEED_MORE_CONTEXT"},
+            },
         })
     return {
         "schemaVersion": SCHEMA_GENERATION_REQUEST,
@@ -384,6 +607,16 @@ def build_generation_request(
         "batchSize": batch_size,
         "targets": out_targets,
         "rules": list(GENERATION_RULES),
+        "contextPolicy": dict(CONTEXT_POLICY),
+        "missingContextPolicy": {
+            "allowedStatus": "NEED_MORE_CONTEXT",
+            "rule": "If a constructor, method, getter/setter, repository method, "
+                    "constant/enum value, exception, domain object, factory/builder "
+                    "or configuration needed to write the test is NOT present in this "
+                    "request, answer with status NEED_MORE_CONTEXT and list the "
+                    "missing symbols. Never invent or read them from the repository.",
+            "responseShape": {"status": "NEED_MORE_CONTEXT", "missingSymbols": [], "reason": ""},
+        },
         "selfContainedPolicy": {
             "rule": SELF_CONTAINED_RULE,
             "forbiddenActions": [
@@ -408,8 +641,10 @@ def build_generation_request(
             "batchId": batch_id,
             "role": "generation",
             "items": [
-                {"targetId": t["targetId"], "status": "generated|skipped|failed",
-                 "patchDescriptor": {}}
+                {"targetId": t["targetId"],
+                 "status": "generated|skipped|failed|NEED_MORE_CONTEXT",
+                 "patchDescriptor": {},
+                 "missingSymbols": [], "reason": ""}
                 for t in out_targets
             ],
         },
@@ -638,6 +873,11 @@ def validate_generation_response(resp: dict, batch_targets: list[dict], *, batch
         if tid not in known:
             raise BatchResponseError(f"unknown targetId not in this batch: {tid!r}")
         status = it.get("status")
+        # NEED_MORE_CONTEXT is a VALID answer (contextPolicy): the model declares it
+        # cannot generate from the request alone. It carries no patchDescriptor; the
+        # caller maps it to SKIPPED(MISSING_CONTEXT). Never fails the batch.
+        if _is_needs_context(status):
+            continue
         if status not in _GEN_ITEM_STATUSES:
             raise BatchResponseError(f"invalid item status {status!r} for {tid!r}")
         if status == "generated":
@@ -684,6 +924,14 @@ def build_repair_request(
         "repairRound": repair_round,
         "failedItems": list(failed_items),
         "rules": list(REPAIR_RULES),
+        "contextPolicy": dict(CONTEXT_POLICY),
+        "missingContextPolicy": {
+            "allowedStatus": "NEED_MORE_CONTEXT",
+            "rule": "If repairing the test requires a symbol not present in this "
+                    "request, answer NEED_MORE_CONTEXT (or abandon the item); never "
+                    "invent symbols or read the repository.",
+            "responseShape": {"status": "NEED_MORE_CONTEXT", "missingSymbols": [], "reason": ""},
+        },
         "selfContainedPolicy": {
             "rule": SELF_CONTAINED_RULE,
             "forbiddenActions": [
@@ -717,8 +965,9 @@ def build_repair_request(
             "role": "repair",
             "repairRound": repair_round,
             "items": [
-                {"targetId": f.get("targetId"), "status": "repaired|skipped|abandoned|failed",
-                 "patchDescriptor": {}}
+                {"targetId": f.get("targetId"),
+                 "status": "repaired|skipped|abandoned|failed|NEED_MORE_CONTEXT",
+                 "patchDescriptor": {}, "missingSymbols": [], "reason": ""}
                 for f in failed_items
             ],
         },
@@ -754,6 +1003,8 @@ def validate_repair_response(
         if tid not in requested_ids:
             raise BatchResponseError(f"repair item for a target not requested: {tid!r}")
         status = it.get("status")
+        if _is_needs_context(status):
+            continue
         if status not in _REPAIR_ITEM_STATUSES:
             raise BatchResponseError(f"invalid repair status {status!r} for {tid!r}")
         if status == "repaired":

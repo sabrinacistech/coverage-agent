@@ -33,6 +33,7 @@ import json
 import re
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import batch_protocol as bp
@@ -77,6 +78,81 @@ def _write_json(path: Path, obj: dict) -> None:
 
 def _now_run_id() -> str:
     return time.strftime("run-%Y%m%d-%H%M%S")
+
+
+# ── Run paths: single source of truth (task 5) ───────────────────────────────────
+
+@dataclass(frozen=True)
+class RunPaths:
+    """The ONE place that composes every on-disk artifact of a run.
+
+    Every request/response/validation path is DERIVED from ``run_dir`` + the
+    ``batchId`` (+ repair round), so the runner can never work on ``runs/run-XXXX``
+    and accidentally read or write a mirror like ``runs/run-XXXXS``: there is a
+    single composition point, and :meth:`assert_consistent` proves each derived
+    path stays under ``run_dir`` and carries the right ``runId`` / ``batchId``.
+
+    All members return absolute, resolved :class:`pathlib.Path` objects."""
+    state_dir: Path
+    run_id: str
+
+    @property
+    def run_dir(self) -> Path:
+        return (config.ide_dir(self.state_dir) / "runs" / self.run_id).resolve()
+
+    def manifest(self) -> Path:
+        return self.run_dir / "manifest.json"
+
+    def batch_dir(self, batch_id: str) -> Path:
+        return self.run_dir / "batches" / batch_id
+
+    def request_generation(self, batch_id: str) -> Path:
+        return self.batch_dir(batch_id) / "request-generation.json"
+
+    def response_generation(self, batch_id: str) -> Path:
+        return self.batch_dir(batch_id) / "response-generation.json"
+
+    def validation_result(self, batch_id: str) -> Path:
+        return self.batch_dir(batch_id) / "validation-result.json"
+
+    def preflight_result(self, batch_id: str) -> Path:
+        return self.batch_dir(batch_id) / "preflight-result.json"
+
+    def request_repair(self, batch_id: str, rnd: int) -> Path:
+        return self.batch_dir(batch_id) / f"request-repair-r{rnd}.json"
+
+    def response_repair(self, batch_id: str, rnd: int) -> Path:
+        return self.batch_dir(batch_id) / f"response-repair-r{rnd}.json"
+
+    def validation_result_repair(self, batch_id: str, rnd: int) -> Path:
+        return self.batch_dir(batch_id) / f"validation-result-r{rnd}.json"
+
+    def assert_consistent(self, batch_id: str, repair_round: int = 1) -> None:
+        """Prove every derived path belongs to exactly this runId/batchId and stays
+        under run_dir (no mirror folder with a stray suffix). Used by tests and as a
+        cheap in-process guard before the handoff."""
+        run_dir = self.run_dir
+        run_root = str(run_dir)
+        run_level = [self.manifest()]
+        batch_level = [
+            self.batch_dir(batch_id), self.request_generation(batch_id),
+            self.response_generation(batch_id), self.validation_result(batch_id),
+            self.preflight_result(batch_id),
+            self.request_repair(batch_id, repair_round),
+            self.response_repair(batch_id, repair_round),
+            self.validation_result_repair(batch_id, repair_round),
+        ]
+        for p in run_level + batch_level:
+            rp = str(p.resolve())
+            if not rp.startswith(run_root):
+                raise ValueError(f"path {p} escapes run_dir {run_dir}")
+            # The run folder name must appear EXACTLY (defends against run-XXXX vs
+            # run-XXXXS): the path component equal to run_id must be present.
+            if self.run_id not in p.parts:
+                raise ValueError(f"path {p} does not carry runId {self.run_id!r}")
+        for p in batch_level:
+            if batch_id not in p.parts:
+                raise ValueError(f"path {p} does not carry batchId {batch_id!r}")
 
 
 # ── manifest persistence ─────────────────────────────────────────────────────────
@@ -833,7 +909,7 @@ def _failed_items_for_repair(manifest: dict, *, state_dir: Path, repo: Path,
             error_summary = blocked_line.strip()
         else:
             error_summary = rec.get("note", kind)
-        items.append({
+        item = {
             "targetId": tid,
             "failureKind": kind,
             "sut": sut,
@@ -863,7 +939,13 @@ def _failed_items_for_repair(manifest: dict, *, state_dir: Path, repo: Path,
             "patcherErrorDetails": patcher_error_details,
             "buildOutput": build_output,
             "currentTestSource": current_src,
-        })
+        }
+        # Structured diagnosis (task 7): never a bare "patcher rc=3". failureSignature
+        # lets the repair loop detect the same cause recurring across rounds.
+        item["failureSignature"] = bp.failure_signature(item)
+        item["repairCause"] = bp.build_repair_cause(
+            item, previous_signature=rec.get("lastFailureSignature"))
+        items.append(item)
     return items
 
 
@@ -884,6 +966,14 @@ def _process_generation(
             bp.set_status(manifest, tid, bp.GENERATION_FAILED, note="omitted from response")
             continue
         status = it.get("status")
+        if bp._is_needs_context(status):
+            # contextPolicy answer: the request lacked a needed symbol. Persist the
+            # missing symbols for audit and skip (never invent / read the repo).
+            reason = it.get("reason") or "model requested more context"
+            bp.set_status(manifest, tid, bp.SKIPPED,
+                          reason=f"{bp.ABANDON_MISSING_CONTEXT}: {reason}",
+                          missingSymbols=it.get("missingSymbols") or [])
+            continue
         if status == "skipped":
             bp.set_status(manifest, tid, bp.SKIPPED, reason=it.get("reason"))
             continue
@@ -922,6 +1012,11 @@ def _process_repair(
     for it in response_items:
         tid = it["targetId"]
         status = it.get("status")
+        if bp._is_needs_context(status):
+            bp.set_status(manifest, tid, bp.ABANDONED,
+                          reason=f"{bp.ABANDON_MISSING_CONTEXT}: {it.get('reason') or 'repair needs more context'}",
+                          missingSymbols=it.get("missingSymbols") or [])
+            continue
         if status == "abandoned":
             bp.set_status(manifest, tid, bp.ABANDONED, reason=it.get("reason"))
             continue
@@ -957,7 +1052,8 @@ def run_batches(
 
     state_path = state_dir / "execution-state.json"
     run_id = _now_run_id()
-    run_dir = config.ide_dir(state_dir) / "runs" / run_id
+    paths = RunPaths(state_dir, run_id)        # single source of truth for run I/O
+    run_dir = paths.run_dir
     run_dir.mkdir(parents=True, exist_ok=True)
     manifest = bp.new_manifest(run_id, str(repo), generation_mode="handoff-batch",
                                batch_size=batch_size, max_repair_rounds=max_repair_rounds)
@@ -977,8 +1073,9 @@ def run_batches(
             break
         batch_no += 1
         batch_id = f"batch-{batch_no:03d}"
-        batch_dir = run_dir / "batches" / batch_id
+        batch_dir = paths.batch_dir(batch_id)
         batch_dir.mkdir(parents=True, exist_ok=True)
+        paths.assert_consistent(batch_id)  # guard: no run-XXXX vs run-XXXXS drift
         batch_ids = [t.get("targetId") for t in targets]
         manifest.setdefault("batches", []).append({"batchId": batch_id, "targetIds": batch_ids})
         for t in targets:
@@ -1001,11 +1098,42 @@ def run_batches(
             _save_manifest(run_dir, manifest)
             return budget_enforcer.EXIT_EXCEEDED  # RC 2 == budget exceeded
 
+        # ── pre-flight evidence gate (task 2) ─────────────────────────────────────
+        # Decide, BEFORE any LLM call, which targets carry enough evidence to be
+        # generated batch-only. Those that do not are SKIPPED with an audit reason
+        # and never sent to the model (avoids a wasted handoff + a G2 rollback).
+        enriched = _enrich_targets_with_imports(targets, state_dir=state_dir, repo=repo)
+        request_targets: list[dict] = []
+        preflight_skipped: list[dict] = []
+        for t in enriched:
+            reason = bp.preflight_evidence_gate(t)
+            if reason:
+                tid = t.get("targetId")
+                bp.set_status(manifest, tid, bp.SKIPPED, reason=reason)
+                processed.add(tid)
+                one_cycle.mark_processed(state_dir, tid)
+                preflight_skipped.append({"targetId": tid, "sut": t.get("sut", ""),
+                                          "reason": reason})
+            else:
+                request_targets.append(t)
+        if preflight_skipped:
+            _write_json(paths.preflight_result(batch_id),
+                        {"batchId": batch_id, "skipped": preflight_skipped})
+            _print(f"[preflight] {len(preflight_skipped)} target(s) saltados por falta "
+                   f"de evidencia (no se envían al LLM).")
+        sendable_ids = [t.get("targetId") for t in request_targets]
+        if not sendable_ids:
+            # Every target in this batch lacked evidence → nothing to generate.
+            _write_json(paths.validation_result(batch_id),
+                        {"batchId": batch_id, "rc": 0, "counts": {"passed": 0, "failed": 0,
+                         "compile": 0}, "applied": {}, "preflightSkipped": preflight_skipped})
+            _save_manifest(run_dir, manifest)
+            continue
+
         # ── generation handoff ──────────────────────────────────────────────────
-        request_targets = _enrich_targets_with_imports(targets, state_dir=state_dir, repo=repo)
         req = bp.build_generation_request(run_id, batch_id, request_targets, batch_size=batch_size)
-        req_path = batch_dir / "request-generation.json"
-        resp_path = batch_dir / "response-generation.json"
+        req_path = paths.request_generation(batch_id)
+        resp_path = paths.response_generation(batch_id)
         _write_json(req_path, req)
         _save_manifest(run_dir, manifest)
 
@@ -1017,7 +1145,7 @@ def run_batches(
             _save_manifest(run_dir, manifest)
             return RC_STOPPED
         if outcome == "skip":
-            for tid in batch_ids:
+            for tid in sendable_ids:
                 bp.set_status(manifest, tid, bp.SKIPPED, reason="batch skipped by user")
                 processed.add(tid)
                 one_cycle.mark_processed(state_dir, tid)
@@ -1028,7 +1156,7 @@ def run_batches(
             items = bp.validate_generation_response(resp, request_targets, batch_id=batch_id)
         except bp.BatchResponseError as exc:
             _print(f"[batch] response-generation inválida: {exc}; salto el batch.")
-            for tid in batch_ids:
+            for tid in sendable_ids:
                 bp.set_status(manifest, tid, bp.GENERATION_FAILED, note=str(exc))
                 processed.add(tid)
                 one_cycle.mark_processed(state_dir, tid)
@@ -1036,7 +1164,7 @@ def run_batches(
             continue
 
         applied = _process_generation(items, manifest, state_dir=state_dir, repo=repo,
-                                      batch_ids=batch_ids)
+                                      batch_ids=sendable_ids)
         _save_manifest(run_dir, manifest)
 
         # ── run tests + classify ─────────────────────────────────────────────────
@@ -1054,28 +1182,54 @@ def run_batches(
             _save_manifest(run_dir, manifest)
             return RC_STOPPED
         counts = _classify_batch(manifest, repo=repo, applied=applied, rc=rc_tests)
-        _write_json(batch_dir / "validation-result.json",
+        _write_json(paths.validation_result(batch_id),
                     {"batchId": batch_id, "rc": rc_tests, "counts": counts,
-                     "applied": applied})
+                     "applied": applied, "preflightSkipped": preflight_skipped})
         _save_manifest(run_dir, manifest)
 
-        # ── repair rounds (only failures) ────────────────────────────────────────
+        # ── repair rounds (only failures, strict admission — task 6) ─────────────
         had_compile = counts["compile"] > 0
         for rnd in range(1, max_repair_rounds + 1):
-            failing = bp.failing_target_ids(manifest, batch_ids)
+            failing = bp.failing_target_ids(manifest, sendable_ids)
             if not failing:
                 break
             failed_payload = _failed_items_for_repair(manifest, state_dir=state_dir, repo=repo,
-                                                       batch_ids=batch_ids, applied=applied)
+                                                       batch_ids=sendable_ids, applied=applied)
+
+            # Repair admission gate: drop items not worth another handoff instead of
+            # spending tokens on them. Track the failure signature per round so a
+            # recurring identical cause is abandoned (REPEATED_FAILURE_SIGNATURE).
+            admissible: list[dict] = []
+            for fi in failed_payload:
+                tid = fi["targetId"]
+                prev_sig = manifest["targets"].get(tid, {}).get("lastFailureSignature")
+                ok, reason = bp.repair_admission(fi, previous_signature=prev_sig)
+                manifest["targets"][tid]["lastFailureSignature"] = fi["failureSignature"]
+                # An item admitted on a weak (logs-less) summary gets at most one
+                # round: if it already consumed a round, abandon instead of guessing.
+                if ok and bp.weak_diagnostics(fi) and \
+                        int(manifest["targets"][tid].get("repairRounds", 0)) >= 1:
+                    ok, reason = False, bp.ABANDON_NO_ACTIONABLE_LOGS
+                if ok:
+                    admissible.append(fi)
+                else:
+                    bp.set_status(manifest, tid, bp.ABANDONED, reason=reason)
+            if not admissible:
+                _print("[repair] sin items accionables; no se llama al LLM "
+                       "(ahorro de tokens).")
+                _save_manifest(run_dir, manifest)
+                break
+
+            requested_ids = {fi["targetId"] for fi in admissible}
             # Orchestrator-owned G7 anti-loop triplets, derived from the compile-error
             # index — forwarded to the patcher so the repair is not blocked with
             # G7_REPAIR_WITHOUT_TRIPLET (the model never produces these).
-            repair_triplets = _repair_triplets(failed_payload, state_dir=state_dir)
-            rreq = bp.build_repair_request(run_id, batch_id, rnd, failed_payload)
-            rreq_path = batch_dir / f"request-repair-r{rnd}.json"
-            rresp_path = batch_dir / f"response-repair-r{rnd}.json"
+            repair_triplets = _repair_triplets(admissible, state_dir=state_dir)
+            rreq = bp.build_repair_request(run_id, batch_id, rnd, admissible)
+            rreq_path = paths.request_repair(batch_id, rnd)
+            rresp_path = paths.response_repair(batch_id, rnd)
             _write_json(rreq_path, rreq)
-            for tid in failing:
+            for tid in requested_ids:
                 bp.set_status(manifest, tid, bp.REPAIR_REQUESTED)
                 bp.bump_repair_round(manifest, tid)
             _save_manifest(run_dir, manifest)
@@ -1092,10 +1246,10 @@ def run_batches(
             try:
                 ritems = bp.validate_repair_response(
                     rresp,
-                    set(failing),
+                    requested_ids,
                     batch_id=batch_id,
                     repair_round=rnd,
-                    requested_items=failed_payload,
+                    requested_items=admissible,
                 )
             except bp.BatchResponseError as exc:
                 _print(f"[batch] response-repair-r{rnd} inválida: {exc}; corto repair.")
@@ -1105,17 +1259,29 @@ def run_batches(
                                         triplets=repair_triplets)
             rc_tests = _run_tests(repo, state_dir, list(reapplied.values()))
             rcounts = _classify_batch(manifest, repo=repo, applied=reapplied, rc=rc_tests)
-            _write_json(batch_dir / f"validation-result-r{rnd}.json",
+            _write_json(paths.validation_result_repair(batch_id, rnd),
                         {"batchId": batch_id, "repairRound": rnd, "rc": rc_tests,
                          "counts": rcounts, "reapplied": reapplied})
             # Targets still failing AND out of rounds → ABANDON.
-            for tid in bp.failing_target_ids(manifest, batch_ids):
+            for tid in bp.failing_target_ids(manifest, sendable_ids):
                 if bp.should_abandon(manifest, tid, max_repair_rounds):
                     bp.set_status(manifest, tid, bp.ABANDONED, note="exceeded maxRepairRounds")
             _save_manifest(run_dir, manifest)
 
+            # NO_PROGRESS guard: a round that re-applied nothing (the model skipped/
+            # failed every item, or every re-apply was rejected) will not improve on
+            # the next handoff → abandon the requested items that are not yet resolved
+            # (still failing OR stuck in REPAIR_REQUESTED) instead of spending another
+            # round.
+            if not reapplied:
+                for tid in requested_ids:
+                    if manifest["targets"].get(tid, {}).get("status") not in bp.TERMINAL_STATES:
+                        bp.set_status(manifest, tid, bp.ABANDONED, reason=bp.ABANDON_NO_PROGRESS)
+                _save_manifest(run_dir, manifest)
+                break
+
         # Anything still failing after the rounds is abandoned.
-        for tid in bp.failing_target_ids(manifest, batch_ids):
+        for tid in bp.failing_target_ids(manifest, sendable_ids):
             bp.set_status(manifest, tid, bp.ABANDONED, note="still failing after repair rounds")
 
         # Mark every target in the batch processed so the next batch advances.
@@ -1125,8 +1291,10 @@ def run_batches(
         budget_enforcer.reset(state_path)
 
         # ── advance decision ─────────────────────────────────────────────────────
-        total = len(batch_ids)
-        passed = sum(1 for tid in batch_ids
+        # Pass rate is over the ATTEMPTED (sendable) targets; pre-flight skips do not
+        # count against it (they were never generated).
+        total = len(sendable_ids)
+        passed = sum(1 for tid in sendable_ids
                      if manifest["targets"].get(tid, {}).get("status") == bp.PASSED)
         decision = bp.advance_decision(passed, total, had_global_compile_error=had_compile)
         _print(f"[batch] {batch_id}: {passed}/{total} passed → {decision['action']} "
