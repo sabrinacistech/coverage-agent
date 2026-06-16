@@ -108,7 +108,9 @@ Mientras espera, el budget está PAUSADO (no dispara BUDGET_EXCEEDED).
    `target.targetEvidenceRequired` es true, cada test generado debe citar al menos
    un id de `target.targetEvidenceIds`; si esa lista esta vacia, el LLM debe
    marcar el item como `skipped`/`failed` en vez de generar codigo contra un metodo
-   no evidenciado.
+   no evidenciado. El body Java solo puede llamar metodos del SUT cuando el nombre
+   aparece en `target.evidenceRefs` con `kind="method"`; los constructores no
+   autorizan getters/metodos del SUT por si solos.
 2. Volvé a la consola y presioná **ENTER**. El runner valida el JSON, **aplica
    cada patch** (gates G1–G8 + presupuesto + seguridad de literales Java, por
    construcción), **corre los tests** y clasifica cada target en PASSED /
@@ -135,8 +137,8 @@ Mientras espera, el budget está PAUSADO (no dispara BUDGET_EXCEEDED).
    Lo mismo aplica a `failedItem.allowedEvidenceIds`: si el repair no puede citar
    evidencia valida, debe abandonar el item en vez de inventar simbolos.
    Si `failedItem.targetEvidenceRequired` es true, cada metodo reparado tambien
-   debe citar `failedItem.targetEvidenceIds`.
-   evidencia vÃ¡lida, debe abandonar el item en vez de inventar sÃ­mbolos.
+   debe citar `failedItem.targetEvidenceIds`. El body reparado solo puede llamar
+   metodos del SUT que aparezcan en `failedItem.evidenceRefs` con `kind="method"`.
 4. Un target que sigue fallando tras `--max-repair-rounds` se marca **ABANDONED** y
    el run continúa.
 

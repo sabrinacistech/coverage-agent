@@ -169,6 +169,9 @@ Reglas:
 - No uses símbolos, métodos, constructores, clases, constantes, exceptions ni
   asserts sin evidencia. Si target.allowedEvidenceIds no alcanza, marcá el item
   como "skipped" o "failed" con reason claro.
+- El body Java solo puede llamar métodos del SUT si el nombre aparece en
+  target.evidenceRefs con kind="method". Los constructores no autorizan getters
+  ni métodos del SUT por sí solos.
 - No uses @DisplayName, @Autowired, @SpringBootTest, imports Spring ni excepciones
   de dominio salvo que el FQCN exacto aparezca en target.allowedImports.
 - Cada método @Test debe tener // given, // when, // then.
@@ -198,6 +201,8 @@ Contrato obligatorio de patchDescriptor:
 - Cada method.evidenceIds debe contener solo ids de target.allowedEvidenceIds.
 - Cada method.evidenceIds debe citar también target.targetEvidenceIds cuando el
   target lo exige.
+- Si el body llama un método sobre una variable del tipo SUT, ese método debe
+  estar listado en target.evidenceRefs con kind="method".
 - patchId debe empezar con "patch:".
 - methods debe ser una lista no vacia. Cada metodo debe tener:
   name, annotations, body, evidenceIds.
@@ -277,6 +282,8 @@ Reglas:
   imports inventados.
 - Si no hay evidenceIds suficientes para justificar el repair, marcá el item
   como "abandoned" con reason claro.
+- El body reparado solo puede llamar métodos del SUT si el nombre aparece en
+  failedItem.evidenceRefs con kind="method"; si no, abandoná el item.
 - No uses @DisplayName, @Autowired, @SpringBootTest, imports Spring ni excepciones
   de dominio salvo que el FQCN exacto aparezca en failedItem.allowedImports.
 - Si no se puede reparar con evidencia, marcá el item como "abandoned" con reason.
@@ -294,6 +301,8 @@ Contrato obligatorio de patchDescriptor para repair:
 - Cada method.evidenceIds debe contener solo ids de failedItem.allowedEvidenceIds.
 - Cada method.evidenceIds debe citar también failedItem.targetEvidenceIds cuando
   failedItem.targetEvidenceRequired sea true.
+- Si el body llama un método sobre una variable del tipo SUT, ese método debe
+  estar listado en failedItem.evidenceRefs con kind="method".
 - En repair, patchId debe empezar con "repair:".
 - Cada method debe tener name, annotations, body, evidenceIds.
 - Si el error anterior fue "patchDescriptor missing required keys" o

@@ -19,6 +19,7 @@ plain dicts.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 # ── Schema version tags (the file protocol's contract) ─────────────────────────
@@ -79,6 +80,9 @@ _COMMON_FORBIDDEN_IMPORTS = [
     "org.springframework.beans.factory.annotation.Autowired",
     "org.springframework.boot.test.context.SpringBootTest",
 ]
+_JAVA_KEYWORDS = frozenset({
+    "if", "for", "while", "switch", "catch", "return", "new", "throw",
+})
 
 # ── Generation / repair rules shipped to Claude Code in every request ──────────
 # The QUALITY_GATE_RULES mirror the deterministic G6 linter (tools/python/
@@ -133,6 +137,9 @@ GENERATION_RULES = [
     "Use ONLY target.allowedEvidenceIds in every method.evidenceIds. If no "
     "allowedEvidenceIds justify a test method, mark that target skipped/failed "
     "instead of inventing symbols.",
+    "The Java body may call methods on the SUT only when those method names are "
+    "listed in target.evidenceRefs with kind='method'. Constructors alone do not "
+    "authorize assertions through unevidenced SUT getters/methods.",
     "When target.targetEvidenceRequired is true, every generated test method MUST "
     "include at least one id from target.targetEvidenceIds in method.evidenceIds. "
     "If target.targetEvidenceIds is empty, mark the target skipped/failed instead "
@@ -166,6 +173,9 @@ REPAIR_RULES = [
     "they are explicitly listed in failedItem.allowedImports.",
     "Use ONLY failedItem.allowedEvidenceIds in every method.evidenceIds. If no "
     "allowedEvidenceIds justify a repair, mark that item abandoned with a reason.",
+    "The repaired Java body may call methods on the SUT only when those method "
+    "names are listed in failedItem.evidenceRefs with kind='method'. Constructors "
+    "alone do not authorize unevidenced SUT getters/methods.",
     "When failedItem.targetEvidenceRequired is true, every repaired test method "
     "MUST include at least one id from failedItem.targetEvidenceIds. If that list "
     "is empty, abandon the item instead of repairing with invented symbols.",
@@ -232,6 +242,61 @@ def _evidence_policy(allowed_evidence_ids: list[str] | None) -> dict:
             "If evidence is insufficient, skip/abandon the item instead of guessing.",
         ],
     }
+
+
+def _allowed_method_names(evidence_refs: list[dict] | None) -> set[str]:
+    out: set[str] = set()
+    for ref in evidence_refs or []:
+        if not isinstance(ref, dict) or ref.get("kind") != "method":
+            continue
+        name = ref.get("name")
+        if isinstance(name, str) and name:
+            out.add(name)
+    return out
+
+
+def _strip_java_literals_and_comments(body: str) -> str:
+    body = re.sub(r'//.*', '', body)
+    body = re.sub(r'/\*.*?\*/', '', body, flags=re.S)
+    body = re.sub(r'"(?:\\.|[^"\\])*"', '""', body)
+    body = re.sub(r"'(?:\\.|[^'\\])*'", "''", body)
+    return body
+
+
+def _sut_vars_in_body(body: str, sut_fqcn: str) -> set[str]:
+    if not sut_fqcn:
+        return set()
+    simple = sut_fqcn.rsplit(".", 1)[-1]
+    type_pat = rf"(?:{re.escape(sut_fqcn)}|{re.escape(simple)})"
+    decl = re.compile(rf"\b(?:final\s+)?{type_pat}(?:<[^;=()]+>)?\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:=|;)")
+    return {m.group(1) for m in decl.finditer(body)}
+
+
+def _validate_sut_method_calls(
+    body: str,
+    *,
+    target_id: str,
+    method_index: int,
+    sut_fqcn: str,
+    allowed_method_names: set[str],
+) -> None:
+    stripped = _strip_java_literals_and_comments(body)
+    sut_vars = _sut_vars_in_body(stripped, sut_fqcn)
+    if not sut_vars:
+        return
+    for var in sut_vars:
+        call_re = re.compile(rf"\b{re.escape(var)}\s*\.\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\(")
+        for match in call_re.finditer(stripped):
+            method_name = match.group(1)
+            if method_name in _JAVA_KEYWORDS:
+                continue
+            if method_name not in allowed_method_names:
+                raise BatchResponseError(
+                    f"{target_id!r} patchDescriptor.methods[{method_index}].body "
+                    f"calls {var}.{method_name}(), but {method_name!r} is not present "
+                    "in evidenceRefs. Cite evidence for the method or skip/abandon "
+                    "the item instead of using unevidenced SUT symbols."
+                )
 
 
 def build_generation_request(
@@ -320,6 +385,7 @@ def _validate_patch_descriptor(
     expected_test_class: str | None = None,
     expected_allowed_imports: list[str] | None = None,
     expected_evidence_ids: list[str] | None = None,
+    expected_evidence_refs: list[dict] | None = None,
     expected_target_evidence_ids: list[str] | None = None,
     target_evidence_required: bool = False,
 ) -> None:
@@ -475,6 +541,14 @@ def _validate_patch_descriptor(
             raise BatchResponseError(
                 f"{target_id!r} patchDescriptor.methods[{idx}].body must be a string"
             )
+        if expected_evidence_refs is not None:
+            _validate_sut_method_calls(
+                method["body"],
+                target_id=target_id,
+                method_index=idx,
+                sut_fqcn=patch_sut,
+                allowed_method_names=_allowed_method_names(expected_evidence_refs),
+            )
         evidence_ids = method.get("evidenceIds")
         if not isinstance(evidence_ids, list) or not evidence_ids:
             raise BatchResponseError(
@@ -531,6 +605,7 @@ def validate_generation_response(resp: dict, batch_targets: list[dict], *, batch
                 expected_test_class=_suggested_test_class(sut) if sut else None,
                 expected_allowed_imports=target.get("allowedImports"),
                 expected_evidence_ids=target.get("allowedEvidenceIds"),
+                expected_evidence_refs=target.get("evidenceRefs"),
                 expected_target_evidence_ids=target.get("targetEvidenceIds"),
                 target_evidence_required=bool(target.get("targetEvidenceRequired")),
             )
@@ -629,6 +704,7 @@ def validate_repair_response(
                 expected_test_class=requested.get("canonicalTestClass") or None,
                 expected_allowed_imports=requested.get("allowedImports"),
                 expected_evidence_ids=requested.get("allowedEvidenceIds"),
+                expected_evidence_refs=requested.get("evidenceRefs"),
                 expected_target_evidence_ids=requested.get("targetEvidenceIds"),
                 target_evidence_required=bool(requested.get("targetEvidenceRequired")),
             )
@@ -652,7 +728,14 @@ def new_manifest(run_id: str, repo: str, *, generation_mode: str, batch_size: in
     }
 
 
-def ensure_target(manifest: dict, target_id: str, *, sut: str = "", batch_id: str | None = None) -> dict:
+def ensure_target(
+    manifest: dict,
+    target_id: str,
+    *,
+    sut: str = "",
+    batch_id: str | None = None,
+    method: str | None = None,
+) -> dict:
     """Get (creating if needed) the per-target record, defaulting to PENDING."""
     rec = manifest.setdefault("targets", {}).get(target_id)
     if rec is None:
@@ -662,6 +745,8 @@ def ensure_target(manifest: dict, target_id: str, *, sut: str = "", batch_id: st
         rec["sut"] = sut
     if batch_id and not rec.get("batchId"):
         rec["batchId"] = batch_id
+    if method and not rec.get("method"):
+        rec["method"] = method
     return rec
 
 

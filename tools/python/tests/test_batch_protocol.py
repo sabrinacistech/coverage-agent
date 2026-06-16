@@ -286,6 +286,89 @@ def case_response_must_cite_target_evidence() -> None:
         _assert("target evidence must be cited", "targetEvidenceIds" in str(exc), str(exc))
 
 
+def case_response_sut_body_call_requires_evidence_ref() -> None:
+    targets = [{
+        "targetId": "com.acme.MyException#<init>",
+        "sut": "com.acme.MyException",
+        "method": "<init>(Ljava/lang/String;)V",
+        "allowedImports": ["org.junit.jupiter.api.Test"],
+        "allowedEvidenceIds": ["ctor:com.acme.MyException:11111111"],
+        "evidenceRefs": [{
+            "evidenceId": "ctor:com.acme.MyException:11111111",
+            "kind": "constructor",
+            "name": "constructor",
+            "params": [{"type": "java.lang.String"}],
+        }],
+    }]
+    patch = _patch("com.acme.MyException")
+    patch["methods"][0]["body"] = (
+        "// given\nString message = \"missing\";\n"
+        "// when\nMyException exception = new MyException(message);\n"
+        "// then\norg.junit.jupiter.api.Assertions.assertEquals(message, exception.getMessage());"
+    )
+    patch["methods"][0]["evidenceIds"] = ["ctor:com.acme.MyException:11111111"]
+    resp = {
+        "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
+        "batchId": "batch-001", "role": "generation",
+        "items": [{"targetId": "com.acme.MyException#<init>", "status": "generated",
+                   "patchDescriptor": patch}],
+    }
+    try:
+        bp.validate_generation_response(resp, targets, batch_id="batch-001")
+        _assert("sut body call requires evidence ref", False, "did not raise")
+    except bp.BatchResponseError as exc:
+        _assert("sut body call requires evidence ref", "getMessage" in str(exc), str(exc))
+
+
+def case_response_sut_body_call_allowed_with_evidence_ref() -> None:
+    targets = [{
+        "targetId": "com.acme.MyException#<init>",
+        "sut": "com.acme.MyException",
+        "method": "<init>(Ljava/lang/String;)V",
+        "allowedImports": ["org.junit.jupiter.api.Test"],
+        "allowedEvidenceIds": [
+            "ctor:com.acme.MyException:11111111",
+            "sym:com.acme.MyException#getMessage:22222222",
+        ],
+        "evidenceRefs": [
+            {
+                "evidenceId": "ctor:com.acme.MyException:11111111",
+                "kind": "constructor",
+                "name": "constructor",
+                "params": [{"type": "java.lang.String"}],
+            },
+            {
+                "evidenceId": "sym:com.acme.MyException#getMessage:22222222",
+                "kind": "method",
+                "name": "getMessage",
+                "returnType": "java.lang.String",
+                "params": [],
+            },
+        ],
+    }]
+    patch = _patch("com.acme.MyException")
+    patch["methods"][0]["body"] = (
+        "// given\nString message = \"missing\";\n"
+        "// when\nMyException exception = new MyException(message);\n"
+        "// then\norg.junit.jupiter.api.Assertions.assertEquals(message, exception.getMessage());"
+    )
+    patch["methods"][0]["evidenceIds"] = [
+        "ctor:com.acme.MyException:11111111",
+        "sym:com.acme.MyException#getMessage:22222222",
+    ]
+    resp = {
+        "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
+        "batchId": "batch-001", "role": "generation",
+        "items": [{"targetId": "com.acme.MyException#<init>", "status": "generated",
+                   "patchDescriptor": patch}],
+    }
+    try:
+        bp.validate_generation_response(resp, targets, batch_id="batch-001")
+        _assert("sut body call allowed with evidence ref", True)
+    except bp.BatchResponseError as exc:
+        _assert("sut body call allowed with evidence ref", False, str(exc))
+
+
 def case_repair_patch_must_use_repair_prefix() -> None:
     resp = {
         "schemaVersion": bp.SCHEMA_REPAIR_RESPONSE, "runId": "run-1",

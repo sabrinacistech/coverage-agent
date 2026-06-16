@@ -29,6 +29,7 @@ Usage (normally launched by run_all_deterministic.py --generation-mode handoff-b
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -51,6 +52,11 @@ RC_NO_TARGETS = 7   # nothing pending — mirrors one_cycle/cycle_loop
 # PATH) and otherwise propagates Maven's exit code (1 on test failure). We treat
 # its 2 as "tests not run" so a missing Maven never looks like a compile failure.
 _RC_TESTS_NOT_RUN = 2
+_THROWABLE_METHODS = (
+    ("getMessage", "java.lang.String"),
+    ("getCause", "java.lang.Throwable"),
+    ("toString", "java.lang.String"),
+)
 
 
 # ── small JSON helpers ──────────────────────────────────────────────────────────
@@ -309,6 +315,24 @@ def _context_evidence(state_dir: Path, sut: str) -> tuple[list[str], list[dict]]
     for method in data.get("methods") or []:
         if isinstance(method, dict):
             add_ref("method", method)
+
+    classification = data.get("classification") if isinstance(data.get("classification"), dict) else {}
+    class_type = str(classification.get("type") or "").lower()
+    is_exception = class_type == "exception" or sut.endswith(("Exception", "Error"))
+    if is_exception:
+        for name, return_type in _THROWABLE_METHODS:
+            raw = f"sym:{sut}#{name}:java.lang.Throwable"
+            evidence_id = f"sym:{sut}#{name}:{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:8]}"
+            if evidence_id not in ids:
+                ids.append(evidence_id)
+            refs.append({
+                "evidenceId": evidence_id,
+                "kind": "method",
+                "name": name,
+                "returnType": return_type,
+                "params": [],
+                "inheritedFrom": "java.lang.Throwable",
+            })
     return ids, refs
 
 
@@ -594,7 +618,13 @@ def run_batches(
         batch_ids = [t.get("targetId") for t in targets]
         manifest.setdefault("batches", []).append({"batchId": batch_id, "targetIds": batch_ids})
         for t in targets:
-            bp.ensure_target(manifest, t.get("targetId"), sut=t.get("sut", ""), batch_id=batch_id)
+            bp.ensure_target(
+                manifest,
+                t.get("targetId"),
+                sut=t.get("sut", ""),
+                batch_id=batch_id,
+                method=t.get("method", ""),
+            )
             bp.set_status(manifest, t.get("targetId"), bp.GENERATION_REQUESTED)
 
         # Per-batch budget: tick (automatic work starts), check, pause during handoff.

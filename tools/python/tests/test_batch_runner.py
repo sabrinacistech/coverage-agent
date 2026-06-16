@@ -294,6 +294,33 @@ def case_runner_marks_unevidenced_target_method() -> None:
         _assert("runner unevidenced method has no target ids", row["targetEvidenceIds"] == [], str(row))
 
 
+def case_runner_adds_throwable_inherited_evidence() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        state = _setup(Path(td), 1)
+        sut = "com.acme.MyException"
+        pack = state / "context-packs" / f"{sut}.json"
+        pack.write_text(
+            json.dumps({
+                "schemaVersion": 1,
+                "sut": sut,
+                "classification": {"type": "exception"},
+                "allowedImports": ["org.junit.jupiter.api.Test"],
+                "constructors": [{
+                    "evidenceId": "ctor:com.acme.MyException:11111111",
+                    "visibility": "public",
+                    "params": [{"type": "java.lang.String"}],
+                }],
+                "methods": [],
+            }),
+            encoding="utf-8",
+        )
+        ids, refs = br._context_evidence(state, sut)
+        names = {r.get("name") for r in refs if r.get("kind") == "method"}
+        _assert("runner exception has getMessage evidence", "getMessage" in names, str(refs))
+        _assert("runner exception getMessage id exported",
+                any(i.startswith("sym:com.acme.MyException#getMessage:") for i in ids), str(ids))
+
+
 def case_budget_paused_during_handoff() -> None:
     with tempfile.TemporaryDirectory() as td:
         state = _setup(Path(td), 1)
@@ -327,6 +354,7 @@ def main() -> int:
         case_skipped_not_fatal, case_repair_payload_uses_canonical_test_class,
         case_runner_enriches_target_method_evidence,
         case_runner_marks_unevidenced_target_method,
+        case_runner_adds_throwable_inherited_evidence,
         case_budget_paused_during_handoff,
     ]
     for c in cases:
