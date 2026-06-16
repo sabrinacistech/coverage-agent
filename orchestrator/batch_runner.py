@@ -657,6 +657,64 @@ def _dependency_signatures(repo: Path | None, allowed_imports: list[str], sut: s
     return out
 
 
+_TEST_METHOD_RE = re.compile(r"\bvoid\s+([A-Za-z_$][\w$]*)\s*\(")
+
+
+def _existing_test_methods(repo: Path | None, sut: str) -> list[str]:
+    """@Test method names already in the SUT's test class so the generator avoids
+    exact duplicates and knows what coverage already exists. Returns [] when the
+    repo is absent or no test file exists yet (a new SUT with no tests)."""
+    if repo is None or not sut:
+        return []
+    test_file = repo / ("src/test/java/" + sut.replace(".", "/") + "Test.java")
+    if not test_file.exists():
+        return []
+    try:
+        lines = test_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return []
+    names: list[str] = []
+    for i, line in enumerate(lines):
+        if "@Test" not in line:
+            continue
+        # Handle `@Test void name(` on the same line (compact style) or
+        # the standard `@Test` alone followed by the method signature.
+        m = _TEST_METHOD_RE.search(line)
+        if m:
+            name = m.group(1)
+            if name not in names:
+                names.append(name)
+            continue
+        for j in range(i + 1, min(i + 5, len(lines))):
+            m = _TEST_METHOD_RE.search(lines[j])
+            if m:
+                name = m.group(1)
+                if name not in names:
+                    names.append(name)
+                break
+    return names
+
+
+def _expected_behavior_hints(item: dict) -> list[str]:
+    """Human-readable behavior hints sourced from the plan item's context block.
+    The planner writes generationHint (free text) and syntheticCoverageTargets
+    (lambda/branch sub-targets with descriptions) — these tell the generator which
+    branches to cover without requiring a repo read."""
+    context = item.get("context") or {}
+    hints: list[str] = []
+    hint = str(context.get("generationHint") or "").strip()
+    if hint:
+        hints.append(hint)
+    for sc in (context.get("syntheticCoverageTargets") or []):
+        if isinstance(sc, dict):
+            desc = str(sc.get("description") or sc.get("label") or sc.get("id") or "").strip()
+            if desc:
+                hints.append(desc)
+        elif isinstance(sc, str) and sc.strip():
+            hints.append(sc.strip())
+    return hints
+
+
 def _enrich_targets_with_imports(
     targets: list[dict], *, state_dir: Path, repo: Path | None = None
 ) -> list[dict]:
@@ -681,6 +739,11 @@ def _enrich_targets_with_imports(
         row["sutSourceCode"] = sut_source
         row["sutSourceTruncated"] = sut_truncated
         row["dependencySignatures"] = _dependency_signatures(repo, allowed_imports, sut)
+        # Populated from the existing test file + plan-item context hints so the
+        # generator knows what coverage exists and which branches to target,
+        # without reading any repository file (structuredContext in the request).
+        row["existingRelatedTests"] = _existing_test_methods(repo, sut)
+        row["expectedBehavior"] = _expected_behavior_hints(row)
         enriched.append(row)
     return enriched
 
@@ -1316,6 +1379,7 @@ def run_batches(
             "--state-dir", str(state_dir),
             "--repo", str(repo),
             "--run-dir", str(run_dir),
+            "--run-id", run_id,   # lets batch_final_report validate path consistency
             "--module", module,
         ])
         if rc_report != 0:

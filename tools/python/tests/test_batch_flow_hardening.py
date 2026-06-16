@@ -416,6 +416,100 @@ def case_repair_loop_stops_on_no_progress() -> None:
     _with_stubs(body)
 
 
+# ── existingRelatedTests + expectedBehavior enrichment ───────────────────────
+
+def case_existing_test_methods_extracted() -> None:
+    """_existing_test_methods reads @Test method names from a pre-existing test file."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        sut = "com.acme.MyService"
+        test_path = root / "src" / "test" / "java" / "com" / "acme" / "MyServiceTest.java"
+        test_path.parent.mkdir(parents=True, exist_ok=True)
+        test_path.write_text(
+            "class MyServiceTest {\n"
+            "    @Test\n"
+            "    void process_whenValid_returnsResult() {}\n"
+            "    @Test\n"
+            "    void process_whenNull_throwsException() {}\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        names = br._existing_test_methods(root, sut)
+        _assert("found both existing test methods", len(names) == 2, str(names))
+        _assert("first method name correct",
+                "process_whenValid_returnsResult" in names, str(names))
+        _assert("second method name correct",
+                "process_whenNull_throwsException" in names, str(names))
+
+    # No repo / no test file → empty list, no error.
+    _assert("no repo returns []", br._existing_test_methods(None, "com.acme.X") == [])
+    _assert("no test file returns []",
+            br._existing_test_methods(Path(td), "com.acme.NonExistent") == [])
+
+
+def case_expected_behavior_hints_extracted() -> None:
+    """_expected_behavior_hints reads from plan item context: generationHint and syntheticCoverageTargets."""
+    item_with_hint = {"context": {"generationHint": "cover the null path"}}
+    hints = br._expected_behavior_hints(item_with_hint)
+    _assert("generationHint extracted", hints == ["cover the null path"], str(hints))
+
+    item_with_synthetic = {"context": {
+        "syntheticCoverageTargets": [
+            {"id": "lambda$process$0", "description": "empty Optional path"},
+            {"label": "fallback branch"},
+            "bare string hint",
+        ]
+    }}
+    hints2 = br._expected_behavior_hints(item_with_synthetic)
+    _assert("synthetic descriptions extracted", len(hints2) == 3, str(hints2))
+    _assert("first synthetic hint", hints2[0] == "empty Optional path", str(hints2))
+    _assert("fallback label used", hints2[1] == "fallback branch", str(hints2))
+    _assert("bare string hint", hints2[2] == "bare string hint", str(hints2))
+
+    _assert("empty context returns []", br._expected_behavior_hints({}) == [])
+
+
+def case_enrichment_injects_existing_and_behavior() -> None:
+    """_enrich_targets_with_imports populates existingRelatedTests + expectedBehavior."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        sut = "com.acme.Svc"
+        state = root / "state"
+        pack_dir = state / "context-packs"
+        pack_dir.mkdir(parents=True, exist_ok=True)
+        pack = {"schemaVersion": 1, "sut": sut, "allowedImports": [],
+                "constructors": [], "methods": []}
+        (pack_dir / f"{sut}.json").write_text(json.dumps(pack), encoding="utf-8")
+
+        # Pre-existing test file.
+        tf = root / "src" / "test" / "java" / "com" / "acme" / "SvcTest.java"
+        tf.parent.mkdir(parents=True, exist_ok=True)
+        tf.write_text("class SvcTest { @Test void existing_test() {} }\n", encoding="utf-8")
+
+        targets = [{"targetId": f"{sut}#m", "sut": sut, "method": "m", "score": 1,
+                    "context": {"generationHint": "cover empty case"}}]
+        enriched = br._enrich_targets_with_imports(targets, state_dir=state, repo=root)
+        row = enriched[0]
+        _assert("existingRelatedTests populated",
+                row.get("existingRelatedTests") == ["existing_test"], str(row.get("existingRelatedTests")))
+        _assert("expectedBehavior populated",
+                row.get("expectedBehavior") == ["cover empty case"], str(row.get("expectedBehavior")))
+
+
+# ── batch_final_report --run-id consistency ───────────────────────────────────
+
+def case_batch_final_report_run_id_canonical() -> None:
+    """batch_final_report._canonical_run_dir computes the same path as RunPaths."""
+    import importlib  # noqa: PLC0415
+    bfr = importlib.import_module("batch_final_report")  # on sys.path via HERE.parent insert
+    state = Path("/tmp/state")
+    run_id = "run-20260616-120000"
+    canonical = bfr._canonical_run_dir(state, run_id)
+    expected = (state / "_llm" / "runs" / run_id).resolve()
+    _assert("canonical_run_dir matches RunPaths formula", canonical == expected, str(canonical))
+    _assert("canonical_run_dir contains run_id", run_id in canonical.parts, str(canonical))
+
+
 def main() -> int:
     cases = [
         case_preflight_skips_without_evidence,
@@ -438,6 +532,10 @@ def main() -> int:
         case_need_more_context_skips_target,
         case_repair_loop_stops_without_diagnostics,
         case_repair_loop_stops_on_no_progress,
+        case_existing_test_methods_extracted,
+        case_expected_behavior_hints_extracted,
+        case_enrichment_injects_existing_and_behavior,
+        case_batch_final_report_run_id_canonical,
     ]
     for c in cases:
         try:

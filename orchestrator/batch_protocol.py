@@ -599,6 +599,16 @@ def build_generation_request(
             },
         })
     return {
+        # Task 4: most prominent possible machine-readable directive — first key in
+        # the JSON so it is the first thing seen when the file is opened. The
+        # contextPolicy + selfContainedPolicy below are the authoritative enforcement;
+        # this field is the visual sentinel that stops accidental repository reads.
+        "_IMPORTANT_WARNING": (
+            "ISOLATED ENTITY. Operate ONLY on the information in THIS JSON. "
+            "DO NOT read, open, glob, or infer from any repository file, "
+            "source code, pom.xml, Git working tree, or path outside this request. "
+            "If a needed symbol is absent from this JSON, respond NEED_MORE_CONTEXT."
+        ),
         "schemaVersion": SCHEMA_GENERATION_REQUEST,
         "runId": run_id,
         "batchId": batch_id,
@@ -917,6 +927,12 @@ def build_repair_request(
     request repair (kept caller-side so this stays a pure builder).
     """
     return {
+        "_IMPORTANT_WARNING": (
+            "ISOLATED ENTITY. Operate ONLY on the information in THIS JSON. "
+            "DO NOT read, open, glob, or infer from any repository file, "
+            "source code, pom.xml, Git working tree, or path outside this request. "
+            "If a needed symbol is absent, respond NEED_MORE_CONTEXT or abandon."
+        ),
         "schemaVersion": SCHEMA_REPAIR_REQUEST,
         "runId": run_id,
         "batchId": batch_id,

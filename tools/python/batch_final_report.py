@@ -227,11 +227,22 @@ def write_report(report: dict, *, state_dir: Path, run_dir: Path | None) -> tupl
     return json_path, md_path
 
 
+def _canonical_run_dir(state_dir: Path, run_id: str) -> Path:
+    """Same path formula as RunPaths in batch_runner — no orchestrator import needed."""
+    return (state_dir / "_llm" / "runs" / run_id).resolve()
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Build final handoff-batch coverage report.")
     ap.add_argument("--state-dir", required=True, type=Path)
     ap.add_argument("--repo", required=True, type=Path)
-    ap.add_argument("--run-dir", type=Path)
+    ap.add_argument("--run-dir", type=Path,
+                    help="Explicit run directory. When --run-id is also given, "
+                         "both must point to the same path (consistency guard).")
+    ap.add_argument("--run-id", type=str, default=None,
+                    help="Run id (e.g. run-20260616-000000). When provided, the "
+                         "canonical run_dir is computed as state_dir/_llm/runs/<run_id>, "
+                         "which must match --run-dir when both are specified.")
     ap.add_argument("--module", default=".")
     ap.add_argument("--coverage-mode", default="coverage")
     ap.add_argument("--skip-maven", action="store_true")
@@ -239,7 +250,24 @@ def main(argv: list[str] | None = None) -> int:
 
     state_dir = args.state_dir.resolve()
     repo = args.repo.resolve()
-    run_dir = args.run_dir.resolve() if args.run_dir else _latest_run_dir(state_dir)
+
+    # Compute run_dir via run_id when provided (mirrors RunPaths, no import needed).
+    # If both --run-id and --run-dir are given, validate they resolve to the same path
+    # (guards against the mirror-folder drift that RunPaths prevents in the runner).
+    if args.run_id:
+        canonical = _canonical_run_dir(state_dir, args.run_id)
+        if args.run_dir:
+            given = args.run_dir.resolve()
+            if given != canonical:
+                print(
+                    f"[batch_final_report] WARNING: --run-dir {given} does not match "
+                    f"canonical path for --run-id {args.run_id!r} ({canonical}). "
+                    "Using the canonical path derived from --run-id.",
+                    flush=True,
+                )
+        run_dir: Path | None = canonical
+    else:
+        run_dir = args.run_dir.resolve() if args.run_dir else _latest_run_dir(state_dir)
     exec_state = _load_json_or(state_dir / "execution-state.json", {})
     cycle = int(exec_state.get("cycle", 1) or 1)
 
