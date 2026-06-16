@@ -239,6 +239,17 @@ GENERATION_RULES = [
     "If target.fixturePlan.complete is false, do NOT improvise the missing "
     "construction: respond with status NEED_MORE_CONTEXT and put the entries of "
     "target.fixturePlan.unresolvedCollaborators in missingSymbols.",
+    # creationRecipe contract (task 1/2) — when a 'new' collaborator carries HOW to
+    # build it, copy that exactly instead of inventing a different construction.
+    "When a target.fixturePlan.requiredCollaborators entry has a creationRecipe, "
+    "build it EXACTLY as the recipe says: use creationRecipe.expression verbatim "
+    "when present; otherwise construct via creationRecipe.kind + creationRecipe."
+    "evidenceId (constructor/builder/factory) using only the projected argument "
+    "values and dependencySignatures. Never substitute a different constructor.",
+    # enumConstants contract (task 3) — an enum/<clinit> target lists its constants.
+    "If target.enumConstants is non-empty the SUT is an enum: reference ONLY those "
+    "constant names (e.g. EnumType.NAME or EnumType.valueOf(\"NAME\")) and never "
+    "invent an enum constant that is not in target.enumConstants.",
     "When target.targetEvidenceRequired is true, every generated test method MUST "
     "include at least one id from target.targetEvidenceIds in method.evidenceIds. "
     "If target.targetEvidenceIds is empty, mark the target skipped/failed instead "
@@ -691,6 +702,83 @@ def _validate_sut_method_calls(
                 )
 
 
+# ── fixturePlan advisory signal (round-2 task 4) ─────────────────────────────────
+# fixturePlan is advisory; nothing flagged when the model STILL referenced a
+# collaborator variable that is neither declared locally nor part of the plan (the
+# exact undeclared-symbol bug the plan exists to prevent). This is a SIGNAL, never a
+# gate: the patcher's own G-gates remain the hard contract; this only surfaces the
+# smell so the runner can log it before the test runs.
+# A method-call receiver: a lowercase-initial identifier immediately followed by
+# `.method(`. Lowercase-initial keeps it to variable-like names (a Capitalized
+# receiver is a type/static, not a fixture variable).
+_RECEIVER_CALL_RE = re.compile(r"\b([a-z][A-Za-z0-9_$]*)\s*\.\s*[A-Za-z_$][\w$]*\s*\(")
+# Names we treat as "declared" (generous on purpose so the advisory signal does not
+# cry wolf): the target of an `=` assignment, and a name that follows a type at a
+# statement / parameter / for-each boundary.
+_ASSIGN_TARGET_RE = re.compile(r"([A-Za-z_$][\w$]*)\s*=(?!=)")
+_DECL_TARGET_RE = re.compile(
+    r"(?:^|[;{(,])\s*(?:final\s+)?[A-Za-z_$][\w$.<>\[\],]*\s+([A-Za-z_$][\w$]*)\s*[;=:)]")
+
+
+def undeclared_fixture_signal(patch: dict, fixture_plan: dict | None) -> list[str]:
+    """ADVISORY (never a gate): names the model used as a method-call receiver that
+    are neither declared locally, nor a patchDescriptor field, nor part of the
+    fixturePlan. These are the undeclared-collaborator references the fixturePlan
+    exists to prevent; surfacing them lets the runner log a signal without rejecting
+    the patch (task 4). Returns [] when nothing suspicious is found."""
+    if not isinstance(patch, dict):
+        return []
+    plan = fixture_plan if isinstance(fixture_plan, dict) else {}
+    declared: set[str] = set()
+    sut_var = plan.get("sutVariable")
+    if isinstance(sut_var, str) and sut_var:
+        declared.add(sut_var)
+    for collab in plan.get("requiredCollaborators") or []:
+        if isinstance(collab, dict) and isinstance(collab.get("name"), str):
+            declared.add(collab["name"])
+    ctor = plan.get("constructor") if isinstance(plan.get("constructor"), dict) else {}
+    for p in ctor.get("params") or []:
+        if isinstance(p, dict) and isinstance(p.get("name"), str):
+            declared.add(p["name"])
+    for field in patch.get("fields") or []:
+        if not isinstance(field, dict):
+            continue
+        decl = str(field.get("declaration") or field.get("source") or "")
+        for m in _DECL_TARGET_RE.finditer(decl):
+            declared.add(m.group(1))
+        fname = field.get("name")
+        if isinstance(fname, str) and fname:
+            declared.add(fname)
+    # Package roots from imports must never be flagged (e.g. the `org` of `org.junit…`).
+    import_roots: set[str] = set()
+    for imp in patch.get("allowedImports") or []:
+        if isinstance(imp, str) and imp:
+            import_roots.add(imp.split(".", 1)[0])
+
+    suspicious: list[str] = []
+    seen: set[str] = set()
+    for method in patch.get("methods") or []:
+        if not isinstance(method, dict):
+            continue
+        body = method.get("body")
+        if not isinstance(body, str) or not body:
+            continue
+        stripped = _strip_java_literals_and_comments(body)
+        local = set(declared)
+        for m in _ASSIGN_TARGET_RE.finditer(stripped):
+            local.add(m.group(1))
+        for m in _DECL_TARGET_RE.finditer(stripped):
+            local.add(m.group(1))
+        for m in _RECEIVER_CALL_RE.finditer(stripped):
+            name = m.group(1)
+            if (name in local or name in import_roots or name in _JAVA_KEYWORDS
+                    or name in ("this", "super") or name in seen):
+                continue
+            seen.add(name)
+            suspicious.append(name)
+    return suspicious
+
+
 def build_generation_request(
     run_id: str,
     batch_id: str,
@@ -742,6 +830,10 @@ def build_generation_request(
             # evidence/allowedImports contract. The model COPIES this instead of
             # inventing collaborator variables.
             "fixturePlan": item.get("fixturePlan") or {},
+            # Enum-constant names for an enum/<clinit> target (task 3), derived by the
+            # runner from the production source. Empty for non-enum SUTs. The model
+            # references ONLY these constants — never invents one.
+            "enumConstants": list(item.get("enumConstants") or []),
             "template": item.get("template"),
             "priority": item.get("score", i),
             "fixtureIds": item.get("fixtureIds", []),
@@ -760,6 +852,7 @@ def build_generation_request(
                 "dependencySources": list(item.get("dependencySignatures") or []),
                 "allowedApi": list(item.get("evidenceRefs") or []),
                 "fixturePlan": item.get("fixturePlan") or {},
+                "enumConstants": list(item.get("enumConstants") or []),
                 "existingRelatedTests": list(item.get("existingRelatedTests") or []),
                 "expectedBehavior": list(item.get("expectedBehavior") or []),
                 "missingContextPolicy": {"allowedStatus": "NEED_MORE_CONTEXT"},

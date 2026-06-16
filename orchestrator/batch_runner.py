@@ -797,7 +797,212 @@ def _creation_strategy(java_type: str, strategies: dict[str, str], mockito_ok: b
     return "unresolved", None
 
 
-def _build_fixture_plan(pack: dict, sut: str, allowed_imports: list[str]) -> dict:
+# ── creationRecipe: HOW to build a `new` collaborator (round-2 task 1/2) ─────────
+# A collaborator with creationStrategy 'new' carried no construction recipe before:
+# the model still had to improvise `new Foo(...)`. These helpers project a DERIVED
+# recipe — from the SUT's fixture-catalog entry, or from the collaborator's OWN
+# context-pack constructor — and NEVER fabricate a snippet they cannot back with
+# evidence (an undeterminable construction stays without an `expression`).
+
+def _fixture_for_type(pack: dict, java_type: str) -> dict | None:
+    """The fixture-catalog entry whose ``type`` matches ``java_type`` (by FQCN,
+    its generic base, or simple name). None when the pack carries no such fixture."""
+    base = java_type.split("<", 1)[0].strip()
+    simple = _simple_name(java_type)
+    for fx in pack.get("fixtures") or []:
+        if not isinstance(fx, dict):
+            continue
+        t = fx.get("type")
+        if not isinstance(t, str) or not t:
+            continue
+        if t == java_type or t == base or _simple_name(t) == simple:
+            return fx
+    return None
+
+
+def _recipe_from_fixture(fx: dict, simple: str) -> dict | None:
+    """A creationRecipe DERIVED from a fixture-catalog entry. Emits a concrete
+    construction snippet ONLY when the evidence supports it (a constructor with
+    projected ``values``, a builder with ``builderEvidence``); otherwise it cites
+    the evidenced strategy without fabricating arguments the model would take as
+    truth."""
+    strategy = fx.get("strategy")
+    values = fx.get("values") if isinstance(fx.get("values"), dict) else {}
+    arg_values = [str(v) for v in values.values()]
+    if strategy == "constructor":
+        recipe = {"kind": "constructor", "evidenceId": fx.get("constructorEvidence"),
+                  "argumentValues": arg_values, "source": "fixture-catalog"}
+        if arg_values:
+            recipe["expression"] = f"new {simple}({', '.join(arg_values)})"
+        else:
+            recipe["note"] = ("construct via the evidenced constructor; arguments "
+                              "not projected — use dependencySignatures")
+        return recipe
+    if strategy == "builder":
+        evidence = fx.get("builderEvidence")
+        recipe = {"kind": "builder", "evidenceId": evidence,
+                  "requiredValues": dict(values), "source": "fixture-catalog"}
+        if isinstance(evidence, str) and evidence.strip():
+            recipe["template"] = evidence.strip()
+        return recipe
+    if strategy == "factory":
+        return {"kind": "factory", "evidenceId": fx.get("factoryEvidence"),
+                "argumentValues": arg_values, "source": "fixture-catalog",
+                "note": "construct via the evidenced static factory"}
+    return None
+
+
+def _recipe_from_pack_constructor(pack: dict, fqcn: str, *, state_dir: Path | None,
+                                  mockito_ok: bool, seen: frozenset[str]) -> dict | None:
+    """A fully-concrete ``new Type(...)`` recipe derived from the collaborator's own
+    context-pack: its smallest public constructor, with every argument itself
+    DERIVED (a literal, or a nested fully-derivable construction). Returns None
+    unless the WHOLE construction can be derived — never emits a placeholder
+    (round-2 task 2: rescue a project value-object that has an evidenced ctor)."""
+    ctors = [c for c in (pack.get("constructors") or [])
+             if isinstance(c, dict) and (c.get("visibility") or "public") == "public"]
+    if not ctors:
+        return None
+    chosen = min(ctors, key=lambda c: len(c.get("params") or []))
+    simple = _simple_name(fqcn)
+    args: list[str] = []
+    for p in (chosen.get("params") or []):
+        ptype = str((p or {}).get("type") or "")
+        if _is_literal_type(ptype):
+            args.append(_literal_value(ptype))
+            continue
+        nested = _derive_new_recipe(ptype, sut_pack=pack, state_dir=state_dir,
+                                    mockito_ok=mockito_ok, seen=seen)
+        expr = nested.get("expression") if nested else None
+        if not expr:
+            return None  # cannot fully derive → do not invent
+        args.append(expr)
+    return {"kind": "constructor", "expression": f"new {simple}({', '.join(args)})",
+            "evidenceId": chosen.get("evidenceId"), "argumentValues": args,
+            "source": "collaborator-context-pack"}
+
+
+def _derive_new_recipe(java_type: str, *, sut_pack: dict, state_dir: Path | None,
+                       mockito_ok: bool, seen: frozenset[str]) -> dict | None:
+    """creationRecipe for a 'new' collaborator (task 1) and the resolver that
+    rescues an otherwise-unresolved collaborator from its OWN context-pack
+    constructor (task 2). DERIVED only — returns None when nothing in the metadata
+    lets us build the type without inventing. Recursion is bounded by ``seen`` so a
+    constructor cycle (A needs B needs A) terminates instead of looping."""
+    fx = _fixture_for_type(sut_pack, java_type)
+    if fx is not None:
+        recipe = _recipe_from_fixture(fx, _simple_name(java_type))
+        if recipe is not None:
+            return recipe
+    base = java_type.split("<", 1)[0].strip()
+    if state_dir is not None and base and base not in seen:
+        collab_pack = _load_context_pack(state_dir, base)
+        if collab_pack:
+            recipe = _recipe_from_pack_constructor(
+                collab_pack, base, state_dir=state_dir, mockito_ok=mockito_ok,
+                seen=seen | {base})
+            if recipe is not None:
+                return recipe
+    return None
+
+
+# ── enum constants for a <clinit>/enum target (round-2 task 3) ────────────────────
+# No evidenceRef kind carries enum constants, so an enum <clinit> target was almost
+# always skipped (CLINIT_WITHOUT_ENUM_CONSTANTS). We DERIVE the constant names from
+# the production source (already read for the hermetic payload) and attach them as a
+# request hint the pre-flight accepts — never invented.
+_ENUM_DECL_RE = re.compile(r"\benum\s+([A-Za-z_$][\w$]*)")
+
+
+def _enum_constant_region(body: str) -> str:
+    """The leading region of an enum body holding the constant declarations:
+    everything up to the first top-level ';' (or the whole body when the enum has
+    no members beyond its constants). Paren/brace aware so a constant with a
+    constructor argument or a member body does not end the scan early."""
+    depth = 0
+    for i, c in enumerate(body):
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth = max(0, depth - 1)
+        elif c == ";" and depth == 0:
+            return body[:i]
+    return body
+
+
+def _split_enum_constants(region: str) -> list[str]:
+    """Constant names from an enum constant region (top-level comma separated); for
+    each element take the leading identifier (drops constructor args / member body)."""
+    elements: list[str] = []
+    token: list[str] = []
+    depth = 0
+    for c in region:
+        if c in "([{":
+            depth += 1; token.append(c)
+        elif c in ")]}":
+            depth = max(0, depth - 1); token.append(c)
+        elif c == "," and depth == 0:
+            elements.append("".join(token)); token = []
+        else:
+            token.append(c)
+    if "".join(token).strip():
+        elements.append("".join(token))
+    names: list[str] = []
+    for el in elements:
+        m = re.match(r"\s*([A-Za-z_$][\w$]*)", el)
+        if m:
+            names.append(m.group(1))
+    return names
+
+
+def _enum_constants_from_source(source: str) -> list[str]:
+    code = _JAVA_LINE_COMMENT.sub("", _JAVA_BLOCK_COMMENT.sub("", source))
+    m = _ENUM_DECL_RE.search(code)
+    if not m:
+        return []
+    brace = code.find("{", m.end())
+    if brace < 0:
+        return []
+    end = _match_brace(code, brace)
+    region = _enum_constant_region(code[brace + 1:end])
+    out: list[str] = []
+    for name in _split_enum_constants(region):
+        if name not in out:
+            out.append(name)
+    return out
+
+
+def _enum_constants(repo: Path | None, sut: str, pack: dict) -> list[str]:
+    """Enum-constant names for an enum SUT (task 3), DERIVED from the production
+    source so a <clinit>/enum target is testable batch-only instead of being skipped
+    for want of enum-constant evidence. Returns [] when the SUT is not classified as
+    an enum, the repo/source is absent, or no constants can be parsed (never invents).
+
+    Source precondition: no upstream artifact carries the constant NAMES — neither
+    the symbol-contract, the semantic-index (classes.json/methods.json) nor the
+    context-pack project them; only ``kind: enum`` plus the values()/valueOf()
+    methods are indexed. So the production .java is the single source of truth here.
+    This rides on the SAME precondition the hermetic payload already requires:
+    ``_read_sut_source`` reads ``src/main/java/<fqcn>.java`` for every target. If the
+    source is genuinely absent the enum degrades to a skip (the safe failure — better
+    skipped than hallucinated), exactly as a body-less target does today."""
+    classification = pack.get("classification") if isinstance(pack.get("classification"), dict) else {}
+    if classification.get("type") != "enum":
+        return []
+    if repo is None or not sut:
+        return []
+    path = _source_path(repo, sut)
+    if not path.exists():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    return _enum_constants_from_source(text)
+
+
+def _build_fixture_plan(pack: dict, sut: str, allowed_imports: list[str],
+                        *, state_dir: Path | None = None) -> dict:
     """Derive the per-target fixturePlan (task 1) from the context-pack.
 
     Style is always ``local_variables`` (lowest ambiguity); a collaborator that can
@@ -832,6 +1037,9 @@ def _build_fixture_plan(pack: dict, sut: str, allowed_imports: list[str]) -> dic
         return plan
 
     strategies = _collaborator_strategies(pack)
+    # Seed the recursion guard with the SUT itself so a self-referential collaborator
+    # never loops back into the SUT's own constructor.
+    seen = frozenset({sut.split("<", 1)[0].strip()})
     chosen = min(public, key=lambda c: len(c.get("params") or []))
     params = chosen.get("params") or []
     used: set[str] = set()
@@ -850,6 +1058,24 @@ def _build_fixture_plan(pack: dict, sut: str, allowed_imports: list[str]) -> dic
         collab: dict = {"name": name, "type": jtype, "creationStrategy": strategy}
         if strategy == "literal":
             collab["value"] = value
+        elif strategy == "new":
+            # task 1: attach HOW to build this collaborator (from its fixture entry
+            # or its own context-pack constructor) so the model copies it.
+            recipe = _derive_new_recipe(jtype, sut_pack=pack, state_dir=state_dir,
+                                        mockito_ok=mockito_ok, seen=seen)
+            if recipe is not None:
+                collab["creationRecipe"] = recipe
+        elif strategy == "unresolved":
+            # task 2: a collaborator with no SUT-level fixture/dependency strategy may
+            # still be a project value-object whose OWN context-pack carries an
+            # evidenced public constructor → rescue it to 'new' with a fully-derived
+            # recipe (never on a partial/placeholder construction).
+            recipe = _derive_new_recipe(jtype, sut_pack=pack, state_dir=state_dir,
+                                        mockito_ok=mockito_ok, seen=seen)
+            if recipe is not None and recipe.get("expression"):
+                strategy = "new"
+                collab["creationStrategy"] = "new"
+                collab["creationRecipe"] = recipe
         collaborators.append(collab)
         if strategy == "unresolved":
             plan["unresolvedCollaborators"].append(
@@ -874,6 +1100,7 @@ def _enrich_targets_with_imports(
     for target in targets:
         row = dict(target)
         sut = str(row.get("sut") or "")
+        pack = _load_context_pack(state_dir, sut)
         evidence_ids, evidence_refs = _context_evidence(state_dir, sut)
         target_method, target_required, target_evidence = _target_evidence_ids(
             row, sut, evidence_refs
@@ -885,11 +1112,18 @@ def _enrich_targets_with_imports(
         row["targetMethodName"] = target_method
         row["targetEvidenceRequired"] = target_required
         row["targetEvidenceIds"] = target_evidence
-        # Deterministic construction recipe (task 1): how to declare the SUT and
-        # create each constructor collaborator, derived from the context-pack so the
-        # model copies it instead of inventing variables.
-        row["fixturePlan"] = _build_fixture_plan(
-            _load_context_pack(state_dir, sut), sut, allowed_imports)
+        # Deterministic construction recipe (task 1/2): how to declare the SUT and
+        # create each constructor collaborator (with a per-collaborator creationRecipe
+        # for 'new' types), derived from the context-pack so the model copies it
+        # instead of inventing variables. state_dir lets _build_fixture_plan read a
+        # collaborator's OWN context-pack to rescue an otherwise-unresolved value-object.
+        row["fixturePlan"] = _build_fixture_plan(pack, sut, allowed_imports, state_dir=state_dir)
+        # Enum-constant hint (task 3): an enum <clinit>/value target is only testable
+        # batch-only when the constant names travel in the request. Derived from the
+        # production source so the pre-flight does not skip every enum.
+        enum_constants = _enum_constants(repo, sut, pack)
+        if enum_constants:
+            row["enumConstants"] = enum_constants
         # Hermetic payload: ship the SUT verbatim + project-collaborator signatures
         # so the generator never reads the Git working tree (avoids stale/ghost code).
         sut_source, sut_truncated = _read_sut_source(repo, sut)
@@ -1173,11 +1407,16 @@ def _failed_items_for_repair(manifest: dict, *, state_dir: Path, repo: Path,
 
 def _process_generation(
     response_items: list[dict], manifest: dict, *, state_dir: Path, repo: Path,
-    batch_ids: list[str],
-) -> dict[str, str]:
-    """Apply the generation response. Returns {targetId: testClass} for APPLIED
-    targets (the ones to test). skipped/failed items are recorded, never fatal."""
+    batch_ids: list[str], fixture_plans: dict[str, dict] | None = None,
+) -> tuple[dict[str, str], list[dict]]:
+    """Apply the generation response. Returns (applied, complianceWarnings) where
+    ``applied`` is {targetId: testClass} for the APPLIED targets (the ones to test)
+    and ``complianceWarnings`` is the auditable fixturePlan-signal list (task 4),
+    persisted alongside the batch in validation-result.json. skipped/failed items
+    are recorded, never fatal."""
     applied: dict[str, str] = {}
+    compliance_warnings: list[dict] = []
+    plans = fixture_plans or {}
     by_id = {it["targetId"]: it for it in response_items}
     for tid in batch_ids:
         it = by_id.get(tid)
@@ -1202,6 +1441,17 @@ def _process_generation(
             continue
         patch = it.get("patchDescriptor") or {}
         test_class = patch.get("testClass", "")
+        # fixturePlan advisory SIGNAL (task 4): the model may still reference a
+        # collaborator variable that is neither declared locally nor in the plan.
+        # This NEVER blocks the patch — it is collected into fixtureComplianceWarnings
+        # (written to validation-result.json, auditable alongside the batch) and
+        # printed, so the undeclared-symbol failure mode is visible before the test runs.
+        signals = bp.undeclared_fixture_signal(patch, plans.get(tid))
+        if signals:
+            _print(f"[fixturePlan] {tid}: referencias no declaradas fuera del plan: "
+                   f"{', '.join(signals)} (señal advisory, no bloquea).")
+            compliance_warnings.append(
+                {"targetId": tid, "undeclaredReferences": signals})
         # Persist the descriptor so the repair payload can reconstruct the exact
         # test that failed even when the patcher rejected it before writing a file.
         bp.set_status(manifest, tid, bp.GENERATED, testClass=test_class,
@@ -1215,7 +1465,7 @@ def _process_generation(
             # tear down the rest of the batch.
             bp.set_status(manifest, tid, bp.PATCH_FAILED, note=f"patcher rc={rc}")
             _print(f"[batch] patch no aplicado para {tid} (rc={rc}); sigo con el resto.")
-    return applied
+    return applied, compliance_warnings
 
 
 def _process_repair(
@@ -1383,8 +1633,11 @@ def run_batches(
             _save_manifest(run_dir, manifest)
             continue
 
-        applied = _process_generation(items, manifest, state_dir=state_dir, repo=repo,
-                                      batch_ids=sendable_ids)
+        fixture_plans = {t.get("targetId"): (t.get("fixturePlan") or {})
+                         for t in request_targets}
+        applied, compliance_warnings = _process_generation(
+            items, manifest, state_dir=state_dir, repo=repo,
+            batch_ids=sendable_ids, fixture_plans=fixture_plans)
         _save_manifest(run_dir, manifest)
 
         # ── run tests + classify ─────────────────────────────────────────────────
@@ -1404,7 +1657,8 @@ def run_batches(
         counts = _classify_batch(manifest, repo=repo, applied=applied, rc=rc_tests)
         _write_json(paths.validation_result(batch_id),
                     {"batchId": batch_id, "rc": rc_tests, "counts": counts,
-                     "applied": applied, "preflightSkipped": preflight_skipped})
+                     "applied": applied, "preflightSkipped": preflight_skipped,
+                     "fixtureComplianceWarnings": compliance_warnings})
         _save_manifest(run_dir, manifest)
 
         # ── repair rounds (only failures, strict admission — task 6) ─────────────

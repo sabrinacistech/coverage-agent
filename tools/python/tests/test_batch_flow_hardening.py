@@ -593,6 +593,219 @@ def case_fixture_plan_in_generation_request() -> None:
             str(t0["structuredContext"].get("fixturePlan")))
 
 
+# ── round-2 task 1: creationRecipe per 'new' collaborator ─────────────────────
+
+def case_creation_recipe_from_fixture_constructor() -> None:
+    """A 'new' collaborator whose type has a constructor fixture (with values +
+    constructorEvidence) gets a concrete creationRecipe snippet."""
+    pack = {
+        "schemaVersion": 1, "sut": "com.acme.Svc",
+        "constructors": [{"evidenceId": "ctor:com.acme.Svc:1", "visibility": "public",
+                          "params": [{"type": "com.acme.Repo", "name": "repo"}]}],
+        "dependencies": [],
+        "fixtures": [{"id": "com.acme.Repo", "type": "com.acme.Repo", "strategy": "constructor",
+                      "constructorEvidence": "ctor:com.acme.Repo:1",
+                      "values": {"id": "0", "name": '""'}}],
+    }
+    plan = br._build_fixture_plan(pack, "com.acme.Svc", ["org.junit.jupiter.api.Test"])
+    repo = plan["requiredCollaborators"][0]
+    _assert("collaborator with fixture ctor → new", repo["creationStrategy"] == "new", str(repo))
+    rc = repo.get("creationRecipe") or {}
+    _assert("creationRecipe kind constructor", rc.get("kind") == "constructor", str(rc))
+    _assert("creationRecipe expression derived",
+            rc.get("expression") == 'new Repo(0, "")', str(rc))
+    _assert("creationRecipe cites evidenceId",
+            rc.get("evidenceId") == "ctor:com.acme.Repo:1", str(rc))
+    _assert("creationRecipe source fixture-catalog", rc.get("source") == "fixture-catalog", str(rc))
+
+
+def case_creation_recipe_builder_template() -> None:
+    """A builder-strategy fixture yields a builder recipe carrying the evidence
+    template, without fabricating a constructor."""
+    pack = {
+        "schemaVersion": 1, "sut": "com.acme.Svc",
+        "constructors": [{"evidenceId": "c", "visibility": "public",
+                          "params": [{"type": "com.acme.Cfg", "name": "cfg"}]}],
+        "dependencies": [],
+        "fixtures": [{"id": "com.acme.Cfg", "type": "com.acme.Cfg", "strategy": "builder",
+                      "builderEvidence": "Cfg.builder() … build()", "values": {"name": '""'}}],
+    }
+    plan = br._build_fixture_plan(pack, "com.acme.Svc", ["org.junit.jupiter.api.Test"])
+    rc = plan["requiredCollaborators"][0].get("creationRecipe") or {}
+    _assert("builder recipe kind", rc.get("kind") == "builder", str(rc))
+    _assert("builder recipe template carried",
+            rc.get("template") == "Cfg.builder() … build()", str(rc))
+    _assert("builder recipe has no fabricated expression", "expression" not in rc, str(rc))
+
+
+# ── round-2 task 2: rescue unresolved collaborator from its own context-pack ───
+
+def case_collaborator_rescued_from_own_pack() -> None:
+    """A constructor param with no SUT-level fixture/dependency is rescued to 'new'
+    when its OWN context-pack carries an evidenced public constructor of literals."""
+    with tempfile.TemporaryDirectory() as td:
+        state = Path(td) / "state"
+        (state / "context-packs").mkdir(parents=True, exist_ok=True)
+        # The collaborator's own context-pack: a value-object with a (int, String) ctor.
+        value_pack = {"schemaVersion": 1, "sut": "com.acme.Value",
+                      "constructors": [{"evidenceId": "ctor:com.acme.Value:1", "visibility": "public",
+                                        "params": [{"type": "int", "name": "n"},
+                                                   {"type": "java.lang.String", "name": "s"}]}],
+                      "methods": [], "dependencies": [], "fixtures": []}
+        (state / "context-packs" / "com.acme.Value.json").write_text(
+            json.dumps(value_pack), encoding="utf-8")
+        sut_pack = {
+            "schemaVersion": 1, "sut": "com.acme.Svc",
+            "constructors": [{"evidenceId": "ctor:com.acme.Svc:1", "visibility": "public",
+                              "params": [{"type": "com.acme.Value", "name": "v"}]}],
+            "dependencies": [], "fixtures": [],
+        }
+        # Without state_dir → unresolved (no way to derive construction).
+        plan0 = br._build_fixture_plan(sut_pack, "com.acme.Svc", ["org.junit.jupiter.api.Test"])
+        _assert("no state_dir → value-object unresolved",
+                plan0["requiredCollaborators"][0]["creationStrategy"] == "unresolved", str(plan0))
+        # With state_dir → rescued to 'new' with a fully-derived recipe.
+        plan = br._build_fixture_plan(sut_pack, "com.acme.Svc",
+                                      ["org.junit.jupiter.api.Test"], state_dir=state)
+        v = plan["requiredCollaborators"][0]
+        _assert("value-object rescued to new", v["creationStrategy"] == "new", str(v))
+        _assert("plan complete after rescue", plan["complete"] is True, str(plan))
+        rc = v.get("creationRecipe") or {}
+        _assert("rescued recipe expression",
+                rc.get("expression") == 'new Value(0, "")', str(rc))
+        _assert("rescued recipe source own pack",
+                rc.get("source") == "collaborator-context-pack", str(rc))
+        _assert("rescued recipe evidenceId",
+                rc.get("evidenceId") == "ctor:com.acme.Value:1", str(rc))
+
+
+# ── round-2 task 3: enum-constant derivation ──────────────────────────────────
+
+def case_enum_constants_parsed_from_source() -> None:
+    src = ("package x;\npublic enum Status {\n    ACTIVE(\"a\"), INACTIVE(\"b\");\n"
+           "    private final String c;\n    Status(String c) { this.c = c; }\n}\n")
+    names = br._enum_constants_from_source(src)
+    _assert("two enum constants parsed", names == ["ACTIVE", "INACTIVE"], str(names))
+    # A simple enum with no constructor args.
+    simple = "public enum Color { RED, GREEN, BLUE }"
+    _assert("simple enum constants", br._enum_constants_from_source(simple) == ["RED", "GREEN", "BLUE"],
+            str(br._enum_constants_from_source(simple)))
+    # A non-enum source yields nothing.
+    _assert("non-enum → no constants",
+            br._enum_constants_from_source("public class Foo { }") == [])
+
+
+def case_enum_constants_enrichment_and_request() -> None:
+    """_enum_constants reads from the production source only for an enum SUT, and the
+    enrichment + request surface the constants so the <clinit> pre-flight passes."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        sut = "com.acme.Status"
+        state = root / "state"
+        (state / "context-packs").mkdir(parents=True, exist_ok=True)
+        pack = {"schemaVersion": 1, "sut": sut, "allowedImports": ["org.junit.jupiter.api.Test"],
+                "classification": {"type": "enum"},
+                "constructors": [], "fixtures": [], "dependencies": [],
+                "methods": [{"evidenceId": f"sym:{sut}#values:1", "name": "values",
+                             "returnType": f"{sut}[]", "params": [], "usable": True}]}
+        (state / "context-packs" / f"{sut}.json").write_text(json.dumps(pack), encoding="utf-8")
+        src = root / "src" / "main" / "java" / "com" / "acme" / "Status.java"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("package com.acme;\npublic enum Status { ACTIVE, INACTIVE; }\n",
+                       encoding="utf-8")
+        # Direct derivation.
+        _assert("enum constants derived for enum SUT",
+                br._enum_constants(root, sut, pack) == ["ACTIVE", "INACTIVE"],
+                str(br._enum_constants(root, sut, pack)))
+        # A non-enum classification yields nothing even with an enum source present.
+        _assert("non-enum classification → no constants",
+                br._enum_constants(root, sut, {"classification": {"type": "service"}}) == [])
+        # Enrichment attaches enumConstants; the <clinit> target then passes preflight.
+        targets = [{"targetId": f"{sut}#<clinit>", "sut": sut, "method": "<clinit>", "score": 1}]
+        enriched = br._enrich_targets_with_imports(targets, state_dir=state, repo=root)
+        row = enriched[0]
+        _assert("enrichment attaches enumConstants",
+                row.get("enumConstants") == ["ACTIVE", "INACTIVE"], str(row.get("enumConstants")))
+        _assert("clinit target passes preflight with constants",
+                bp.preflight_evidence_gate(row) is None,
+                str(bp.preflight_evidence_gate(row)))
+        req = bp.build_generation_request("run-1", "batch-001", [row], batch_size=10)
+        t0 = req["targets"][0]
+        _assert("request surfaces enumConstants",
+                t0["enumConstants"] == ["ACTIVE", "INACTIVE"], str(t0.get("enumConstants")))
+        _assert("structuredContext surfaces enumConstants",
+                t0["structuredContext"]["enumConstants"] == ["ACTIVE", "INACTIVE"],
+                str(t0["structuredContext"].get("enumConstants")))
+
+
+# ── round-2 task 4: fixturePlan advisory signal ───────────────────────────────
+
+def case_undeclared_fixture_signal() -> None:
+    """A receiver variable that is neither declared, a field, nor in the plan is
+    flagged; declared/plan/import-root receivers are not."""
+    plan = {"sutVariable": "svc",
+            "requiredCollaborators": [{"name": "repo", "type": "com.acme.Repo"}],
+            "constructor": {"params": [{"type": "com.acme.Repo", "name": "repo"}]}}
+    patch = {"allowedImports": ["org.junit.jupiter.api.Assertions"],
+             "fields": [{"name": "clock", "declaration": "Clock clock;"}],
+             "methods": [{"name": "t", "annotations": ["@Test"],
+                          "body": ("// given\nSvc svc = new Svc(repo);\n"
+                                   "// when\nObject r = svc.run();\n"
+                                   "controller.handle();\n"
+                                   "repo.find();\nclock.now();\n"
+                                   "org.junit.jupiter.api.Assertions.assertNotNull(r);\n"
+                                   "// then")}]}
+    signals = bp.undeclared_fixture_signal(patch, plan)
+    _assert("undeclared receiver flagged", "controller" in signals, str(signals))
+    _assert("plan collaborator not flagged", "repo" not in signals, str(signals))
+    _assert("sut variable not flagged", "svc" not in signals, str(signals))
+    _assert("patch field not flagged", "clock" not in signals, str(signals))
+    _assert("import root not flagged", "org" not in signals, str(signals))
+    # No plan + no undeclared receivers → empty.
+    clean = {"methods": [{"name": "t", "body": "int x = 1;\nObject o = new Object();"}]}
+    _assert("clean body → no signal", bp.undeclared_fixture_signal(clean, None) == [], )
+
+
+def case_fixture_compliance_warnings_in_validation_result() -> None:
+    """An undeclared collaborator reference surfaces in validation-result.json under
+    fixtureComplianceWarnings (task 4 — auditable alongside the batch, never a gate)."""
+    def body() -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            state = _setup(root, {"com.acme.C0": _pack_with_evidence("com.acme.C0")})
+            patch = _patch("com.acme.C0")
+            patch["methods"][0]["body"] = (
+                "// given\nObject v = new Object();\ncontroller.handle();\n"
+                "// when\nObject a = v;\n// then\n"
+                "org.junit.jupiter.api.Assertions.assertSame(v, a);")
+            gen = {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "r",
+                   "batchId": "batch-001", "role": "generation",
+                   "items": [{"targetId": "com.acme.C0#m", "status": "generated",
+                              "patchDescriptor": patch}]}
+            br._apply_patch = lambda patch, *, state_dir, repo, repair_attempts=None: 0  # type: ignore
+            br._run_tests = lambda repo, state_dir, tcs: 0  # type: ignore
+            br.one_cycle._run_tool = lambda script, args: 0  # type: ignore
+            br._wait_for_response = lambda *a, **k: ("ok", gen)  # type: ignore
+            br.run_batches(state, root, batch_size=10, max_repair_rounds=0, max_batches=None)
+            vr = json.loads((_run_dir(state) / "batches" / "batch-001" /
+                             "validation-result.json").read_text(encoding="utf-8"))
+            warns = vr.get("fixtureComplianceWarnings")
+            _assert("validation-result carries fixtureComplianceWarnings",
+                    isinstance(warns, list) and len(warns) == 1, str(warns))
+            _assert("warning targets the right id",
+                    bool(warns) and warns[0]["targetId"] == "com.acme.C0#m", str(warns))
+            _assert("warning lists the undeclared reference",
+                    bool(warns) and "controller" in warns[0]["undeclaredReferences"], str(warns))
+            _assert("advisory signal does not block (target PASSED)",
+                    _manifest(state)["targets"]["com.acme.C0#m"]["status"] == bp.PASSED,
+                    str(_manifest(state)["targets"]["com.acme.C0#m"]))
+            # The signal is NOT persisted on the manifest target anymore.
+            _assert("no fixturePlanSignals on manifest target",
+                    "fixturePlanSignals" not in _manifest(state)["targets"]["com.acme.C0#m"],
+                    str(_manifest(state)["targets"]["com.acme.C0#m"]))
+    _with_stubs(body)
+
+
 # ── preflight TARGET_METHOD_BODY_MISSING (task 2) ─────────────────────────────
 
 def case_preflight_body_missing() -> None:
@@ -748,6 +961,13 @@ def main() -> int:
         case_fixture_plan_complete_with_collaborators,
         case_fixture_plan_incomplete_unresolved,
         case_fixture_plan_in_generation_request,
+        case_creation_recipe_from_fixture_constructor,
+        case_creation_recipe_builder_template,
+        case_collaborator_rescued_from_own_pack,
+        case_enum_constants_parsed_from_source,
+        case_enum_constants_enrichment_and_request,
+        case_undeclared_fixture_signal,
+        case_fixture_compliance_warnings_in_validation_result,
         case_preflight_body_missing,
         case_preflight_body_missing_constructor,
         case_preflight_clinit_requires_enum_constants,
