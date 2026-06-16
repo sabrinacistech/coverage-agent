@@ -64,6 +64,11 @@ _MAX_SUT_SOURCE_BYTES = 60_000
 _MAX_DEP_SIGNATURES = 25
 _MAX_DEP_FILE_BYTES = 200_000
 
+# Copy-paste handoff prompt written next to each batch's request, so the human
+# pastes a prompt with the REAL resolved run/batch paths (never the placeholder
+# run-YYYYMMDD-HHMMSS) into Claude Code / Codex.
+HANDOFF_PROMPT_NAME = "handoff-prompt.txt"
+
 
 # ── small JSON helpers ──────────────────────────────────────────────────────────
 
@@ -127,6 +132,9 @@ class RunPaths:
     def validation_result_repair(self, batch_id: str, rnd: int) -> Path:
         return self.batch_dir(batch_id) / f"validation-result-r{rnd}.json"
 
+    def handoff_prompt(self, batch_id: str) -> Path:
+        return self.batch_dir(batch_id) / HANDOFF_PROMPT_NAME
+
     def assert_consistent(self, batch_id: str, repair_round: int = 1) -> None:
         """Prove every derived path belongs to exactly this runId/batchId and stays
         under run_dir (no mirror folder with a stray suffix). Used by tests and as a
@@ -137,7 +145,7 @@ class RunPaths:
         batch_level = [
             self.batch_dir(batch_id), self.request_generation(batch_id),
             self.response_generation(batch_id), self.validation_result(batch_id),
-            self.preflight_result(batch_id),
+            self.preflight_result(batch_id), self.handoff_prompt(batch_id),
             self.request_repair(batch_id, repair_round),
             self.response_repair(batch_id, repair_round),
             self.validation_result_repair(batch_id, repair_round),
@@ -172,6 +180,51 @@ def _print(msg: str) -> None:
     print(msg, flush=True)
 
 
+_PASTE_OPEN = "───────────── COPIÁ DESDE ACÁ (pegar en Claude Code / Codex) ─────────────"
+_PASTE_CLOSE = "───────────── COPIÁ HASTA ACÁ ─────────────"
+
+
+def _build_handoff_prompt(kind: str, request: Path, response: Path,
+                          repair_round: int | None = None) -> str:
+    """Pure: the ready-to-paste handoff prompt with ABSOLUTE paths already
+    interpolated from the real request/response Paths — never the placeholder
+    ``run-YYYYMMDD-HHMMSS``. Distinguishes generation vs repair.
+    """
+    if kind == "generation":
+        title = "Resolvé el handoff batch de coverage-agent."
+        schema = bp.SCHEMA_GENERATION_RESPONSE
+        rules = (
+            f'- schemaVersion "{schema}".\n'
+            "- Un item por cada target del request.\n"
+            "- Por target: status \"generated\" + patchDescriptor válido, o \"skipped\"+reason, o \"failed\"+reason.\n"
+            "- No modificar código productivo. No inventar imports/métodos/constructores/clases.\n"
+            "- patchDescriptor.allowedImports ⊆ target.allowedImports.\n"
+            "- method.evidenceIds ⊆ target.allowedEvidenceIds."
+        )
+    else:
+        rnd = repair_round or 1
+        title = f"Resolvé el repair batch de coverage-agent (round {rnd})."
+        schema = bp.SCHEMA_REPAIR_RESPONSE
+        rules = (
+            f'- schemaVersion "{schema}".\n'
+            "- Reparar SOLO los tests generados, nunca src/main.\n"
+            "- Por item: status \"repaired\" + patchDescriptor válido, o \"abandoned\"/\"skipped\"/\"failed\"+reason.\n"
+            "- Usá exclusivamente failedItem.allowedImports y failedItem.allowedEvidenceIds.\n"
+            "- patchDescriptor.testClass debe ser EXACTAMENTE failedItem.canonicalTestClass.\n"
+            "- En repair, patchId debe empezar con \"repair:\"."
+        )
+    return (
+        f"{_PASTE_OPEN}\n"
+        f"{title}\n\n"
+        f"Leé este request:\n{request}\n\n"
+        f"Escribí la respuesta acá:\n{response}\n\n"
+        "Reglas:\n"
+        "- La respuesta debe ser SOLO JSON válido.\n"
+        f"{rules}\n"
+        f"{_PASTE_CLOSE}"
+    )
+
+
 def _handoff_banner(kind: str, batch_id: str, request: Path, response: Path,
                     repair_round: int | None) -> None:
     tag = "HANDOFF-BATCH" if kind == "generation" else "HANDOFF-REPAIR"
@@ -184,6 +237,8 @@ def _handoff_banner(kind: str, batch_id: str, request: Path, response: Path,
     _print("\nCuando Claude Code termine, volvé a esta consola y presioná ENTER.")
     _print("También podés escribir:  skip (saltar este batch) · status (estado) · quit (cortar).")
     _print("Mientras espera, el budget está PAUSADO (no dispara BUDGET_EXCEEDED).")
+    # Ready-to-paste prompt with the REAL resolved paths (no placeholder to edit).
+    _print("\n" + _build_handoff_prompt(kind, request, response, repair_round))
     _print("=" * 72)
 
 
@@ -204,6 +259,17 @@ def _wait_for_response(
       ("quit", None) user aborted the run
     """
     _handoff_banner(kind, batch_id, request, response, repair_round)
+    # Persist the same ready-to-paste prompt next to the request so the human can
+    # open and copy it without scrolling the console. request.parent == batch_dir,
+    # already proven consistent by RunPaths.assert_consistent().
+    try:
+        prompt_path = request.parent / HANDOFF_PROMPT_NAME
+        prompt_path.write_text(
+            _build_handoff_prompt(kind, request, response, repair_round),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        _print(f"[handoff] no pude escribir {HANDOFF_PROMPT_NAME}: {exc}")
     interactive = config.ide_interactive()
     with budget_enforcer.paused(state_path, f"manual handoff: {kind} {batch_id}"):
         _print(f"[handoff] waiting for response JSON: {response.name}")

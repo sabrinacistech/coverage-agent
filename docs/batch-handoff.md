@@ -30,6 +30,30 @@ silencioso a un handoff.
 
 ---
 
+## Tres perillas de tamaño (no las confundas)
+
+| Flag | Quién lo usa | Qué controla |
+|---|---|---|
+| `--plan-limit` | `coverage_planner.py` (fase 0) | Cuántos targets **rankea el plan** (`batch-plan.json`). `0` = **todos** los elegibles (default). `N>0` = top N por score. |
+| `--batch-size` | `orchestrator.batch_runner` | Cuántos targets van **por request al LLM**, consumidos del plan (default 10). |
+| `--max-batches` | `orchestrator.batch_runner` | Cuántos **batches** procesa esta corrida. Default: sin tope. |
+
+`--plan-limit` es el tamaño del **plan**; `--batch-size` es el tamaño **operativo**
+de cada handoff. Antes ambos compartían el nombre `--batch-size` y el planner
+recortaba el plan a 10 por default, dejando inalcanzables los targets restantes.
+Hoy el plan calcula y rankea **todo**, y el runner decide cuánto procesar.
+
+> **⚠️ Backstop:** con `--plan-limit 0` (default) el plan ya no tiene el viejo tope
+> implícito de 10. Como `--max-batches` default es *sin tope*, una corrida sin
+> `--max-batches` procesará **todos** los targets en batches sucesivos. Para una
+> corrida acotada (calibración), seteá `--max-batches` explícitamente.
+
+En `coverage_planner.py`, `--batch-size` quedó como **alias deprecado** de
+`--plan-limit` (emite warning); `--plan-limit` gana si se pasan ambos.
+
+El `batch-plan.json` ahora incluye metadata auditable: `totalEligibleTargets`,
+`planLimit`, `sizeChosen`, `rankingStrategy` y `note`.
+
 ## Comandos
 
 Todos parten de `run_all_deterministic.py` (entrypoint real; corre la fase 0
@@ -42,10 +66,15 @@ determinista y después arranca el loop con `--start-cycle-loop`).
   --repo       C:\repoVC\coverage_cluster-status-service `
   --state-dir  C:\repoVC\agent-state-cluster `
   --generation-mode handoff-batch `
+  --plan-limit 0 `
   --batch-size 10 `
   --max-repair-rounds 2 `
   --start-cycle-loop
 ```
+
+`--plan-limit 0` rankea **todos** los targets; `--batch-size 10` manda 10 por
+request. Sin `--max-batches` la corrida procesa todos los batches hasta agotar el
+plan (o el budget).
 
 ### Modo calibración (proyecto nuevo / con muchos fallos)
 
@@ -71,21 +100,41 @@ determinista y después arranca el loop con `--start-cycle-loop`).
 
 ## Flujo `handoff-batch`, paso a paso
 
-Cuando el runner necesita generar un batch, imprime:
+Cuando el runner necesita generar un batch, imprime el banner informativo **y un
+prompt listo para copiar/pegar** con las rutas absolutas YA resueltas (el `run_id`
+y `batch_id` reales, nunca el placeholder `run-YYYYMMDD-HHMMSS`). Así no hay que
+editar la ruta a mano — un nombre de carpeta mal tipeado rompía y confundía al
+agente:
 
 ```
 ========================================================================
 [HANDOFF-BATCH] Falta generar tests para batch batch-001.
 Claude Code debe leer:
-  <state>\_llm\runs\run-YYYYMMDD-HHMMSS\batches\batch-001\request-generation.json
+  <state>\_llm\runs\run-20260616-164748\batches\batch-001\request-generation.json
 y escribir:
-  <state>\_llm\runs\run-YYYYMMDD-HHMMSS\batches\batch-001\response-generation.json
+  <state>\_llm\runs\run-20260616-164748\batches\batch-001\response-generation.json
 
 Cuando Claude Code termine, volvé a esta consola y presioná ENTER.
 También podés escribir:  skip (saltar este batch) · status (estado) · quit (cortar).
 Mientras espera, el budget está PAUSADO (no dispara BUDGET_EXCEEDED).
+
+───────────── COPIÁ DESDE ACÁ (pegar en Claude Code / Codex) ─────────────
+Resolvé el handoff batch de coverage-agent.
+
+Leé este request:
+<state>\_llm\runs\run-20260616-164748\batches\batch-001\request-generation.json
+
+Escribí la respuesta acá:
+<state>\_llm\runs\run-20260616-164748\batches\batch-001\response-generation.json
+... (reglas) ...
+───────────── COPIÁ HASTA ACÁ ─────────────
 ========================================================================
 ```
+
+El mismo prompt se escribe también a disco en
+`batches/<batch>/handoff-prompt.txt` (vía `RunPaths.handoff_prompt`), para abrirlo
+y copiarlo sin scrollear la consola. Para repair, el prompt usa
+`request-repair-rN.json` / `response-repair-rN.json` con el round real.
 
 1. En Claude Code, pedile que **lea `request-generation.json` y escriba
    `response-generation.json`** con un item por target. Cada item:
@@ -339,6 +388,7 @@ paths.preflight_result("batch-001")     # .../preflight-result.json
 paths.request_repair("batch-001", 1)    # .../request-repair-r1.json
 paths.response_repair("batch-001", 1)   # .../response-repair-r1.json
 paths.validation_result_repair("batch-001", 1)  # .../validation-result-r1.json
+paths.handoff_prompt("batch-001")       # .../handoff-prompt.txt (copy-paste prompt)
 ```
 
 `paths.assert_consistent(batch_id)` valida que ningún path derivado se salga de

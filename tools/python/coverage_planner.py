@@ -23,7 +23,11 @@ Scoring formula (per coverage target / method)
 
 Batch plan output
 -----------------
-  Items are sorted descending by score, capped at `--batch-size` (default 10).
+  Items are sorted descending by score and capped at `--plan-limit` (default 0 =
+  no limit, rank ALL eligible targets). `--plan-limit` is the size of the PLAN;
+  it does NOT set the LLM request size — orchestrator.batch_runner controls that
+  with `--batch-size` (targets per request) and `--max-batches` (batches per run).
+  `--batch-size` here is a DEPRECATED alias for `--plan-limit`.
   Each item carries:
     - targetId, sut, method         — from coverage-targets
     - score                          — computed above (informational)
@@ -35,8 +39,9 @@ Batch plan output
   (or starts at 1 on first run).
 
 CLI:
-    python tools/python/coverage_planner.py --out state
-    python tools/python/coverage_planner.py --out state --batch-size 5 --mode branch-coverage
+    python tools/python/coverage_planner.py --out state                       # all targets
+    python tools/python/coverage_planner.py --out state --plan-limit 50        # top 50
+    python tools/python/coverage_planner.py --out state --mode branch-coverage
 """
 from __future__ import annotations
 
@@ -260,13 +265,28 @@ def plan(
     mode: str = "coverage",
     sut_filter: list[str] | None = None,
     incremental_only: bool = False,
+    plan_limit: int | None = None,
 ) -> dict:
     """Compute and return the batch-plan dict.
 
     When ``sut_filter`` is supplied, only targets whose ``sut`` field matches
     one of the listed FQCNs are scored — keeps batch-plan.json scoped to the
     user-requested subset when --sut is propagated from run_pipeline.
+
+    ``plan_limit`` controls how many ranked targets are written to the plan:
+      * ``0``  → no limit, rank ALL eligible targets (the recommended default;
+                 the runner then controls per-batch size via --batch-size and how
+                 many batches run via --max-batches).
+      * ``N>0``→ keep only the top N targets by score.
+      * ``None``→ fall back to ``batch_size`` (backward-compat for callers that
+                 still pass the legacy ``batch_size`` argument).
+
+    ``plan_limit`` and ``batch_size`` are DISTINCT concepts: ``plan_limit`` is the
+    size of the *plan*; ``batch_size`` (used by orchestrator.batch_runner) is the
+    *operational* size of each LLM request. The planner no longer decides the
+    batch's operational size.
     """
+    effective_limit = plan_limit if plan_limit is not None else batch_size
 
     cov_targets     = _safe_load(state_dir / "coverage-targets.json",     {"targets": []})
     classification  = _safe_load(state_dir / "classification-index.json", {"classes": []})
@@ -358,9 +378,21 @@ def plan(
     # Sort descending by score, then alphabetically for determinism
     scored.sort(key=lambda x: (-x[0], x[3]))
 
+    # ── Apply the plan limit (NOT the operational batch size) ───────────────────
+    total_eligible = len(scored)
+    if effective_limit and effective_limit > 0:
+        selected = scored[:effective_limit]
+        is_limited = effective_limit < total_eligible
+        plan_limit_value = effective_limit
+    else:
+        # 0 (or negative) → no cap: rank every eligible target.
+        selected = scored
+        is_limited = False
+        plan_limit_value = 0
+
     # ── Build batch items ─────────────────────────────────────────────────────
     items: list[dict] = []
-    for score, tgt, template, sut in scored[:batch_size]:
+    for score, tgt, template, sut in selected:
         target_id = tgt.get("id", "")
         method    = tgt.get("method", "")
 
@@ -402,20 +434,40 @@ def plan(
     cycle = _next_cycle(existing_plan)
     size  = len(items)
 
+    ranking_strategy = (
+        f"missedLines×{W_LINES} + missedBranches×{W_BRANCHES} + missedMethod×{W_METHOD} "
+        f"- riskPenalty - failurePenalty + incrementalBoost({_INCREMENTAL_BOOST})"
+    )
+    if size == 0:
+        reason = "no uncovered targets found"
+    elif is_limited:
+        reason = (
+            f"limited to top {size} of {total_eligible} eligible targets ranked by "
+            f"{ranking_strategy}"
+        )
+    else:
+        reason = (
+            f"full plan: all {total_eligible} eligible target(s) ranked by "
+            f"{ranking_strategy}"
+        )
+
     return {
-        "schemaVersion": 1,
-        "cycle":         cycle,
-        "mode":          mode,
-        "sizeChosen":    size,
-        "generatedAt":   datetime.now(timezone.utc).isoformat(),
-        "reason":        (
-            f"Top {size} targets ranked by "
-            f"missedLines×{W_LINES} + missedBranches×{W_BRANCHES} + missedMethod×{W_METHOD} "
-            f"- riskPenalty - failurePenalty + incrementalBoost({_INCREMENTAL_BOOST})"
-            if size > 0
-            else "no uncovered targets found"
+        "schemaVersion":        1,
+        "cycle":                cycle,
+        "mode":                 mode,
+        "sizeChosen":           size,
+        "totalEligibleTargets": total_eligible,
+        "planLimit":            plan_limit_value,
+        "rankingStrategy":      ranking_strategy,
+        "note": (
+            "planLimit=0 ranks every eligible target. The plan size does NOT set "
+            "the LLM request size: orchestrator.batch_runner uses --batch-size for "
+            "targets per request and --max-batches for how many batches a run "
+            "processes."
         ),
-        "items": items,
+        "generatedAt":          datetime.now(timezone.utc).isoformat(),
+        "reason":               reason,
+        "items":                items,
     }
 
 
@@ -450,11 +502,24 @@ def _update_schema(schema_path: Path) -> None:
             item_props[field] = defn
             changed = True
 
-    # Also add generatedAt at top-level
+    # Also add top-level optional fields. The schema has additionalProperties:false,
+    # so any new top-level key the planner emits MUST be declared here or validation
+    # fails. All are optional (not added to `required`) for backward compatibility.
     top_props: dict = schema.get("properties", {})
-    if "generatedAt" not in top_props:
-        top_props["generatedAt"] = {"type": "string"}
-        changed = True
+    for field, defn in [
+        ("generatedAt",          {"type": "string"}),
+        ("totalEligibleTargets", {"type": "integer",
+                                  "description": "Eligible targets after scoring, before any plan limit"}),
+        ("planLimit",            {"type": "integer",
+                                  "description": "Max targets in the plan; 0 = no limit (all eligible)"}),
+        ("rankingStrategy",      {"type": "string",
+                                  "description": "Human-readable scoring formula used to rank targets"}),
+        ("note",                 {"type": "string",
+                                  "description": "Operator note clarifying plan size vs operational batch size"}),
+    ]:
+        if field not in top_props:
+            top_props[field] = defn
+            changed = True
 
     if changed:
         atomic_write_json(schema_path, schema)
@@ -464,6 +529,21 @@ def _update_schema(schema_path: Path) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _resolve_plan_limit(plan_limit: int | None, batch_size: int | None) -> tuple[int, bool]:
+    """Resolve the effective plan limit and whether to warn about deprecation.
+
+    Precedence (testable, pure):
+      * --plan-limit given        → it wins (warn=False), --batch-size ignored.
+      * only --batch-size given   → use it as the plan limit (warn=True).
+      * neither given             → 0 (no limit, all eligible targets).
+    """
+    if plan_limit is not None:
+        return plan_limit, False
+    if batch_size is not None:
+        return batch_size, True
+    return 0, False
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(
@@ -482,10 +562,22 @@ def main() -> int:
     )
     ap.add_argument("--out", required=True, help="State directory (e.g. state/)")
     ap.add_argument(
+        "--plan-limit",
+        type=int,
+        default=None,
+        help="How many ranked targets to write to batch-plan.json. "
+             "0 = no limit (rank ALL eligible targets, recommended default). "
+             "N>0 = keep only the top N. This is the PLAN size, NOT the LLM "
+             "request size — orchestrator.batch_runner controls that with "
+             "--batch-size / --max-batches.",
+    )
+    ap.add_argument(
         "--batch-size",
         type=int,
-        default=10,
-        help="Maximum number of targets in the batch (default: 10)",
+        default=None,
+        help="DEPRECATED — use --plan-limit instead. When given (and --plan-limit "
+             "is not), it is interpreted as the plan limit, not the operational "
+             "batch size, and a deprecation warning is emitted.",
     )
     ap.add_argument(
         "--mode",
@@ -520,9 +612,16 @@ def main() -> int:
 
     _update_schema(SCHEMAS_DIR / "batch-plan.schema.json")
 
+    plan_limit, warn_deprecated = _resolve_plan_limit(args.plan_limit, args.batch_size)
+    if warn_deprecated:
+        print(
+            "--batch-size in coverage_planner is deprecated; use --plan-limit instead.",
+            file=sys.stderr,
+        )
+
     result = plan(
         state_dir,
-        batch_size=args.batch_size,
+        plan_limit=plan_limit,
         mode=args.mode,
         sut_filter=args.sut,
         incremental_only=args.incremental_only,
@@ -532,9 +631,14 @@ def main() -> int:
 
     n = result["sizeChosen"]
     cycle = result["cycle"]
+    total = result["totalEligibleTargets"]
+    limit_str = "all" if result["planLimit"] == 0 else str(result["planLimit"])
     scores = [it.get("score", 0) for it in result["items"]]
     score_range = f"scores=[{min(scores)}..{max(scores)}]" if scores else "scores=[]"
-    print(f"[OK] state/batch-plan.json  cycle={cycle}  items={n}  {score_range}  mode={args.mode}")
+    print(
+        f"[OK] state/batch-plan.json  cycle={cycle}  items={n}/{total} eligible  "
+        f"planLimit={limit_str}  {score_range}  mode={args.mode}"
+    )
     return 0
 
 

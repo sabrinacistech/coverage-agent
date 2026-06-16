@@ -120,10 +120,21 @@ python tools/python/run_all_deterministic.py \
   --skip-jacoco \
   --start-cycle-loop \
   --generation-mode handoff-batch \
+  --plan-limit 0 \
   --batch-size 3 \
   --max-batches 1 \
   --max-repair-rounds 2
 ```
+
+Las tres perillas de tamaño son distintas:
+
+- `--plan-limit 0` — rankea **todos** los targets elegibles en `batch-plan.json`
+  (`0` = sin límite, default). `N>0` = top N.
+- `--batch-size 3` — cuántos targets van **por request al LLM**.
+- `--max-batches 1` — cuántos **batches** procesa esta corrida.
+
+> Con `--plan-limit 0` el único freno de longitud es `--max-batches`. Para una
+> corrida acotada (calibración) setealo; sin él, se procesan todos los targets.
 
 El runner va a imprimir algo como:
 
@@ -137,8 +148,13 @@ y escribir:
 
 ### 3. Prompt correcto para Claude Code / Codex
 
-Pegá este prompt en el agente que va a resolver el handoff, reemplazando las rutas
-por las que imprimió tu consola:
+> **Ya no hace falta editar rutas.** El runner imprime el prompt completo con las
+> rutas absolutas **ya resueltas** (el `run-YYYYMMDD-HHMMSS` real, no el
+> placeholder), entre marcadores `COPIÁ DESDE ACÁ` / `COPIÁ HASTA ACÁ`, y lo guarda
+> en `batches/<batch>/handoff-prompt.txt`. Copiá/pegá tal cual: así no se cuela un
+> nombre de carpeta mal tipeado que rompa el flujo. El bloque de abajo es la
+> referencia del formato (con el placeholder); en tu consola las rutas vienen
+> resueltas.
 
 ```text
 Resolvé el handoff batch de coverage-agent.

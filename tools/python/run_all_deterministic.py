@@ -297,8 +297,17 @@ def main() -> int:
         "(COVAGENT_LLM_PROVIDER=litellm + credentials); errors if not configured.",
     )
     parser.add_argument(
+        "--plan-limit", type=int, default=0,
+        help="How many targets coverage_planner ranks into batch-plan.json. "
+        "0 = all eligible targets (default). N>0 = top N. This is the PLAN size, "
+        "not the per-request size. With --plan-limit 0 the only run-length backstop "
+        "is --max-batches (which defaults to no cap), so a run with no --max-batches "
+        "will keep processing batches until all targets are done.",
+    )
+    parser.add_argument(
         "--batch-size", type=int, default=10,
-        help="handoff-batch: max targets per batch request (default 10).",
+        help="handoff-batch: targets per LLM request, consumed by the batch runner "
+        "from the (possibly larger) plan (default 10).",
     )
     parser.add_argument(
         "--max-repair-rounds", type=int, default=2,
@@ -308,7 +317,9 @@ def main() -> int:
     parser.add_argument(
         "--max-batches", type=int, default=None,
         help="handoff-batch: cap the number of batches this run processes "
-        "(calibration). Default: no cap (budget/targets bound the run).",
+        "(calibration). Default: no cap (budget/targets bound the run). "
+        "NOTE: this is the main run-length control now that --plan-limit defaults "
+        "to 0 (full plan); set it for a bounded calibration run.",
     )
     parser.add_argument(
         "--llm-provider",
@@ -449,6 +460,9 @@ def main() -> int:
         "--module", args.module,
         "--jacoco-xml", str(jacoco_xml),
         "--coverage-mode", args.coverage_mode,
+        # Plan size travels as an explicit CLI arg (the planning step runs with
+        # `env`, not `loop_env`), kept distinct from the runner's --batch-size.
+        "--plan-limit", str(args.plan_limit),
     ]
     if args.include_fqcn:
         # Scopes the bytecode scanner so generated code never reaches

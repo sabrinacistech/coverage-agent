@@ -350,7 +350,7 @@ def snapshot_baseline(jacoco_xml: Path, out_dir: Path, *, force: bool = False) -
     return baseline
 
 
-def _write_empty_batch_plan(out_dir: Path, mode: str) -> None:
+def _write_empty_batch_plan(out_dir: Path, mode: str, plan_limit: int = 0) -> None:
     """Write a schema-valid, EMPTY batch-plan so downstream (cycle_loop/one_cycle)
     sees a definitive '0 targets' instead of a missing file.
 
@@ -358,6 +358,9 @@ def _write_empty_batch_plan(out_dir: Path, mode: str) -> None:
     expensive middle steps (classpath/index/classification/planning/context) are
     skipped, so no batch-plan would otherwise be produced. The loop then reports
     'no quedan targets' (RC_NO_TARGETS) cleanly instead of erroring on a missing file.
+
+    Keeps the same metadata shape coverage_planner emits (with neutral values) so
+    the empty plan validates against the same schema regardless of new fields.
     """
     from common import atomic_write_json  # local: common is on sys.path
     atomic_write_json(out_dir / "batch-plan.json", {
@@ -365,6 +368,10 @@ def _write_empty_batch_plan(out_dir: Path, mode: str) -> None:
         "cycle": 1,
         "mode": mode,
         "sizeChosen": 0,
+        "totalEligibleTargets": 0,
+        "planLimit": plan_limit,
+        "rankingStrategy": "",
+        "note": "no targets to rank (run_pipeline early-exit)",
         "items": [],
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "reason": "no uncovered targets reported by JaCoCo (run_pipeline early-exit)",
@@ -510,6 +517,17 @@ def main() -> int:
             "context packs are all scoped to this class only."
         ),
     )
+    ap.add_argument(
+        "--plan-limit",
+        type=int,
+        default=0,
+        help=(
+            "How many ranked targets coverage_planner writes to batch-plan.json. "
+            "0 = no limit (rank ALL eligible targets, default). N>0 = top N. "
+            "This is the PLAN size, not the LLM request size (the batch runner "
+            "controls that via --batch-size / --max-batches)."
+        ),
+    )
     args = ap.parse_args()
 
     skip: set[str] = set(args.skip or [])
@@ -617,7 +635,7 @@ def main() -> int:
             if n_targets == 0:
                 print("[DONE] JaCoCo: 0 uncovered targets — nothing to generate. "
                       "Skipping classpath/index/classification/planning/context.")
-                _write_empty_batch_plan(Path(args.out), args.coverage_mode)
+                _write_empty_batch_plan(Path(args.out), args.coverage_mode, args.plan_limit)
                 return rc
     elif "jacoco" not in skip:
         # #2: make the auto-skip loud and actionable instead of silent.
@@ -728,6 +746,7 @@ def main() -> int:
             HERE / "coverage_planner.py",
             "--out", args.out,
             "--mode", args.coverage_mode,
+            "--plan-limit", str(args.plan_limit),
         ]
         if args.sut:
             # P3.a: planning honours --sut end to end (no more "context only"

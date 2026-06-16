@@ -84,6 +84,22 @@
     },
     "generatedAt": {
       "type": "string"
+    },
+    "totalEligibleTargets": {
+      "type": "integer",
+      "description": "Eligible targets after scoring, before any plan limit"
+    },
+    "planLimit": {
+      "type": "integer",
+      "description": "Max targets in the plan; 0 = no limit (all eligible)"
+    },
+    "rankingStrategy": {
+      "type": "string",
+      "description": "Human-readable scoring formula used to rank targets"
+    },
+    "note": {
+      "type": "string",
+      "description": "Operator note clarifying plan size vs operational batch size"
     }
   }
 }
