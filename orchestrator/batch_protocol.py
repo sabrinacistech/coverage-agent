@@ -118,7 +118,32 @@ QUALITY_GATE_RULES = [
     "straight-line Arrange/Act/Assert.",
 ]
 
+# ── Hermetic / self-contained payload rule ─────────────────────────────────────
+# The request JSON under the batch folder is the LLM's ONLY world. Every fact it
+# needs is embedded in this file: the SUT verbatim (target.sutSourceCode), the
+# dependency shapes (target.dependencySignatures), the failing test
+# (failedItem.currentTestSource) and the exact compiler output
+# (failedItem.compilerErrorDetails). Reading the local Git working tree invites
+# stale/ghost code (the bug this milestone fixes) — so it is forbidden.
+SELF_CONTAINED_RULE = (
+    "You are an ISOLATED entity. Operate ONLY on the information contained in "
+    "THIS request JSON inside the batch folder. NEVER read, index, open, glob, "
+    "or infer from local repository files, the Git working tree, production "
+    "sources, pom.xml/build files, jacoco, or any path outside this JSON. The "
+    "behaviour of the system under test is provided as method/constructor bodies "
+    "in target.sutSourceCode (its signatures, imports and fields are in "
+    "target.allowedImports / target.evidenceRefs); the shapes of its "
+    "collaborators in target.dependencySignatures; the test that just "
+    "failed in failedItem.currentTestSource; the exact javac/Maven output "
+    "in failedItem.compilerErrorDetails; and any patcher gate/perimeter "
+    "rejection (e.g. G2 orphan evidence) in failedItem.patcherErrorDetails. "
+    "Treat these fields as the single source "
+    "of truth. If a fact is not present in this JSON, it does not exist for you — "
+    "skip/abandon the item instead of reading the repository."
+)
+
 GENERATION_RULES = [
+    SELF_CONTAINED_RULE,
     "Generate Java tests that compile.",
     "Do not modify production code.",
     "Do not add dependencies unless explicitly authorized.",
@@ -159,6 +184,7 @@ GENERATION_RULES = [
     *QUALITY_GATE_RULES,
 ]
 REPAIR_RULES = [
+    SELF_CONTAINED_RULE,
     "Do not modify production code; fix only the generated tests.",
     "Keep the original test intent.",
     "Prefer minimal changes.",
@@ -324,6 +350,15 @@ def build_generation_request(
             "sut": sut,
             "method": item.get("method", ""),
             "productionFile": _production_file(sut) if sut else "",
+            # Hermetic payload: the SUT's method/constructor BODIES are shipped so
+            # the generator never reads the Git working tree (avoids stale/ghost
+            # code). Only the bodies travel — signatures/imports/fields are already
+            # carried by allowedImports/evidenceRefs above. The runner
+            # (batch_runner._enrich_targets_with_imports) reads productionFile and
+            # injects these; absent enrichment they stay empty/defaulted.
+            "sutSourceCode": item.get("sutSourceCode", ""),
+            "sutSourceTruncated": bool(item.get("sutSourceTruncated", False)),
+            "dependencySignatures": list(item.get("dependencySignatures") or []),
             "canonicalTestClass": _suggested_test_class(sut),
             "suggestedTestFile": _suggested_test_file(sut) if sut else "",
             "allowedImports": allowed_imports,
@@ -349,6 +384,17 @@ def build_generation_request(
         "batchSize": batch_size,
         "targets": out_targets,
         "rules": list(GENERATION_RULES),
+        "selfContainedPolicy": {
+            "rule": SELF_CONTAINED_RULE,
+            "forbiddenActions": [
+                "READ_SOURCE_CODE", "READ_GIT_WORKING_TREE", "READ_POM",
+                "READ_JACOCO_XML", "READ_CLASSPATH", "INDEX_REPOSITORY",
+            ],
+            "authoritativeFields": [
+                "target.sutSourceCode", "target.dependencySignatures",
+                "target.allowedImports", "target.evidenceRefs",
+            ],
+        },
         "testClassPolicy": {
             "canonical": "Use target.canonicalTestClass exactly for patchDescriptor.testClass.",
             "forbidden": [
@@ -623,8 +669,12 @@ def build_repair_request(
     """Build a repair request (schema test-repair-batch-v1) for the FAILED items only.
 
     ``failed_items`` are pre-shaped dicts: targetId, failureKind, testFile, line,
-    errorSummary, buildOutput, currentTestSource. Empty ⇒ caller must not request
-    repair (kept caller-side so this stays a pure builder).
+    errorSummary, buildOutput, currentTestSource, compilerErrorDetails. The
+    runner (batch_runner._failed_items_for_repair) MUST populate currentTestSource
+    with the exact test that just failed (reconstructed from the rejected patch
+    descriptor when the patcher never wrote it to disk) and compilerErrorDetails
+    with the verbatim javac/Maven errors for this test. Empty ⇒ caller must not
+    request repair (kept caller-side so this stays a pure builder).
     """
     return {
         "schemaVersion": SCHEMA_REPAIR_REQUEST,
@@ -634,6 +684,18 @@ def build_repair_request(
         "repairRound": repair_round,
         "failedItems": list(failed_items),
         "rules": list(REPAIR_RULES),
+        "selfContainedPolicy": {
+            "rule": SELF_CONTAINED_RULE,
+            "forbiddenActions": [
+                "READ_SOURCE_CODE", "READ_GIT_WORKING_TREE", "READ_POM",
+                "READ_JACOCO_XML", "READ_CLASSPATH", "INDEX_REPOSITORY",
+            ],
+            "authoritativeFields": [
+                "failedItem.currentTestSource", "failedItem.compilerErrorDetails",
+                "failedItem.patcherErrorDetails",
+                "failedItem.allowedImports", "failedItem.evidenceRefs",
+            ],
+        },
         "importPolicy": {
             "rule": "Each repaired patchDescriptor.allowedImports must be a subset of failedItem.allowedImports.",
             "forbiddenByDefault": list(_COMMON_FORBIDDEN_IMPORTS),

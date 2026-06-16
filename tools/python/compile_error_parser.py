@@ -94,8 +94,11 @@ def detect_format(text: str) -> str:
 
 # ── Maven parser ──────────────────────────────────────────────────────────────
 
+# File is matched non-greedily up to the ``:[line,col]`` marker so a Windows
+# drive-letter path (``/C:/Users/…/Foo.java``) is captured whole — a plain
+# ``[^:]+`` stops at the ``C:`` colon and silently drops every error on Windows.
 _MAVEN_ERROR_LINE = re.compile(
-    r"^\[ERROR\]\s+(?P<file>[^:]+):\[(?P<line>\d+),(?P<col>\d+)\]\s+(?P<msg>.+)$"
+    r"^\[ERROR\]\s+(?P<file>.+?):\[(?P<line>\d+),(?P<col>\d+)\]\s+(?P<msg>.+)$"
 )
 
 

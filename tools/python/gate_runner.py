@@ -55,6 +55,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from common import _TimedRun  # noqa: E402
+import inherited_evidence  # noqa: E402  (shared Throwable-evidence source of truth)
 
 _NOT_IMPLEMENTED: dict[str, str] = {
     "G4": "fixture/strategy validation not implemented yet",
@@ -76,6 +77,30 @@ _G8_MAX_COMPILE_FAIL_RATE = 0.5
 def _load_json(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as fh:
         return json.load(fh)
+
+
+def _patch_sut_fqcn(patch: dict) -> str:
+    sut = patch.get("sut", "")
+    return sut.get("fqcn", "") if isinstance(sut, dict) else str(sut)
+
+
+def _sut_classification_type(state_dir: Path, sut: str) -> str | None:
+    """Classification type for a SUT from state/classification-index.json (used
+    to recognise exceptions). None when the index is absent or the SUT is missing
+    — gate_g2 then falls back to the Exception/Error name suffix."""
+    if not sut:
+        return None
+    path = state_dir / "classification-index.json"
+    if not path.exists():
+        return None
+    try:
+        index = _load_json(path)
+    except Exception:
+        return None
+    for entry in index.get("classes", []) or []:
+        if isinstance(entry, dict) and entry.get("fqcn") == sut:
+            return entry.get("type")
+    return None
 
 
 def _patch_imports(patch: dict) -> list[str]:
@@ -210,6 +235,14 @@ def gate_g2(patch: dict, state_dir: Path) -> dict:
         return {"status": "PASS", "reason": "patch declares no test methods", "evidenceChecked": 0}
 
     known = _collect_contract_evidence(state_dir)
+    # Honor the inherited-Throwable evidence the orchestrator advertises for an
+    # exception SUT (getMessage/getCause/toString live on java.lang.Throwable, so
+    # they are absent from the bytecode-derived contracts but are NOT
+    # hallucinations). Same shared source of truth as the request side, so the
+    # gate accepts exactly the synthetic ids that were offered — never more.
+    sut = _patch_sut_fqcn(patch)
+    if inherited_evidence.is_throwable_sut(sut, _sut_classification_type(state_dir, sut)):
+        known = known | inherited_evidence.throwable_evidence_ids(sut)
 
     methods_without_evidence: list[str] = []
     orphan_ids: list[dict] = []

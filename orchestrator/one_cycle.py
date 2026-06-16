@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -155,9 +156,46 @@ def apply_patch(patch: dict, *, state_dir: Path, repo: Path, context_pack_path: 
         for tri in (repair_attempts or []):
             cmd += ["--repair-attempt",
                     f"{tri['errorCode']}|{tri['symbolFQN']}|{tri['fixId']}"]
-        return subprocess.run(cmd, check=False).returncode
+        # Capture the patcher's output so a gate/perimeter rejection (rc=3) keeps
+        # its reason instead of vanishing — the repair payload surfaces it so the
+        # model is not blind on a non-compiler rejection (the [BLOCKED] gate line
+        # + [BLOCKED-DETAIL] JSON). stdout/stderr are still echoed through.
+        proc = subprocess.run(cmd, check=False, capture_output=True,
+                              text=True, encoding="utf-8", errors="replace")
+        if proc.stdout:
+            sys.stdout.write(proc.stdout)
+        if proc.stderr:
+            sys.stderr.write(proc.stderr)
+        if proc.returncode != 0:
+            _record_patcher_rejection(state_dir, patch, proc.returncode,
+                                      (proc.stdout or "") + (proc.stderr or ""))
+        return proc.returncode
     finally:
         patch_path.unlink(missing_ok=True)
+
+
+def _patch_sut_fqcn(patch: dict) -> str:
+    sut = patch.get("sut", "")
+    return sut.get("fqcn", "") if isinstance(sut, dict) else str(sut)
+
+
+def _record_patcher_rejection(state_dir: Path, patch: dict, rc: int, output: str) -> None:
+    """Persist the patcher's rejection (keyed by canonical testClass) so the
+    batch repair payload can carry WHY the patch was rejected — e.g. the gate
+    code and the orphan evidenceId — rather than a bare ``patcher rc=3``."""
+    test_class = str(patch.get("testClass") or _patch_sut_fqcn(patch) or "unknown")
+    safe = re.sub(r"[^A-Za-z0-9_.\-]", "_", test_class)
+    out_dir = state_dir / "_summaries" / "patcher-decisions"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    record = {
+        "schemaVersion": 1,
+        "rc": rc,
+        "testClass": test_class,
+        "sut": _patch_sut_fqcn(patch),
+        "output": output.strip()[-8000:],
+    }
+    (out_dir / f"{safe}.json").write_text(
+        json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # ── validación (fase 9) — requiere Maven; best-effort ─────────────────────────

@@ -321,6 +321,102 @@ def case_runner_adds_throwable_inherited_evidence() -> None:
                 any(i.startswith("sym:com.acme.MyException#getMessage:") for i in ids), str(ids))
 
 
+def case_generation_payload_ships_sut_source() -> None:
+    # Hermetic payload: the enriched target carries the SUT verbatim + project
+    # collaborator signatures, so the generator never reads the Git working tree.
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        state = _setup(root, 1)
+        sut = "com.acme.C0"
+        (state / "context-packs" / f"{sut}.json").write_text(
+            json.dumps({
+                "schemaVersion": 1, "sut": sut,
+                "allowedImports": ["org.junit.jupiter.api.Test", "com.acme.Repo", sut],
+                "constructors": [], "methods": [],
+            }), encoding="utf-8")
+        repo = root / "repo"
+        src = repo / "src/main/java/com/acme"
+        src.mkdir(parents=True)
+        (src / "C0.java").write_text(
+            "package com.acme;\nimport com.acme.Repo;\npublic class C0 {\n"
+            "  private final Repo repo;\n  public C0(Repo repo){ this.repo = repo; }\n"
+            "  public String m(){ return repo.lookup(\"a\"); }\n}\n",
+            encoding="utf-8")
+        (src / "Repo.java").write_text(
+            "package com.acme;\npublic interface Repo {\n  String lookup(String k);\n}\n",
+            encoding="utf-8")
+        enriched = br._enrich_targets_with_imports(
+            [{"targetId": "com.acme.C0#m", "sut": sut, "method": "m"}],
+            state_dir=state, repo=repo)
+        row = enriched[0]
+        # sutSourceCode ships ONLY the method/constructor bodies (the behaviour),
+        # never package/imports/class-decl/field-decls (those are in other fields).
+        src_code = row["sutSourceCode"]
+        _assert("gen payload ships method body",
+                'return repo.lookup("a")' in src_code, src_code)
+        _assert("gen payload ships constructor body",
+                "this.repo = repo" in src_code, src_code)
+        _assert("gen payload omits package", "package com.acme" not in src_code, src_code)
+        _assert("gen payload omits class declaration",
+                "class C0" not in src_code, src_code)
+        _assert("gen payload omits import lines", "import com.acme.Repo;" not in src_code, src_code)
+        _assert("gen payload omits field declaration",
+                "private final Repo repo;" not in src_code, src_code)
+        _assert("gen payload not truncated", row["sutSourceTruncated"] is False)
+        sigs = {d["fqcn"]: d for d in row["dependencySignatures"]}
+        _assert("gen payload has Repo signatures", "com.acme.Repo" in sigs, str(sigs))
+        _assert("gen payload excludes SUT from deps", sut not in sigs, str(sigs))
+        _assert("gen payload extracts interface method",
+                "String lookup(String k)" in sigs.get("com.acme.Repo", {}).get("signatures", []),
+                str(sigs))
+
+
+def case_repair_payload_reconstructs_source_and_compiler_errors() -> None:
+    # When the patcher rejected the patch before writing a file, currentTestSource
+    # is reconstructed from the stored descriptor and compilerErrorDetails carries
+    # the verbatim javac error instead of a generic "patcher rc=3".
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        state = _setup(root, 1)
+        repo = root / "repo"
+        repo.mkdir()
+        manifest = bp.new_manifest("run-1", str(repo), generation_mode="handoff-batch",
+                                   batch_size=10, max_repair_rounds=2)
+        tid = "com.acme.C0#m"
+        bp.ensure_target(manifest, tid, sut="com.acme.C0", batch_id="batch-001")
+        descriptor = {
+            "schemaVersion": 1, "patchId": "patch:x", "sut": "com.acme.C0",
+            "testClass": "com.acme.C0Test",
+            "allowedImports": ["org.junit.jupiter.api.Test"],
+            "methods": [{"name": "m_returnsX", "annotations": ["@Test"],
+                         "body": "// given\nC0 s = new C0();\n// when\nString r = s.m();\n// then\nassertEquals(\"x\", r);",
+                         "evidenceIds": ["sym:com.acme.C0#m:12345678"]}],
+        }
+        bp.set_status(manifest, tid, bp.COMPILE_FAILED, note="patcher rc=3",
+                      lastPatchDescriptor=descriptor)
+        (state / "compile-error-index.json").write_text(json.dumps({
+            "schemaVersion": 1, "errors": [{
+                "code": "E_CONSTRUCTOR_UNRESOLVED",
+                "file": "src/test/java/com/acme/C0Test.java", "line": 7,
+                "message": "constructor C0 cannot be applied to given types",
+                "symbolFQN": "com.acme.C0",
+                "raw": "[ERROR] C0Test.java:[7,5] required: String found: no arguments"}]}),
+            encoding="utf-8")
+        payload = br._failed_items_for_repair(
+            manifest, state_dir=state, repo=repo, batch_ids=[tid], applied={})
+        item = payload[0]
+        _assert("repair currentTestSource reconstructed from descriptor",
+                "s.m()" in item["currentTestSource"]
+                and "reconstructed" in item["currentTestSource"], str(item)[:300])
+        _assert("repair compilerErrorDetails has the javac error",
+                "E_CONSTRUCTOR_UNRESOLVED" in item["compilerErrorDetails"]
+                and "cannot be applied" in item["compilerErrorDetails"],
+                item["compilerErrorDetails"])
+        _assert("repair errorSummary is concrete (not 'patcher rc=3')",
+                item["errorSummary"].startswith("[E_CONSTRUCTOR_UNRESOLVED]"),
+                item["errorSummary"])
+
+
 def case_budget_paused_during_handoff() -> None:
     with tempfile.TemporaryDirectory() as td:
         state = _setup(Path(td), 1)
@@ -355,6 +451,8 @@ def main() -> int:
         case_runner_enriches_target_method_evidence,
         case_runner_marks_unevidenced_target_method,
         case_runner_adds_throwable_inherited_evidence,
+        case_generation_payload_ships_sut_source,
+        case_repair_payload_reconstructs_source_and_compiler_errors,
         case_budget_paused_during_handoff,
     ]
     for c in cases:

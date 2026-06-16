@@ -125,6 +125,38 @@ def case_pass_no_methods() -> None:
     _assert("status PASS", res.get("status") == "PASS", json.dumps(res))
 
 
+def case_pass_inherited_throwable_evidence() -> None:
+    print("== PASS: exception SUT cites inherited Throwable evidence ==")
+    import inherited_evidence  # noqa: E402 (same dir on sys.path)
+    state = _state_with_contract()  # contract carries no getMessage method
+    sut = "com.acme.FooException"
+    getmsg_id = inherited_evidence.throwable_evidence_id(sut, "getMessage")
+    patch = {
+        "sut": sut,
+        "methods": [
+            {"name": "getMessage_whenConstructed_returnsMessage",
+             "body": "// ...", "evidenceIds": [getmsg_id]}
+        ],
+    }
+    res = gate_g2(patch, state)
+    # The synthetic inherited-Throwable id is honored even though it is absent
+    # from the symbol-contracts — same source of truth the request advertises.
+    _assert("status PASS (inherited evidence honored)",
+            res.get("status") == "PASS", json.dumps(res))
+
+
+def case_fail_inherited_evidence_on_non_throwable() -> None:
+    print("== FAIL: non-exception SUT may not use synthetic Throwable id ==")
+    import inherited_evidence  # noqa: E402
+    state = _state_with_contract()
+    sut = "com.acme.FooService"  # not an exception → synthetic ids not honored
+    getmsg_id = inherited_evidence.throwable_evidence_id(sut, "getMessage")
+    patch = {"sut": sut,
+             "methods": [{"name": "x_y_z", "body": "// ...", "evidenceIds": [getmsg_id]}]}
+    res = gate_g2(patch, state)
+    _assert("status FAIL (not throwable)", res.get("status") == "FAIL", json.dumps(res))
+
+
 def case_collect_evidence() -> None:
     print("== helper: _collect_contract_evidence ==")
     state = _state_with_contract()
@@ -139,6 +171,8 @@ def main() -> int:
     case_fail_orphan_evidence()
     case_skipped_blocked()
     case_pass_no_methods()
+    case_pass_inherited_throwable_evidence()
+    case_fail_inherited_evidence_on_non_throwable()
     case_collect_evidence()
     print()
     if FAILURES:

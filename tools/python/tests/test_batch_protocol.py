@@ -87,6 +87,30 @@ def case_request_has_at_most_batch_size_targets() -> None:
     _assert("request ships rules", isinstance(req["rules"], list) and len(req["rules"]) >= 5)
 
 
+def case_request_is_self_contained_payload() -> None:
+    # Hermetic payload: the isolation rule + self-contained policy + pass-through
+    # of sutSourceCode / dependencySignatures injected by the runner.
+    targets = bp.select_batch(_plan(1), set(), 10)
+    targets[0]["sutSourceCode"] = "public class C0 {}"
+    targets[0]["sutSourceTruncated"] = False
+    targets[0]["dependencySignatures"] = [{"fqcn": "com.acme.Repo", "signatures": ["String lookup(String k)"]}]
+    req = bp.build_generation_request("run-1", "batch-001", targets, batch_size=10)
+    _assert("isolation rule is first generation rule",
+            req["rules"][0] == bp.SELF_CONTAINED_RULE)
+    _assert("request has selfContainedPolicy",
+            "READ_SOURCE_CODE" in req["selfContainedPolicy"]["forbiddenActions"])
+    t0 = req["targets"][0]
+    _assert("target passes through sutSourceCode", t0["sutSourceCode"] == "public class C0 {}")
+    _assert("target passes through dependencySignatures",
+            t0["dependencySignatures"][0]["fqcn"] == "com.acme.Repo")
+    # Repair request carries the same isolation contract.
+    rreq = bp.build_repair_request("run-1", "batch-001", 1, [{"targetId": "com.acme.C0#m"}])
+    _assert("isolation rule is first repair rule",
+            rreq["rules"][0] == bp.SELF_CONTAINED_RULE)
+    _assert("repair request has selfContainedPolicy",
+            "failedItem.currentTestSource" in rreq["selfContainedPolicy"]["authoritativeFields"])
+
+
 # ── validate_generation_response ─────────────────────────────────────────────────
 
 def case_response_skipped_item_does_not_break_batch() -> None:

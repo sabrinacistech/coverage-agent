@@ -29,7 +29,6 @@ Usage (normally launched by run_all_deterministic.py --generation-mode handoff-b
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
 import sys
@@ -42,6 +41,7 @@ from . import config, one_cycle
 # budget_enforcer lives in the deterministic core (tools/python), invoked by path.
 sys.path.insert(0, str(config.TOOLS_PYTHON))
 import budget_enforcer  # noqa: E402
+import inherited_evidence  # noqa: E402  (shared Throwable-evidence source of truth)
 
 # Exit codes.
 RC_DONE = 0
@@ -52,11 +52,16 @@ RC_NO_TARGETS = 7   # nothing pending — mirrors one_cycle/cycle_loop
 # PATH) and otherwise propagates Maven's exit code (1 on test failure). We treat
 # its 2 as "tests not run" so a missing Maven never looks like a compile failure.
 _RC_TESTS_NOT_RUN = 2
-_THROWABLE_METHODS = (
-    ("getMessage", "java.lang.String"),
-    ("getCause", "java.lang.Throwable"),
-    ("toString", "java.lang.String"),
-)
+
+# ── Hermetic-payload tuning (self-contained request) ─────────────────────────────
+# The SUT is shipped verbatim so the generator never reads the Git working tree.
+# A larger SUT is truncated with a marker so the per-request token budget stays
+# bounded (~4 bytes/token ⇒ 60 KB ≈ 15k tokens).
+_MAX_SUT_SOURCE_BYTES = 60_000
+# Cap project collaborators whose signatures are projected into the payload, and
+# the bytes read from each, so a fan-out SUT never balloons the request.
+_MAX_DEP_SIGNATURES = 25
+_MAX_DEP_FILE_BYTES = 200_000
 
 
 # ── small JSON helpers ──────────────────────────────────────────────────────────
@@ -317,22 +322,14 @@ def _context_evidence(state_dir: Path, sut: str) -> tuple[list[str], list[dict]]
             add_ref("method", method)
 
     classification = data.get("classification") if isinstance(data.get("classification"), dict) else {}
-    class_type = str(classification.get("type") or "").lower()
-    is_exception = class_type == "exception" or sut.endswith(("Exception", "Error"))
-    if is_exception:
-        for name, return_type in _THROWABLE_METHODS:
-            raw = f"sym:{sut}#{name}:java.lang.Throwable"
-            evidence_id = f"sym:{sut}#{name}:{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:8]}"
-            if evidence_id not in ids:
-                ids.append(evidence_id)
-            refs.append({
-                "evidenceId": evidence_id,
-                "kind": "method",
-                "name": name,
-                "returnType": return_type,
-                "params": [],
-                "inheritedFrom": "java.lang.Throwable",
-            })
+    class_type = classification.get("type")
+    # Inherited Throwable evidence comes from the shared module so the gate (G2)
+    # accepts the exact same synthetic ids the request advertises (no drift).
+    if inherited_evidence.is_throwable_sut(sut, class_type):
+        for ref in inherited_evidence.throwable_evidence_refs(sut):
+            if ref["evidenceId"] not in ids:
+                ids.append(ref["evidenceId"])
+            refs.append(ref)
     return ids, refs
 
 
@@ -367,7 +364,226 @@ def _target_evidence_ids(target: dict, sut: str, evidence_refs: list[dict]) -> t
     return name, True, matched
 
 
-def _enrich_targets_with_imports(targets: list[dict], *, state_dir: Path) -> list[dict]:
+# ── Hermetic payload: SUT source + dependency signatures ─────────────────────────
+
+def _source_path(repo: Path, fqcn: str) -> Path:
+    """Conventional production-source path for an FQCN under the Maven repo."""
+    return repo / ("src/main/java/" + fqcn.replace(".", "/") + ".java")
+
+
+def _match_brace(code: str, open_idx: int) -> int:
+    """Index of the `}` that closes the `{` at ``open_idx`` (brace-matched,
+    string/char-literal aware). Returns the last index if unbalanced."""
+    depth = 0
+    in_str = in_chr = esc = False
+    i, n = open_idx, len(code)
+    while i < n:
+        c = code[i]
+        if in_str:
+            if esc: esc = False
+            elif c == "\\": esc = True
+            elif c == '"': in_str = False
+        elif in_chr:
+            if esc: esc = False
+            elif c == "\\": esc = True
+            elif c == "'": in_chr = False
+        elif c == '"': in_str = True
+        elif c == "'": in_chr = True
+        elif c == "{": depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return n - 1
+
+
+_TYPE_KEYWORD = re.compile(r"\b(?:class|interface|enum|record)\b")
+# A member header is a method/constructor when, ignoring leading annotations, it
+# ENDS in `name(params)` (+ optional throws) — anchored at end so an annotation
+# like @Table(name="x") earlier in the header never triggers a false positive.
+_METHOD_HEADER_TAIL = re.compile(
+    r"[A-Za-z_$][\w$]*\s*\([^;{}]*\)\s*(?:throws[\s\w.,<>$]+)?$"
+)
+
+
+def _looks_like_method(header: str) -> bool:
+    h = header.strip()
+    if not h or _TYPE_KEYWORD.search(h):
+        return False
+    return bool(_METHOD_HEADER_TAIL.search(h))
+
+
+def _extract_method_bodies(source: str, sut: str) -> str:
+    """Project ONLY the method & constructor bodies (with their signature as an
+    anchor) out of a Java source. Package/imports/class declaration/field
+    declarations are dropped on purpose — they are already carried by the other
+    request fields (allowedImports, evidenceRefs, constructors/methods,
+    dependencySignatures). What is NOT anywhere else is the behaviour inside the
+    bodies, which is what the generator needs to derive expected outputs and
+    branch coverage.
+
+    Implemented with a brace-matching scan at class-body depth (depth 1), so it
+    is robust to nested control flow, strings and comments. Returns "" when the
+    SUT has no method bodies (e.g. a pure-field DTO or an abstract interface)."""
+    code = _JAVA_LINE_COMMENT.sub("", _JAVA_BLOCK_COMMENT.sub("", source))
+    blocks: list[str] = []
+    i, n = 0, len(code)
+    depth = 0
+    member_start = 0
+    in_str = in_chr = esc = False
+    while i < n:
+        c = code[i]
+        if in_str:
+            if esc: esc = False
+            elif c == "\\": esc = True
+            elif c == '"': in_str = False
+            i += 1; continue
+        if in_chr:
+            if esc: esc = False
+            elif c == "\\": esc = True
+            elif c == "'": in_chr = False
+            i += 1; continue
+        if c == '"':
+            in_str = True; i += 1; continue
+        if c == "'":
+            in_chr = True; i += 1; continue
+        if c == "{":
+            if depth == 1 and _looks_like_method(code[member_start:i]):
+                end = _match_brace(code, i)
+                header = code[member_start:i].strip()
+                blocks.append(header + " " + code[i:end + 1])
+                i = end + 1
+                member_start = i
+                continue
+            depth += 1
+            if depth == 1:
+                member_start = i + 1
+            i += 1; continue
+        if c == "}":
+            depth = max(0, depth - 1)
+            if depth == 1:
+                member_start = i + 1
+            i += 1; continue
+        if c == ";" and depth == 1:
+            member_start = i + 1
+            i += 1; continue
+        i += 1
+    if not blocks:
+        return ""
+    # Concise marker only (the selfContainedPolicy already explains that this
+    # field is bodies-only); a long banner would dwarf a tiny SUT's actual code.
+    simple = sut.rsplit(".", 1)[-1]
+    return f"// {simple}: method/constructor bodies\n\n" + "\n\n".join(b.strip() for b in blocks)
+
+
+def _read_sut_source(repo: Path | None, sut: str) -> tuple[str, bool]:
+    """Read the SUT production file and project its method/constructor bodies so
+    they travel inside the request (the generator never reads the Git working
+    tree). Only the bodies are shipped — the rest of the source is redundant with
+    the other request fields.
+
+    Returns (bodies, truncated). Missing repo/file ⇒ ("", False); a projection
+    larger than _MAX_SUT_SOURCE_BYTES is clipped and flagged so the per-request
+    token budget stays bounded."""
+    if repo is None or not sut:
+        return "", False
+    path = _source_path(repo, sut)
+    if not path.exists():
+        return "", False
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return "", False
+    bodies = _extract_method_bodies(text, sut)
+    if len(bodies.encode("utf-8")) > _MAX_SUT_SOURCE_BYTES:
+        clipped = bodies.encode("utf-8")[:_MAX_SUT_SOURCE_BYTES].decode("utf-8", errors="ignore")
+        marker = (f"\n// … [truncated by coverage-agent: SUT bodies exceed "
+                  f"{_MAX_SUT_SOURCE_BYTES} bytes]")
+        return clipped + marker, True
+    return bodies, False
+
+
+# Strip Java comments before scanning for member signatures (so a commented-out
+# method never leaks into the projected signatures).
+_JAVA_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+_JAVA_LINE_COMMENT = re.compile(r"//[^\n]*")
+# A public/protected member declaration: optional modifiers, optional generic and
+# return type, a name, a parameter list, optional throws — up to the body/semicolon.
+_MEMBER_SIG = re.compile(
+    r"(?P<sig>(?:public|protected)(?:\s+(?:static|final|abstract|synchronized|native|default))*"
+    r"[^=;{}()]*?[A-Za-z_$][\w$]*\s*\([^;{}]*\)(?:\s*throws\s[^{;]+)?)\s*[{;]",
+    re.S,
+)
+# Interface methods are implicitly public and have no executable body, so a
+# top-of-line `<returnType> name(params);` is a safe capture (no statement bodies
+# to confuse it). Covers the modifier-less declarations the public/protected
+# anchor above would otherwise miss.
+_INTERFACE_METHOD_SIG = re.compile(
+    r"(?m)^\s*(?P<sig>(?:default\s+|static\s+)?"
+    r"[\w.$<>\[\],\s?]+\s+[A-Za-z_$][\w$]*\s*\([^;{}]*\)(?:\s*throws\s[^;{]+)?)\s*;"
+)
+_TYPE_DECL = re.compile(
+    r"(?:public\s+)?(?:final\s+|abstract\s+)?(?:class|interface|enum|record)\s+[A-Za-z_$][\w$]*[^{]*"
+)
+
+
+def _extract_signatures(repo: Path, fqcn: str) -> dict | None:
+    """Best-effort public API surface of a PROJECT source class (constructors +
+    public/protected methods), so the generator understands a collaborator's
+    shape without leaving the JSON. Returns None for non-project FQCNs (JDK,
+    frameworks, deps) — they have no source file under src/main/java."""
+    path = _source_path(repo, fqcn)
+    if not path.exists():
+        return None
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")[:_MAX_DEP_FILE_BYTES]
+    except Exception:
+        return None
+    code = _JAVA_LINE_COMMENT.sub("", _JAVA_BLOCK_COMMENT.sub("", raw))
+    type_decl = ""
+    m = _TYPE_DECL.search(code)
+    if m:
+        type_decl = re.sub(r"\s+", " ", m.group(0)).strip()
+    signatures: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw_sig: str) -> None:
+        sig = re.sub(r"\s+", " ", raw_sig).strip()
+        if sig and sig not in seen:
+            seen.add(sig)
+            signatures.append(sig)
+
+    for sm in _MEMBER_SIG.finditer(code):
+        _add(sm.group("sig"))
+    if "interface" in type_decl:
+        for sm in _INTERFACE_METHOD_SIG.finditer(code):
+            _add(sm.group("sig"))
+    if not type_decl and not signatures:
+        return None
+    return {"fqcn": fqcn, "sourceFile": "src/main/java/" + fqcn.replace(".", "/") + ".java",
+            "typeDeclaration": type_decl, "signatures": signatures}
+
+
+def _dependency_signatures(repo: Path | None, allowed_imports: list[str], sut: str) -> list[dict]:
+    """Project the signatures of every allowedImport that is a project source
+    class (skipping the SUT itself and all JDK/framework imports), capped to
+    _MAX_DEP_SIGNATURES so a fan-out target never balloons the request."""
+    if repo is None:
+        return []
+    out: list[dict] = []
+    for fqcn in allowed_imports:
+        if fqcn == sut or len(out) >= _MAX_DEP_SIGNATURES:
+            continue
+        sig = _extract_signatures(repo, fqcn)
+        if sig:
+            out.append(sig)
+    return out
+
+
+def _enrich_targets_with_imports(
+    targets: list[dict], *, state_dir: Path, repo: Path | None = None
+) -> list[dict]:
     enriched: list[dict] = []
     for target in targets:
         row = dict(target)
@@ -376,12 +592,19 @@ def _enrich_targets_with_imports(targets: list[dict], *, state_dir: Path) -> lis
         target_method, target_required, target_evidence = _target_evidence_ids(
             row, sut, evidence_refs
         )
-        row["allowedImports"] = _context_allowed_imports(state_dir, sut)
+        allowed_imports = _context_allowed_imports(state_dir, sut)
+        row["allowedImports"] = allowed_imports
         row["allowedEvidenceIds"] = evidence_ids
         row["evidenceRefs"] = evidence_refs
         row["targetMethodName"] = target_method
         row["targetEvidenceRequired"] = target_required
         row["targetEvidenceIds"] = target_evidence
+        # Hermetic payload: ship the SUT verbatim + project-collaborator signatures
+        # so the generator never reads the Git working tree (avoids stale/ghost code).
+        sut_source, sut_truncated = _read_sut_source(repo, sut)
+        row["sutSourceCode"] = sut_source
+        row["sutSourceTruncated"] = sut_truncated
+        row["dependencySignatures"] = _dependency_signatures(repo, allowed_imports, sut)
         enriched.append(row)
     return enriched
 
@@ -442,6 +665,112 @@ def _classify_batch(
     return {"passed": passed, "failed": failed, "compile": compile_failed}
 
 
+def _render_test_source_from_descriptor(patch: dict) -> str:
+    """Best-effort reconstruction of the test that just failed from its patch
+    descriptor, used when the patcher rejected the patch (gate/perimeter) before
+    writing any file to disk — so currentTestSource is never empty on a repair.
+
+    This is a faithful-but-approximate rendering (the canonical renderer lives in
+    the patcher); it is clearly marked so the model treats it as the failing test
+    rather than a file on disk it could re-read."""
+    if not isinstance(patch, dict) or not patch:
+        return ""
+    test_class = str(patch.get("testClass") or "")
+    pkg, simple = (test_class.rsplit(".", 1) if "." in test_class else ("", test_class))
+    lines: list[str] = [
+        "// reconstructed from the rejected patchDescriptor "
+        "(the patcher did not write this file to disk)",
+    ]
+    if pkg:
+        lines += [f"package {pkg};", ""]
+    for imp in patch.get("allowedImports") or []:
+        lines.append(f"import {imp};")
+    if patch.get("allowedImports"):
+        lines.append("")
+    lines.append(f"class {simple or 'GeneratedTest'} {{")
+    for field in patch.get("fields") or []:
+        if not isinstance(field, dict):
+            continue
+        ann = field.get("annotation")
+        decl = field.get("declaration") or field.get("source") or ""
+        if ann:
+            lines.append(f"    {ann}")
+        if decl:
+            lines.append(f"    {decl}")
+    for method in patch.get("methods") or []:
+        if not isinstance(method, dict):
+            continue
+        annotations = [str(a) for a in (method.get("annotations") or [])]
+        if not annotations:
+            annotations = ["@Test"]
+        for ann in annotations:
+            lines.append(f"    {ann}")
+        name = str(method.get("name") or "test")
+        body = str(method.get("body") or "")
+        lines.append(f"    void {name}() {{")
+        for bl in body.splitlines():
+            lines.append("        " + bl)
+        lines.append("    }")
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def _compiler_error_details(state_dir: Path, test_class: str) -> str:
+    """Project the verbatim javac/Maven errors for ONE test class out of
+    state/compile-error-index.json (written per failure by the narrow runner).
+
+    Returns one block per indexed error — `[code] file:line: message` plus the
+    raw compiler line — so the repair payload carries the exact constructor /
+    type / arity error instead of a generic "patcher rc=3"."""
+    idx = state_dir / "compile-error-index.json"
+    if not idx.exists() or not test_class:
+        return ""
+    try:
+        errors = (_load_json(idx) or {}).get("errors", []) or []
+    except Exception:
+        return ""
+    rel = test_class.replace(".", "/") + ".java"
+    blocks: list[str] = []
+    seen: set[tuple[str, str, str]] = set()
+    for e in errors:
+        fpath = str(e.get("file", "")).replace("\\", "/")
+        if not fpath.endswith(rel):
+            continue
+        code = e.get("code") or "E_OTHER"
+        line = str(e.get("line", ""))
+        msg = str(e.get("message") or "").strip()
+        # Maven prints each diagnostic twice (COMPILATION ERROR section + goal
+        # failure); dedupe so the payload carries one block per real error.
+        key = (str(code), line, msg)
+        if key in seen:
+            continue
+        seen.add(key)
+        block = f"[{code}] {e.get('file', '')}:{line}: {msg}"
+        raw = str(e.get("raw") or "").strip()
+        if raw and raw != msg:
+            block += f"\n    {raw}"
+        blocks.append(block)
+    return "\n".join(blocks)
+
+
+def _patcher_rejection_details(state_dir: Path, test_class: str) -> str:
+    """The patcher's captured rejection output for a test class (gate code +
+    [BLOCKED-DETAIL] JSON), written by one_cycle when an apply returns rc!=0.
+
+    This is what makes a non-compiler rejection (rc=3 gate/perimeter) legible to
+    the repair model instead of a bare "patcher rc=3"."""
+    if not test_class:
+        return ""
+    safe = re.sub(r"[^A-Za-z0-9_.\-]", "_", test_class)
+    path = state_dir / "_summaries" / "patcher-decisions" / f"{safe}.json"
+    if not path.exists():
+        return ""
+    try:
+        return str((_load_json(path) or {}).get("output") or "").strip()
+    except Exception:
+        return ""
+
+
 def _failed_items_for_repair(manifest: dict, *, state_dir: Path, repo: Path,
                              batch_ids: list[str], applied: dict[str, str]) -> list[dict]:
     """Shape the repair payload for the targets still failing in this batch."""
@@ -475,7 +804,35 @@ def _failed_items_for_repair(manifest: dict, *, state_dir: Path, repo: Path,
                     current_src = f.read_text(encoding="utf-8", errors="replace")
                 except Exception:
                     current_src = ""
-        kind = "COMPILATION_ERROR" if rec.get("status") == bp.COMPILE_FAILED else "TEST_FAILURE"
+        # When the patcher rejected the patch (rc=3 gate/perimeter) the file was
+        # never written → disk read is empty. Fall back to the rejected descriptor
+        # so currentTestSource ALWAYS carries the test that just failed.
+        if not current_src:
+            current_src = _render_test_source_from_descriptor(rec.get("lastPatchDescriptor") or {})
+        # Verbatim javac/Maven errors for this exact test class (constructors that
+        # differ in size, invalid types, …) instead of a generic "patcher rc=3".
+        compiler_error_details = _compiler_error_details(state_dir, test_class)
+        # The patcher's own gate/perimeter rejection (rc=3), captured per testClass —
+        # WHY the patch was blocked (e.g. G2 orphan evidenceId), which never reaches
+        # the Maven compiler and so is absent from compilerErrorDetails.
+        patcher_error_details = _patcher_rejection_details(state_dir, test_class)
+        status = rec.get("status")
+        if status == bp.COMPILE_FAILED:
+            kind = "COMPILATION_ERROR"
+        elif status == bp.PATCH_FAILED:
+            kind = "PATCH_REJECTED"
+        else:
+            kind = "TEST_FAILURE"
+        # Best one-line summary: concrete compiler line, else the patcher's
+        # [BLOCKED] gate line, else the lifecycle note.
+        blocked_line = next((ln for ln in patcher_error_details.splitlines()
+                             if "[BLOCKED]" in ln), "")
+        if compiler_error_details:
+            error_summary = compiler_error_details.splitlines()[0]
+        elif blocked_line:
+            error_summary = blocked_line.strip()
+        else:
+            error_summary = rec.get("note", kind)
         items.append({
             "targetId": tid,
             "failureKind": kind,
@@ -501,7 +858,9 @@ def _failed_items_for_repair(manifest: dict, *, state_dir: Path, repo: Path,
             ),
             "testClass": test_class,
             "testFile": test_file,
-            "errorSummary": rec.get("note", kind),
+            "errorSummary": error_summary,
+            "compilerErrorDetails": compiler_error_details,
+            "patcherErrorDetails": patcher_error_details,
             "buildOutput": build_output,
             "currentTestSource": current_src,
         })
@@ -533,7 +892,10 @@ def _process_generation(
             continue
         patch = it.get("patchDescriptor") or {}
         test_class = patch.get("testClass", "")
-        bp.set_status(manifest, tid, bp.GENERATED, testClass=test_class)
+        # Persist the descriptor so the repair payload can reconstruct the exact
+        # test that failed even when the patcher rejected it before writing a file.
+        bp.set_status(manifest, tid, bp.GENERATED, testClass=test_class,
+                      lastPatchDescriptor=patch)
         rc = _apply_patch(patch, state_dir=state_dir, repo=repo)
         if rc == 0:
             bp.set_status(manifest, tid, bp.APPLIED, testClass=test_class)
@@ -571,10 +933,12 @@ def _process_repair(
         rc = _apply_patch(patch, state_dir=state_dir, repo=repo,
                           repair_attempts=triplets.get(tid))
         if rc == 0:
-            bp.set_status(manifest, tid, bp.REPAIRED, testClass=test_class)
+            bp.set_status(manifest, tid, bp.REPAIRED, testClass=test_class,
+                          lastPatchDescriptor=patch)
             applied[tid] = test_class
         else:
-            bp.set_status(manifest, tid, bp.PATCH_FAILED, note=f"repair patcher rc={rc}")
+            bp.set_status(manifest, tid, bp.PATCH_FAILED, note=f"repair patcher rc={rc}",
+                          lastPatchDescriptor=patch)
     return applied
 
 
@@ -638,7 +1002,7 @@ def run_batches(
             return budget_enforcer.EXIT_EXCEEDED  # RC 2 == budget exceeded
 
         # ── generation handoff ──────────────────────────────────────────────────
-        request_targets = _enrich_targets_with_imports(targets, state_dir=state_dir)
+        request_targets = _enrich_targets_with_imports(targets, state_dir=state_dir, repo=repo)
         req = bp.build_generation_request(run_id, batch_id, request_targets, batch_size=batch_size)
         req_path = batch_dir / "request-generation.json"
         resp_path = batch_dir / "response-generation.json"

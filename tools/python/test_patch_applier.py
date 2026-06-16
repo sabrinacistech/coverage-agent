@@ -32,6 +32,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -1129,6 +1130,26 @@ def main() -> int:
             br = gate_report.get("blockedReason") or "GATE_FAIL"
             rc = 2 if br.startswith("G8") else 3
             print(f"[BLOCKED] gate {br}", file=sys.stderr)
+            # Emit the failing gate's detail (e.g. G2 orphanEvidenceIds /
+            # methodsWithoutEvidence) so the captured output carries the
+            # symbol-level reason into the repair payload, not just the code.
+            # Plain-string format on purpose: this module does not import json.
+            detail_parts: list[str] = []
+            for gname, g in (gate_report.get("gates") or {}).items():
+                if not isinstance(g, dict) or g.get("status") != "FAIL":
+                    continue
+                seg = f"{gname}={g.get('blockedReason') or 'FAIL'}"
+                orphans = g.get("orphanEvidenceIds") or []
+                if orphans:
+                    seg += "; orphanEvidenceIds=" + ", ".join(
+                        f"{o.get('method')}:{o.get('evidenceId')}"
+                        for o in orphans if isinstance(o, dict))
+                mwe = g.get("methodsWithoutEvidence") or []
+                if mwe:
+                    seg += "; methodsWithoutEvidence=" + ", ".join(str(x) for x in mwe)
+                detail_parts.append(seg)
+            if detail_parts:
+                print("[BLOCKED-DETAIL] " + " | ".join(detail_parts), file=sys.stderr)
             return rc
     # ── End gate + budget enforcement ──────────────────────────────────────────
 
@@ -1209,6 +1230,23 @@ def main() -> int:
                 f"escalated={ar.get('escalated', 0)}; write rolled back)",
                 file=sys.stderr,
             )
+            # Emit the concrete linter violations (kind + message + line) so the
+            # repair payload can carry WHAT to fix, not just "G6_LINTER_FAIL".
+            vp = g6.get("violationsPath")
+            violations: list = []
+            try:
+                if vp and Path(vp).exists():
+                    violations = (json.loads(Path(vp).read_text(encoding="utf-8"))
+                                  .get("violations") or [])
+            except Exception:
+                violations = []
+            if violations:
+                detail = " | ".join(
+                    f"{v.get('kind') or v.get('rule') or 'LINT'}"
+                    f"@L{v.get('line', '?')}: {v.get('message', '')}".strip()
+                    for v in violations[:6] if isinstance(v, dict))
+                if detail:
+                    print("[BLOCKED-DETAIL] " + detail, file=sys.stderr)
             return 3
 
     _update_report(out_path, result, patch, dry_run=args.dry_run)

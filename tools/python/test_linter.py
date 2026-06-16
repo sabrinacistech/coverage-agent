@@ -36,6 +36,13 @@ from pathlib import Path
 
 from common import load_json
 from framework_imports import used_framework_symbols  # shared catalog (GATE side)
+import inherited_evidence  # shared Throwable-evidence source of truth
+
+# Method names inherited from java.lang.Throwable that a test may legitimately
+# call on an exception SUT even though they are absent from its (bytecode-derived)
+# contract. Same source of truth as the request side and gate_g2, so the linter
+# never rejects an inherited call the orchestrator advertised as evidence.
+_THROWABLE_METHOD_NAMES = frozenset(n for n, _ in inherited_evidence.THROWABLE_METHODS)
 
 # ── Base regexes ──────────────────────────────────────────────────────────────
 IMPORT_RE = re.compile(r"^\s*import\s+(static\s+)?([\w\.]+(?:\.\*)?)\s*;", re.MULTILINE)
@@ -830,6 +837,10 @@ def lint(
         # Supplement from state/index/methods.json
         index_allowed = index_methods.get(fq or "", set())
         if meth in index_allowed:
+            continue
+        # Inherited Throwable methods (getMessage/getCause/toString) on an
+        # exception receiver are legitimate even though absent from its contract.
+        if meth in _THROWABLE_METHOD_NAMES and inherited_evidence.is_throwable_sut(fq or ""):
             continue
         violations.append({
             "gate": "G2",
