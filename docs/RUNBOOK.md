@@ -147,6 +147,13 @@ de branch ≥ 0.80) definido —fuente única— en
 [`docs/archetype-policy.md`](archetype-policy.md) §"Bloque JaCoCo canónico". Es la
 **única** modificación permitida en la app; commiteala en el repo objetivo.
 
+> ✅ **Automático:** `run_all_deterministic.py` ya hace esto en la etapa B. Corre el
+> guard en modo `--apply` **por default**, así que un módulo **java-8 / no-BGBA sin
+> JaCoCo** recibe el plugin automáticamente (la decisión `add` del guard); `java-21`
+> queda heredado (`forbidden`, no se toca) y un POM ya configurado es no-op. El paso
+> manual de arriba solo aplica si corrés el plugin a mano o pasás `--check-jacoco-pom`
+> para optar por NO escribir el POM.
+
 > Si no hay `jacoco.xml`, la Fase 0 produce un `batch-plan` vacío
 > ("no uncovered targets") y no hay nada que generar. Ver Troubleshooting.
 

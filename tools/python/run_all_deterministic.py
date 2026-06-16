@@ -14,7 +14,11 @@ Deterministic order (why it is shaped like this)
                             guard reads. (Cached, so step D reuses them.)
   B. JaCoCo verification    jacoco_pom_guard.py — the one deterministic gate that
                             decides, per module, whether the project POM needs the
-                            jacoco-maven-plugin. --check reports; --apply injects.
+                            jacoco-maven-plugin. Runs in --apply BY DEFAULT, so a
+                            java-8 / non-BGBA module without JaCoCo gets the plugin
+                            injected (the deploy-gate requirement); java-21 stays
+                            inherited (forbidden, no write). --check-jacoco-pom opts
+                            out (report only, never writes into the target POM).
   C. Maven baseline         mvn ...:prepare-agent test ...:report → generates
                             target/ and target/site/jacoco/jacoco.xml.
   D. Full Fase 0            run_pipeline WITH --jacoco-xml → coverage-targets.json
@@ -81,6 +85,19 @@ def run_soft(cmd: list[str], cwd: Path, env: dict[str, str], ok_codes=(0,)) -> i
     if rc not in ok_codes:
         print(f"[WARN] command rc={rc} (continuing): {_fmt(cmd)}")
     return rc
+
+
+def jacoco_guard_mode(check_only: bool) -> str:
+    """Stage B mode for the JaCoCo POM guard: 'check' only when the operator opted
+    out via --check-jacoco-pom, otherwise 'apply' (the default).
+
+    Applying by default is what makes a java-8 / non-BGBA module without JaCoCo get
+    the canonical jacoco-maven-plugin injected — the deploy-gate requirement of
+    docs/archetype-policy.md. It is safe as the default because the guard's own
+    decide() only writes for action 'add'; java-21 resolves to 'forbidden' (rc=3,
+    tolerated — JaCoCo inherited from the parent POM) and an already-configured POM
+    is a 'none' no-op."""
+    return "check" if check_only else "apply"
 
 
 def mvn_prefix() -> list[str]:
@@ -209,11 +226,20 @@ def main() -> int:
         "existing target/site/jacoco/jacoco.xml.",
     )
     parser.add_argument(
+        "--check-jacoco-pom",
+        action="store_true",
+        help="Run the JaCoCo guard in report-only mode (never writes into the target "
+        "POM). Default: APPLY — the guard injects jacoco-maven-plugin for modules "
+        "whose decision is 'add' (java-8 / non-BGBA without JaCoCo, required for the "
+        "OpenShift deploy gate); java-21 stays inherited (forbidden, no write) and an "
+        "already-configured POM is a no-op.",
+    )
+    parser.add_argument(
         "--apply-jacoco-pom",
         action="store_true",
-        help="Run the JaCoCo guard in --apply mode (inject jacoco-maven-plugin into "
-        "the project POM for modules whose decision is 'add'). Default: --check "
-        "(verify/report only, never writes into the target project).",
+        help="Deprecated no-op: applying the JaCoCo POM edit is now the default. "
+        "Kept for backward compatibility. Use --check-jacoco-pom to opt OUT of "
+        "POM writes.",
     )
     parser.add_argument("--max-cycles", type=int, default=20)
     parser.add_argument("--max-minutes-per-cycle", type=int, default=10)
@@ -341,10 +367,13 @@ def main() -> int:
             "--state", str(state_dir),
             "--module", args.module,
         ]
-        if args.apply_jacoco_pom:
-            # rc=3 → "forbidden" (parent POM provides JaCoCo): a valid decision.
+        if jacoco_guard_mode(args.check_jacoco_pom) == "apply":
+            # Default: inject the plugin for modules whose decision is 'add' (java-8 /
+            # non-BGBA without JaCoCo). rc=3 → "forbidden" (java-21: parent POM
+            # provides JaCoCo) is a valid decision, not a failure; 'none' is a no-op.
             run_soft(guard_cmd + ["--apply"], cwd=agent_root, env=env, ok_codes=(0, 3))
         else:
+            # Opt-out (--check-jacoco-pom): report the per-module decision, never write.
             run_soft(guard_cmd + ["--check"], cwd=agent_root, env=env, ok_codes=(0,))
 
         # ── C. Maven baseline → target/ + jacoco.xml ─────────────────────────

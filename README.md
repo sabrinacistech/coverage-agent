@@ -399,7 +399,7 @@ Orden interno: **(A)** pre-pasada de contratos (`pom` + `archetype`) → **(B)**
 | Flag | Para qué |
 |------|----------|
 | `--skip-jacoco` | Reusar un `jacoco.xml` ya generado (saltea A/B/C) |
-| `--apply-jacoco-pom` | Inyectar el plugin JaCoCo en el POM (necesario si vas a correr el ciclo y el POM no lo tiene; default `--check`, no escribe) |
+| `--check-jacoco-pom` | Modo solo-reporte: NO escribe el POM. Por **default** la etapa B aplica: inyecta el plugin JaCoCo en `java-8` / no-BGBA sin JaCoCo (requerido para el gate de OpenShift); `java-21` queda heredado (no se toca). |
 | `--start-cycle-loop` | Encadenar el ciclo de generación/reparación (provider por handoff IDE) |
 | `--coverage-mode` | `coverage` (default) · `branch-coverage` · `mutation-hardening` |
 | `--max-cycles` / `--max-minutes-per-cycle` | Presupuesto sembrado en `execution-state.json` |

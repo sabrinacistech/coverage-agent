@@ -54,6 +54,11 @@ python tools/python/jacoco_pom_guard.py --state ../.agent-state --module . --che
 python tools/python/jacoco_pom_guard.py --state ../.agent-state --module . --apply   # inserta solo si action=add
 ```
 
+**En el primer run, `run_all_deterministic.py` corre el guard en `--apply` POR DEFAULT**
+(etapa B): un módulo `java-8` / no-BGBA sin JaCoCo recibe el plugin automáticamente
+(`action: add`). `java-21` resuelve `forbidden` (rc=3, tolerado — heredado) y un POM ya
+configurado es `none` (no-op). Para optar por NO escribir el POM, pasá `--check-jacoco-pom`.
+
 ## Reglas
 - El agente **nunca** toca `src/main`. La **única** modificación permitida en la app
   es agregar el `jacoco-maven-plugin` al POM cuando el arquetipo lo requiere (abajo),

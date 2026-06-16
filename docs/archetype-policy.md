@@ -70,6 +70,11 @@ POM efectivamente carece del plugin (doble verificación). En `forbidden` sale c
 código 3 sin escribir. El bloque que inserta se **lee de la sección siguiente** (no se
 duplica en el código).
 
+**Por default, el primer run aplica.** `run_all_deterministic.py` (etapa B) invoca el
+guard en `--apply` **sin necesidad de flag**, de modo que un módulo `java-8` / no-BGBA
+sin JaCoCo recibe el plugin automáticamente (cumple el "requerido" de esta política).
+El operador opta por NO escribir el POM con `--check-jacoco-pom` (modo solo-reporte).
+
 ## Bloque JaCoCo canónico (Java 8 / sin JaCoCo heredado) — REQUERIDO para el gate de OpenShift
 
 > **Fuente única de verdad** del bloque del POM. Cualquier doc/skill que necesite
