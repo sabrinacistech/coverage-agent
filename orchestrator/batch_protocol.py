@@ -83,6 +83,27 @@ CONTEXT_POLICY = {
 # to generate a test without reading the repository.
 PREFLIGHT_SKIP_REASON = "Falta de evidencia de tipos/parámetros en metadatos"
 
+# Reason persisted when the method under test has NO body in the shipped
+# sutSourceCode projection (task 2). Without the body the model would have to
+# read the repository (forbidden) or invent the behaviour, so the target is
+# skipped before the handoff instead of being sent to fail/hallucinate. Two
+# aliases for the same constant: the runner-facing name and the abandon name.
+PREFLIGHT_BODY_MISSING_REASON = "TARGET_METHOD_BODY_MISSING"
+ABANDON_TARGET_BODY_MISSING = PREFLIGHT_BODY_MISSING_REASON
+
+# Reason persisted when the target is a static initializer (<clinit>) but the
+# request carries no enum-constant evidence to exercise it (task 3). Generating a
+# <clinit> test without the constants forces a repository read or invented
+# symbols, so it is skipped/deferred to NEED_MORE_CONTEXT instead.
+PREFLIGHT_CLINIT_NO_CONSTANTS = "CLINIT_WITHOUT_ENUM_CONSTANTS"
+
+# repairCause.kind set when the missing compiler symbol is an undeclared
+# test-local variable/identifier (task 4) — the exact failure mode this milestone
+# attacks (the model used `controller`/`adapter`/… without declaring them). It
+# tells the repair model the fix is to DECLARE/CONSTRUCT the fixture, not to
+# change production behaviour.
+UNDECLARED_TEST_FIXTURE_KIND = "UNDECLARED_TEST_FIXTURE"
+
 # Repair-loop abandon reasons (task 6): why an item is dropped instead of spending
 # another handoff/round of tokens on it.
 ABANDON_NO_ACTIONABLE_LOGS = "NO_ACTIONABLE_LOGS"
@@ -203,6 +224,21 @@ GENERATION_RULES = [
     "The Java body may call methods on the SUT only when those method names are "
     "listed in target.evidenceRefs with kind='method'. Constructors alone do not "
     "authorize assertions through unevidenced SUT getters/methods.",
+    # fixturePlan contract (task 1) — the deterministic construction recipe the
+    # runner derives from the context-pack, so the model COPIES the fixture instead
+    # of inventing collaborator variables (the undeclared-symbol bug this fixes).
+    "Use the provided target.fixturePlan to build the test fixture: declare the "
+    "system under test as the local variable target.fixturePlan.sutVariable, "
+    "instantiate it with target.fixturePlan.constructor, and create EACH entry of "
+    "target.fixturePlan.requiredCollaborators using its creationStrategy — "
+    "'literal' uses the given value, 'new' constructs a real instance, 'mock' "
+    "declares a Mockito mock (a local mock(Type.class) or a @Mock field, allowed "
+    "only when Mockito is in target.allowedImports). Do NOT reference any variable "
+    "that is not declared locally in the test or in patchDescriptor.fields; never "
+    "invent a collaborator the fixturePlan did not list.",
+    "If target.fixturePlan.complete is false, do NOT improvise the missing "
+    "construction: respond with status NEED_MORE_CONTEXT and put the entries of "
+    "target.fixturePlan.unresolvedCollaborators in missingSymbols.",
     "When target.targetEvidenceRequired is true, every generated test method MUST "
     "include at least one id from target.targetEvidenceIds in method.evidenceIds. "
     "If target.targetEvidenceIds is empty, mark the target skipped/failed instead "
@@ -280,14 +316,77 @@ def preflight_evidence_gate(target: dict) -> str | None:
     alone". A target with NO evidence at all — or whose method-under-test requires
     evidence that was not found — cannot be generated without reading production
     code, so it is skipped here instead of being sent to the model and later rolled
-    back by G2 (a wasted handoff)."""
+    back by G2 (a wasted handoff).
+
+    Two further gates run on the ENRICHED target (the runner calls this after
+    _enrich_targets_with_imports, so targetMethodName/sutSourceCode are present):
+      * task 3 — a <clinit> target with no enum-constant evidence is skipped
+        (CLINIT_WITHOUT_ENUM_CONSTANTS);
+      * task 2 — a target whose method body is absent from the shipped
+        sutSourceCode projection is skipped (TARGET_METHOD_BODY_MISSING)."""
     evidence_ids = target.get("allowedEvidenceIds") or []
     evidence_refs = target.get("evidenceRefs") or []
     if not evidence_ids and not evidence_refs:
         return PREFLIGHT_SKIP_REASON
     if target.get("targetEvidenceRequired") and not (target.get("targetEvidenceIds") or []):
         return PREFLIGHT_SKIP_REASON
+    name = str(target.get("targetMethodName") or "").strip()
+    if name == "<clinit>" and not _has_enum_constant_evidence(target):
+        return PREFLIGHT_CLINIT_NO_CONSTANTS
+    if _target_body_missing(target):
+        return PREFLIGHT_BODY_MISSING_REASON
     return None
+
+
+# Evidence kinds (case-insensitive) that count as an enum constant / static
+# constant the generator can name in a <clinit> test (task 3).
+_ENUM_CONSTANT_KINDS = frozenset({
+    "enumconstant", "enumvalue", "constant", "field", "enum",
+})
+
+
+def _has_enum_constant_evidence(target: dict) -> bool:
+    """True when the request advertises at least one enum constant / static
+    constant for a <clinit> target. Looks in evidenceRefs (by kind) and in the
+    explicit ``enumConstants`` hints (target-level or under ``context``)."""
+    for ref in target.get("evidenceRefs") or []:
+        if isinstance(ref, dict) and str(ref.get("kind") or "").lower() in _ENUM_CONSTANT_KINDS:
+            return True
+    if target.get("enumConstants"):
+        return True
+    ctx = target.get("context") or {}
+    if isinstance(ctx, dict) and ctx.get("enumConstants"):
+        return True
+    return False
+
+
+def _target_body_missing(target: dict) -> bool:
+    """True when the method under test has NO body in the shipped sutSourceCode
+    projection (task 2), so the model could only proceed by reading the repo or
+    inventing behaviour.
+
+    Conservative on purpose — returns False (does NOT skip) when:
+      * the method is <clinit> or a synthetic lambda (handled elsewhere / has no
+        own body),
+      * no source projection was shipped at all (sutSourceCode empty: e.g. a
+        bodies-less DTO or a run without a repo) — the evidence gate above governs
+        those, over-skipping here would be wrong,
+      * the projection was truncated (we cannot prove absence).
+    The projection anchors every body by its signature `… name(params) { … }`, so
+    the method/constructor name followed by `(` is a faithful presence probe."""
+    name = str(target.get("targetMethodName") or "").strip()
+    if not name or name == "<clinit>" or name.startswith("lambda$"):
+        return False
+    source = str(target.get("sutSourceCode") or "")
+    if not source.strip() or target.get("sutSourceTruncated"):
+        return False
+    sut = str(target.get("sut") or "")
+    simple = sut.rsplit(".", 1)[-1]
+    # A constructor body (<init>) is anchored by the class simple name.
+    search_name = simple if name == "<init>" else name
+    if not search_name:
+        return False
+    return re.search(rf"\b{re.escape(search_name)}\s*\(", source) is None
 
 
 # ── Repair-loop control (task 6) ─────────────────────────────────────────────────
@@ -400,6 +499,56 @@ def classify_repair_cause(failed_item: dict) -> str:
     return "UNKNOWN"
 
 
+# javac prints an undeclared identifier as a multi-line block:
+#   File.java:12: error: cannot find symbol
+#           controller.handle();
+#           ^
+#     symbol:   variable controller
+#     location: class com.acme.FooTest
+# The `symbol:` line carries the kind (variable/method/class) and the identifier;
+# the `location:` line carries where it was referenced.
+_CANNOT_FIND_SYMBOL = "cannot find symbol"
+_SYMBOL_LINE_RE = re.compile(r"symbol\s*:\s*(\w+)\s+([A-Za-z_$][\w$.<>]*)")
+_LOCATION_LINE_RE = re.compile(r"location\s*:\s*(.+?)\s*$")
+
+
+def parse_missing_symbols(text: str) -> list[dict]:
+    """Extract structured ``{symbol, name, kind, location}`` entries from javac
+    'cannot find symbol' diagnostics (task 4). Deduplicated, order-preserving.
+    Returns [] when the text carries no such diagnostic."""
+    if not text or _CANNOT_FIND_SYMBOL not in text:
+        return []
+    lines = text.splitlines()
+    out: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for i, line in enumerate(lines):
+        if _CANNOT_FIND_SYMBOL not in line:
+            continue
+        kind = name = ""
+        location = ""
+        # The symbol:/location: lines follow within a few lines of the header.
+        for j in range(i + 1, min(i + 7, len(lines))):
+            if j != i and _CANNOT_FIND_SYMBOL in lines[j]:
+                break  # next diagnostic started
+            if not name:
+                sm = _SYMBOL_LINE_RE.search(lines[j])
+                if sm:
+                    kind, name = sm.group(1), sm.group(2)
+            if not location:
+                lm = _LOCATION_LINE_RE.search(lines[j])
+                if lm:
+                    location = lm.group(1)
+        if not name:
+            continue
+        key = (kind, name, location)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"symbol": f"{kind} {name}".strip(), "name": name,
+                    "kind": kind, "location": location})
+    return out
+
+
 def _rejected_files(failed_item: dict) -> list[str]:
     out = []
     for key in ("testFile", "canonicalTestFile"):
@@ -417,15 +566,26 @@ def build_repair_cause(failed_item: dict, *, previous_signature: str | None = No
     patcher = (failed_item.get("patcherErrorDetails") or "")
     patcher_diagnostics = [ln for ln in patcher.splitlines() if "[BLOCKED]" in ln]
     compiler = (failed_item.get("compilerErrorDetails") or "")
+    build_output = (failed_item.get("buildOutput") or "")
     failed_rules = [ln.split("]", 1)[0].lstrip("[")
                     for ln in compiler.splitlines() if ln.startswith("[")]
+    # Task 4: structured undeclared-symbol extraction. The compiler text first
+    # (it carries the per-class diagnostic), then the raw build output as a fallback.
+    missing_symbols = parse_missing_symbols(compiler) or parse_missing_symbols(build_output)
+    kind = classify_repair_cause(failed_item)
+    # When the missing symbol is a test-local variable/identifier, the fix is to
+    # DECLARE/CONSTRUCT the fixture — relabel so the repair model does not look for
+    # a production-code cause.
+    if any(m.get("kind") in ("variable", "") and m.get("name") for m in missing_symbols):
+        kind = UNDECLARED_TEST_FIXTURE_KIND
     return {
-        "kind": classify_repair_cause(failed_item),
+        "kind": kind,
         "summary": str(failed_item.get("errorSummary") or "").strip(),
-        "stdout": (failed_item.get("buildOutput") or ""),
+        "stdout": build_output,
         "stderr": compiler,
         "patcherDiagnostics": patcher_diagnostics,
         "failedRules": sorted(set(failed_rules)),
+        "missingSymbols": missing_symbols,
         "rejectedFiles": _rejected_files(failed_item),
         "rejectedMethods": ([failed_item["rejectedTestClass"]]
                             if failed_item.get("rejectedTestClass") else []),
@@ -576,6 +736,12 @@ def build_generation_request(
             "targetEvidenceRequired": bool(item.get("targetEvidenceRequired", False)),
             "targetEvidenceIds": target_evidence_ids,
             "evidencePolicy": _evidence_policy(allowed_evidence_ids),
+            # Deterministic construction recipe derived by the runner from the
+            # context-pack (task 1). When absent (request built without enrichment)
+            # it stays an empty dict — the GENERATION_RULES then fall back to the
+            # evidence/allowedImports contract. The model COPIES this instead of
+            # inventing collaborator variables.
+            "fixturePlan": item.get("fixturePlan") or {},
             "template": item.get("template"),
             "priority": item.get("score", i),
             "fixtureIds": item.get("fixtureIds", []),
@@ -593,6 +759,7 @@ def build_generation_request(
                 },
                 "dependencySources": list(item.get("dependencySignatures") or []),
                 "allowedApi": list(item.get("evidenceRefs") or []),
+                "fixturePlan": item.get("fixturePlan") or {},
                 "existingRelatedTests": list(item.get("existingRelatedTests") or []),
                 "expectedBehavior": list(item.get("expectedBehavior") or []),
                 "missingContextPolicy": {"allowedStatus": "NEED_MORE_CONTEXT"},

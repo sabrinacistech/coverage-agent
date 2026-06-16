@@ -496,6 +496,216 @@ def case_enrichment_injects_existing_and_behavior() -> None:
                 row.get("expectedBehavior") == ["cover empty case"], str(row.get("expectedBehavior")))
 
 
+# ── fixturePlan: deterministic construction recipe (task 1) ───────────────────
+
+def case_fixture_plan_complete_with_collaborators() -> None:
+    """A SUT with a constructor of 1+ collaborators yields a complete plan with the
+    right per-type creationStrategy (primitive/String → literal, interface w/ mock
+    strategy + Mockito → mock)."""
+    pack = {
+        "schemaVersion": 1, "sut": "com.acme.Svc",
+        "constructors": [{"evidenceId": "ctor:com.acme.Svc:2", "visibility": "public",
+                          "params": [{"type": "java.lang.String", "name": "name"},
+                                     {"type": "com.acme.Repo", "name": "repo"}]}],
+        "dependencies": [{"name": "repo", "type": "com.acme.Repo", "injection": "constructor",
+                          "instantiationStrategy": "mock"}],
+        "fixtures": [],
+    }
+    allowed = ["org.junit.jupiter.api.Test", "org.mockito.Mockito", "org.mockito.Mock"]
+    plan = br._build_fixture_plan(pack, "com.acme.Svc", allowed)
+    _assert("fixturePlan complete", plan["complete"] is True, str(plan))
+    _assert("fixturePlan style local_variables", plan["style"] == "local_variables", str(plan))
+    _assert("fixturePlan sutVariable camel", plan["sutVariable"] == "svc", str(plan))
+    _assert("fixturePlan constructor evidenceId",
+            plan["constructor"]["evidenceId"] == "ctor:com.acme.Svc:2", str(plan))
+    _assert("fixturePlan invocation references collaborators",
+            plan["constructor"]["invocation"] == "new Svc(name, repo)", str(plan))
+    collabs = {c["name"]: c for c in plan["requiredCollaborators"]}
+    _assert("String collaborator → literal",
+            collabs["name"]["creationStrategy"] == "literal", str(collabs))
+    _assert("String collaborator literal value", collabs["name"]["value"] == '""', str(collabs))
+    _assert("interface collaborator → mock (Mockito available)",
+            collabs["repo"]["creationStrategy"] == "mock", str(collabs))
+    _assert("fixturePlan no unresolved", plan["unresolvedCollaborators"] == [], str(plan))
+
+
+def case_fixture_plan_incomplete_unresolved() -> None:
+    """A collaborator that is neither literal, constructible, nor mockable makes the
+    plan incomplete with the offending entries listed."""
+    pack = {
+        "schemaVersion": 1, "sut": "com.acme.Svc",
+        "constructors": [{"evidenceId": "ctor:com.acme.Svc:1", "visibility": "public",
+                          "params": [{"type": "com.acme.Mystery", "name": "x"}]}],
+        "dependencies": [], "fixtures": [],
+    }
+    plan = br._build_fixture_plan(pack, "com.acme.Svc", ["org.junit.jupiter.api.Test"])
+    _assert("unresolvable collaborator → incomplete", plan["complete"] is False, str(plan))
+    _assert("collaborator marked unresolved",
+            plan["requiredCollaborators"][0]["creationStrategy"] == "unresolved", str(plan))
+    _assert("unresolvedCollaborators lists the type",
+            any(u.get("type") == "com.acme.Mystery" for u in plan["unresolvedCollaborators"]),
+            str(plan["unresolvedCollaborators"]))
+
+    # A mock-strategy collaborator with NO Mockito on the classpath is unresolved.
+    pack2 = {
+        "schemaVersion": 1, "sut": "com.acme.Svc",
+        "constructors": [{"evidenceId": "c", "visibility": "public",
+                          "params": [{"type": "com.acme.Port", "name": "p"}]}],
+        "dependencies": [{"name": "p", "type": "com.acme.Port", "injection": "constructor",
+                          "instantiationStrategy": "mock"}],
+        "fixtures": [],
+    }
+    plan2 = br._build_fixture_plan(pack2, "com.acme.Svc", ["org.junit.jupiter.api.Test"])
+    _assert("mock collaborator without Mockito → unresolved",
+            plan2["requiredCollaborators"][0]["creationStrategy"] == "unresolved", str(plan2))
+    _assert("plan2 incomplete without Mockito", plan2["complete"] is False, str(plan2))
+
+    # A constructible collaborator (builder/constructor/factory strategy) → new.
+    pack3 = {
+        "schemaVersion": 1, "sut": "com.acme.Svc",
+        "constructors": [{"evidenceId": "c", "visibility": "public",
+                          "params": [{"type": "com.acme.Value", "name": "v"}]}],
+        "dependencies": [], "fixtures": [{"id": "com.acme.Value", "type": "com.acme.Value",
+                                          "strategy": "constructor"}],
+    }
+    plan3 = br._build_fixture_plan(pack3, "com.acme.Svc", ["org.junit.jupiter.api.Test"])
+    _assert("constructible collaborator → new",
+            plan3["requiredCollaborators"][0]["creationStrategy"] == "new", str(plan3))
+    _assert("plan3 complete", plan3["complete"] is True, str(plan3))
+
+
+def case_fixture_plan_in_generation_request() -> None:
+    """The generation request surfaces a derived fixturePlan per target, both at the
+    target top level and inside structuredContext."""
+    sut = "com.acme.Svc"
+    pack = {"schemaVersion": 1, "sut": sut,
+            "constructors": [{"evidenceId": "ctor:com.acme.Svc:1", "visibility": "public",
+                              "params": [{"type": "java.lang.String", "name": "name"}]}],
+            "dependencies": [], "fixtures": []}
+    target = dict(_target(sut), fixturePlan=br._build_fixture_plan(
+        pack, sut, ["org.junit.jupiter.api.Test"]))
+    req = bp.build_generation_request("run-1", "batch-001", [target], batch_size=10)
+    t0 = req["targets"][0]
+    _assert("request target carries fixturePlan",
+            t0["fixturePlan"]["sutVariable"] == "svc", str(t0.get("fixturePlan")))
+    _assert("structuredContext carries fixturePlan",
+            t0["structuredContext"]["fixturePlan"]["constructor"]["invocation"] == "new Svc(name)",
+            str(t0["structuredContext"].get("fixturePlan")))
+
+
+# ── preflight TARGET_METHOD_BODY_MISSING (task 2) ─────────────────────────────
+
+def case_preflight_body_missing() -> None:
+    base = {"targetId": "com.acme.C0#doIt", "sut": "com.acme.C0",
+            "allowedEvidenceIds": ["sym:com.acme.C0#doIt:1"],
+            "evidenceRefs": [{"evidenceId": "sym:com.acme.C0#doIt:1", "kind": "method", "name": "doIt"}],
+            "targetEvidenceRequired": True, "targetEvidenceIds": ["sym:com.acme.C0#doIt:1"],
+            "targetMethodName": "doIt"}
+    missing = dict(base, sutSourceCode="// C0: bodies\n\npublic void other() { return; }")
+    _assert("body not in projection → SKIP",
+            bp.preflight_evidence_gate(missing) == bp.PREFLIGHT_BODY_MISSING_REASON,
+            str(bp.preflight_evidence_gate(missing)))
+    present = dict(base, sutSourceCode="// C0: bodies\n\npublic void doIt() { return; }")
+    _assert("body present → no skip", bp.preflight_evidence_gate(present) is None)
+    empty = dict(base, sutSourceCode="")
+    _assert("empty projection → no body skip (evidence gate governs)",
+            bp.preflight_evidence_gate(empty) is None)
+    trunc = dict(base, sutSourceCode="public void other() {}", sutSourceTruncated=True)
+    _assert("truncated projection → no body skip", bp.preflight_evidence_gate(trunc) is None)
+
+
+def case_preflight_body_missing_constructor() -> None:
+    """A constructor target (<init>) is probed by the SUT simple name."""
+    base = {"targetId": "com.acme.Widget#<init>", "sut": "com.acme.Widget",
+            "allowedEvidenceIds": ["ctor:com.acme.Widget:1"],
+            "evidenceRefs": [{"evidenceId": "ctor:com.acme.Widget:1", "kind": "constructor"}],
+            "targetMethodName": "<init>"}
+    present = dict(base, sutSourceCode="// Widget: bodies\n\npublic Widget(int n) { this.n = n; }")
+    _assert("ctor body present → no skip", bp.preflight_evidence_gate(present) is None)
+    missing = dict(base, sutSourceCode="// Widget: bodies\n\npublic void run() {}")
+    _assert("ctor body absent → SKIP",
+            bp.preflight_evidence_gate(missing) == bp.PREFLIGHT_BODY_MISSING_REASON,
+            str(bp.preflight_evidence_gate(missing)))
+
+
+# ── enum / <clinit> (task 3) ──────────────────────────────────────────────────
+
+def case_preflight_clinit_requires_enum_constants() -> None:
+    base = {"targetId": "com.acme.E#<clinit>", "sut": "com.acme.E",
+            "allowedEvidenceIds": ["sym:com.acme.E#values:1"],
+            "evidenceRefs": [{"evidenceId": "sym:com.acme.E#values:1", "kind": "method",
+                              "name": "values"}],
+            "targetMethodName": "<clinit>"}
+    _assert("clinit without enum constants → skip",
+            bp.preflight_evidence_gate(base) == bp.PREFLIGHT_CLINIT_NO_CONSTANTS,
+            str(bp.preflight_evidence_gate(base)))
+    with_const = dict(base, evidenceRefs=base["evidenceRefs"] + [
+        {"evidenceId": "const:com.acme.E#ACTIVE", "kind": "enumConstant", "name": "ACTIVE"}])
+    _assert("clinit with enum constants → generable",
+            bp.preflight_evidence_gate(with_const) is None)
+    # Constants supplied as an explicit hint also unlock generation.
+    with_hint = dict(base, enumConstants=["ACTIVE", "INACTIVE"])
+    _assert("clinit with enumConstants hint → generable",
+            bp.preflight_evidence_gate(with_hint) is None)
+
+
+# ── repairCause.missingSymbols (task 4) ───────────────────────────────────────
+
+def case_repair_cause_missing_symbols() -> None:
+    build_output = (
+        "[ERROR] /repo/src/test/java/com/acme/ClusterServiceTest.java:[12,9] "
+        "error: cannot find symbol\n"
+        "        controller.handle();\n"
+        "        ^\n"
+        "  symbol:   variable controller\n"
+        "  location: class com.acme.ClusterServiceTest\n"
+    )
+    fi = {"targetId": "t", "failureKind": "COMPILATION_ERROR",
+          "errorSummary": "cannot find symbol",
+          "compilerErrorDetails": "", "patcherErrorDetails": "", "buildOutput": build_output}
+    cause = bp.build_repair_cause(fi)
+    _assert("missingSymbols extracted one entry",
+            len(cause["missingSymbols"]) == 1, str(cause["missingSymbols"]))
+    ms = cause["missingSymbols"][0]
+    _assert("missing symbol name", ms["name"] == "controller", str(ms))
+    _assert("missing symbol kind variable", ms["kind"] == "variable", str(ms))
+    _assert("missing symbol location", "ClusterServiceTest" in ms["location"], str(ms))
+    _assert("repairCause kind UNDECLARED_TEST_FIXTURE",
+            cause["kind"] == bp.UNDECLARED_TEST_FIXTURE_KIND, str(cause))
+
+
+def case_repair_cause_missing_symbols_from_compiler_details() -> None:
+    """Multiple undeclared variables, parsed from compilerErrorDetails; a method
+    'cannot find symbol' does NOT relabel to UNDECLARED_TEST_FIXTURE."""
+    compiler = (
+        "C.java:4: error: cannot find symbol\n  symbol:   variable adapter\n"
+        "  location: class com.acme.CTest\n"
+        "C.java:9: error: cannot find symbol\n  symbol:   variable inMemoryClusterStore\n"
+        "  location: class com.acme.CTest\n"
+    )
+    fi = {"targetId": "t", "failureKind": "COMPILATION_ERROR", "errorSummary": "x",
+          "compilerErrorDetails": compiler, "patcherErrorDetails": "", "buildOutput": ""}
+    cause = bp.build_repair_cause(fi)
+    names = {m["name"] for m in cause["missingSymbols"]}
+    _assert("both undeclared variables parsed",
+            names == {"adapter", "inMemoryClusterStore"}, str(names))
+    _assert("variable miss → UNDECLARED_TEST_FIXTURE",
+            cause["kind"] == bp.UNDECLARED_TEST_FIXTURE_KIND, str(cause))
+
+    # A missing METHOD symbol is not a fixture declaration problem → keep base kind.
+    method_miss = {"targetId": "t", "failureKind": "COMPILATION_ERROR", "errorSummary": "x",
+                   "compilerErrorDetails":
+                       "C.java:4: error: cannot find symbol\n  symbol:   method frobnicate()\n"
+                       "  location: class com.acme.CTest\n",
+                   "patcherErrorDetails": "", "buildOutput": ""}
+    mcause = bp.build_repair_cause(method_miss)
+    _assert("method miss still extracted",
+            mcause["missingSymbols"] and mcause["missingSymbols"][0]["kind"] == "method",
+            str(mcause["missingSymbols"]))
+    _assert("method miss does NOT relabel as UNDECLARED_TEST_FIXTURE",
+            mcause["kind"] != bp.UNDECLARED_TEST_FIXTURE_KIND, str(mcause))
+
+
 # ── batch_final_report --run-id consistency ───────────────────────────────────
 
 def case_batch_final_report_run_id_canonical() -> None:
@@ -535,6 +745,14 @@ def main() -> int:
         case_existing_test_methods_extracted,
         case_expected_behavior_hints_extracted,
         case_enrichment_injects_existing_and_behavior,
+        case_fixture_plan_complete_with_collaborators,
+        case_fixture_plan_incomplete_unresolved,
+        case_fixture_plan_in_generation_request,
+        case_preflight_body_missing,
+        case_preflight_body_missing_constructor,
+        case_preflight_clinit_requires_enum_constants,
+        case_repair_cause_missing_symbols,
+        case_repair_cause_missing_symbols_from_compiler_details,
         case_batch_final_report_run_id_canonical,
     ]
     for c in cases:

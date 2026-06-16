@@ -715,6 +715,158 @@ def _expected_behavior_hints(item: dict) -> list[str]:
     return hints
 
 
+# ── fixturePlan: deterministic construction recipe (task 1) ──────────────────────
+# Safe literal sample values for primitive / String / boxed / CharSequence types,
+# so a fixturePlan collaborator of one of these is created by COPYING a value
+# instead of the model inventing one. Mirrors fixture_catalog_builder._TYPE_DEFAULTS
+# (kept local so the runner carries no import-time dependency on that tool).
+_LITERAL_SAMPLE = {
+    "String": '""', "CharSequence": '""',
+    "int": "0", "Integer": "0", "long": "0L", "Long": "0L",
+    "short": "(short) 0", "Short": "(short) 0", "byte": "(byte) 0", "Byte": "(byte) 0",
+    "char": "'a'", "Character": "'a'", "boolean": "false", "Boolean": "false",
+    "double": "0.0d", "Double": "0.0d", "float": "0.0f", "Float": "0.0f",
+}
+_LITERAL_TYPES = frozenset(_LITERAL_SAMPLE)
+# Context-pack instantiation strategies (fixture-catalog / dependency-graph) that
+# denote a CONCRETELY constructible collaborator → fixturePlan 'new'.
+_CONSTRUCTIBLE_STRATEGIES = frozenset({"constructor", "new", "builder", "factory"})
+
+
+def _simple_name(fqcn: str) -> str:
+    """Simple class name of an FQCN, stripping any generic suffix."""
+    return fqcn.split("<", 1)[0].strip().rsplit(".", 1)[-1] if fqcn else ""
+
+
+def _camel(fqcn_or_type: str) -> str:
+    """Conventional camelCase local-variable name for a type (Foo → foo)."""
+    simple = _simple_name(fqcn_or_type)
+    return (simple[:1].lower() + simple[1:]) if simple else ""
+
+
+def _is_literal_type(java_type: str) -> bool:
+    return _simple_name(java_type) in _LITERAL_TYPES
+
+
+def _literal_value(java_type: str) -> str:
+    return _LITERAL_SAMPLE.get(_simple_name(java_type), '""')
+
+
+def _mockito_available(allowed_imports: list[str]) -> bool:
+    return any(isinstance(i, str) and i.startswith("org.mockito.") for i in allowed_imports)
+
+
+def _collaborator_strategies(pack: dict) -> dict[str, str]:
+    """type → instantiation strategy, from the context-pack's fixtures and
+    dependencies. This is the ONLY evidence the runner has about how a
+    collaborator can be built; absence ⇒ the strategy cannot be derived."""
+    out: dict[str, str] = {}
+    for fx in pack.get("fixtures") or []:
+        if isinstance(fx, dict):
+            t, s = fx.get("type"), fx.get("strategy")
+            if isinstance(t, str) and t and isinstance(s, str) and t not in out:
+                out[t] = s
+    for dep in pack.get("dependencies") or []:
+        if isinstance(dep, dict):
+            t, s = dep.get("type"), dep.get("instantiationStrategy")
+            if isinstance(t, str) and t and isinstance(s, str) and t not in out:
+                out[t] = s
+    return out
+
+
+def _creation_strategy(java_type: str, strategies: dict[str, str], mockito_ok: bool) -> tuple[str, str | None]:
+    """Deterministically map a collaborator type to a fixturePlan creationStrategy.
+
+    Returns (strategy, value) where value is the literal expression for 'literal'
+    and None otherwise. Strategy ∈ {literal, new, mock, unresolved}:
+      * primitive/String/boxed/CharSequence → literal (with a safe sample value);
+      * a type the context-pack can concretely build (constructor/builder/factory)
+        → new;
+      * a type known to need mocking (interface/abstract → 'mock' strategy in the
+        pack) → mock if Mockito is available, else unresolved;
+      * no derivable evidence at all → unresolved (do NOT guess)."""
+    if _is_literal_type(java_type):
+        return "literal", _literal_value(java_type)
+    base = java_type.split("<", 1)[0].strip()
+    strat = (strategies.get(java_type) or strategies.get(base)
+             or strategies.get(_simple_name(java_type)))
+    if strat in _CONSTRUCTIBLE_STRATEGIES:
+        return "new", None
+    if strat == "mock":
+        return ("mock", None) if mockito_ok else ("unresolved", None)
+    return "unresolved", None
+
+
+def _build_fixture_plan(pack: dict, sut: str, allowed_imports: list[str]) -> dict:
+    """Derive the per-target fixturePlan (task 1) from the context-pack.
+
+    Style is always ``local_variables`` (lowest ambiguity); a collaborator that can
+    only be mocked is still allowed as a @Mock field via patchDescriptor.fields when
+    Mockito is whitelisted. Every value is DERIVED — never invented: if any required
+    collaborator cannot be resolved the plan is marked ``complete: false`` with the
+    offending entries in ``unresolvedCollaborators`` (the model must then answer
+    NEED_MORE_CONTEXT instead of improvising)."""
+    simple = _simple_name(sut)
+    mockito_ok = _mockito_available(allowed_imports)
+    plan: dict = {
+        "style": "local_variables",
+        "sutVariable": _camel(sut) or "subject",
+        "constructor": None,
+        "requiredCollaborators": [],
+        "unresolvedCollaborators": [],
+        "mockFrameworkAvailable": mockito_ok,
+        "complete": True,
+    }
+    ctors = [c for c in (pack.get("constructors") or []) if isinstance(c, dict)]
+    public = [c for c in ctors if (c.get("visibility") or "public") == "public"]
+    if not public:
+        # No public constructor evidenced. If non-public ctors exist the SUT can't
+        # be built from a test → incomplete. If there are NO ctors at all the SUT
+        # has an implicit/default constructor or is exercised via statics/enum →
+        # leave construction to the model (complete, no collaborators).
+        if ctors:
+            plan["complete"] = False
+            plan["unresolvedCollaborators"] = [
+                {"role": "constructor", "type": sut,
+                 "reason": "no public constructor evidenced in the context-pack"}]
+        return plan
+
+    strategies = _collaborator_strategies(pack)
+    chosen = min(public, key=lambda c: len(c.get("params") or []))
+    params = chosen.get("params") or []
+    used: set[str] = set()
+    collaborators: list[dict] = []
+    arg_names: list[str] = []
+    for idx, p in enumerate(params):
+        jtype = str((p or {}).get("type") or "java.lang.Object")
+        name = (p or {}).get("name") or _camel(jtype) or f"arg{idx}"
+        base, n = name, 1
+        while name in used:
+            n += 1
+            name = f"{base}{n}"
+        used.add(name)
+        arg_names.append(name)
+        strategy, value = _creation_strategy(jtype, strategies, mockito_ok)
+        collab: dict = {"name": name, "type": jtype, "creationStrategy": strategy}
+        if strategy == "literal":
+            collab["value"] = value
+        collaborators.append(collab)
+        if strategy == "unresolved":
+            plan["unresolvedCollaborators"].append(
+                {"name": name, "type": jtype,
+                 "reason": "no literal value, evidenced constructor, or mock strategy derivable"})
+    plan["requiredCollaborators"] = collaborators
+    plan["constructor"] = {
+        "evidenceId": chosen.get("evidenceId"),
+        "params": [{"type": str((p or {}).get("type") or "java.lang.Object"), "name": nm}
+                   for p, nm in zip(params, arg_names)],
+        "invocation": f"new {simple}({', '.join(arg_names)})",
+    }
+    if plan["unresolvedCollaborators"]:
+        plan["complete"] = False
+    return plan
+
+
 def _enrich_targets_with_imports(
     targets: list[dict], *, state_dir: Path, repo: Path | None = None
 ) -> list[dict]:
@@ -733,6 +885,11 @@ def _enrich_targets_with_imports(
         row["targetMethodName"] = target_method
         row["targetEvidenceRequired"] = target_required
         row["targetEvidenceIds"] = target_evidence
+        # Deterministic construction recipe (task 1): how to declare the SUT and
+        # create each constructor collaborator, derived from the context-pack so the
+        # model copies it instead of inventing variables.
+        row["fixturePlan"] = _build_fixture_plan(
+            _load_context_pack(state_dir, sut), sut, allowed_imports)
         # Hermetic payload: ship the SUT verbatim + project-collaborator signatures
         # so the generator never reads the Git working tree (avoids stale/ghost code).
         sut_source, sut_truncated = _read_sut_source(repo, sut)
