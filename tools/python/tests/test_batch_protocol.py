@@ -574,6 +574,110 @@ def case_advance_rules() -> None:
             == bp.ADVANCE_REPAIR_THEN_CONTINUE)
 
 
+# ── imports hygiene + repair descriptor hydration (tgt:0078 regression) ───────────
+
+_S78 = "com.sabrinacistech.multiclusters.service.ClusterStatusStore"
+_TC78 = "com.sabrinacistech.multiclusters.service.ClusterStatusStoreTest"
+_IMPORTS78 = [
+    "com.sabrinacistech.multiclusters.config.ClusterConfigProperties",
+    "com.sabrinacistech.multiclusters.model.ClusterStatusDocument",
+    "com.sabrinacistech.multiclusters.openapi.model.ClusterStatusIsActiveDTO",
+    "com.sabrinacistech.multiclusters.repository.ClusterStatusRepository",
+    "java.util.Optional",
+    "org.junit.jupiter.api.Test",
+    "org.mockito.Mockito",
+]
+
+
+def _requested78() -> list[dict]:
+    return [{
+        "targetId": "tgt:0078",
+        "sut": _S78,
+        "canonicalTestClass": _TC78,
+        # whitelist with a wildcard + a whole-package import mixed in — must be dropped.
+        "allowedImports": _IMPORTS78 + ["jakarta.*", "org.springframework.*"],
+        "allowedEvidenceIds": ["sym:" + _S78 + "#getCurrentStatus:12345678"],
+    }]
+
+
+def _repaired_item78(patch: dict) -> dict:
+    return {
+        "schemaVersion": bp.SCHEMA_REPAIR_RESPONSE, "runId": "run-1",
+        "batchId": "batch-001", "role": "repair", "repairRound": 1,
+        "items": [{"targetId": "tgt:0078", "status": "repaired", "patchDescriptor": patch}],
+    }
+
+
+def case_canonical_descriptor_drops_wildcard_imports() -> None:
+    target = {"targetId": "tgt:0078", "sut": _S78, "canonicalTestClass": _TC78,
+              "allowedImports": _IMPORTS78 + ["jakarta.*", "org.springframework.*"]}
+    desc = bp.build_canonical_patch_descriptor(target, [
+        {"name": "m_whenX_returnsY", "annotations": ["@Test"], "body": "// given",
+         "evidenceIds": ["sym:x"]}])
+    _assert("no wildcard in canonical descriptor",
+            all(not i.endswith("*") for i in desc["allowedImports"]),
+            str(desc["allowedImports"]))
+    _assert("concrete whitelist preserved",
+            desc["allowedImports"] == _IMPORTS78, str(desc["allowedImports"]))
+
+
+def case_sanitize_allowed_imports_helper() -> None:
+    got = bp._sanitize_allowed_imports(
+        ["a.B", "a.B", "pkg.*", "  ", "c.D*", "e.F"], whitelist=["a.B", "e.F"])
+    _assert("sanitize de-dups, drops wildcard/blank/non-whitelisted",
+            got == ["a.B", "e.F"], str(got))
+
+
+def case_repair_backfills_schema_version_and_sut() -> None:
+    # The exact tgt:0078 failure: the model omitted schemaVersion AND sut.
+    patch = {
+        "patchId": "repair:tgt:0078:r1",
+        "testClass": _TC78,
+        "methods": [{
+            "name": "getCurrentStatus_whenPresent_returnsDocument",
+            "annotations": ["@Test"],
+            "body": "// given\nObject value = new Object();\n// when\nObject actual = value;\n"
+                    "// then\norg.junit.jupiter.api.Assertions.assertSame(value, actual);",
+            "evidenceIds": ["sym:" + _S78 + "#getCurrentStatus:12345678"],
+        }],
+    }
+    resp = _repaired_item78(patch)
+    try:
+        items = bp.validate_repair_response(
+            resp, {"tgt:0078"}, batch_id="batch-001", repair_round=1,
+            requested_items=_requested78())
+    except bp.BatchResponseError as exc:
+        _assert("tgt:0078 repair no longer fails on missing keys", False, str(exc))
+        return
+    hydrated = items[0]["patchDescriptor"]
+    _assert("schemaVersion backfilled", hydrated.get("schemaVersion") == 1, str(hydrated))
+    _assert("sut backfilled from target", hydrated.get("sut") == _S78, str(hydrated))
+    _assert("repair imports sanitized (no wildcard)",
+            all(not i.endswith("*") for i in hydrated["allowedImports"]),
+            str(hydrated["allowedImports"]))
+    _assert("repair imports are the concrete whitelist",
+            hydrated["allowedImports"] == _IMPORTS78, str(hydrated["allowedImports"]))
+
+
+def case_repair_rebuilds_patch_id_when_model_omits_it() -> None:
+    patch = {
+        "schemaVersion": 1, "sut": _S78, "testClass": _TC78,
+        "methods": [{
+            "name": "getCurrentStatus_whenEmpty_returnsDefault",
+            "annotations": ["@Test"],
+            "body": "// given\nObject v = new Object();\n// when\nObject a = v;\n"
+                    "// then\norg.junit.jupiter.api.Assertions.assertSame(v, a);",
+            "evidenceIds": ["sym:" + _S78 + "#getCurrentStatus:12345678"],
+        }],
+    }  # no patchId at all
+    items = bp.validate_repair_response(
+        _repaired_item78(patch), {"tgt:0078"}, batch_id="batch-001",
+        repair_round=1, requested_items=_requested78())
+    _assert("patchId rebuilt with repair: prefix",
+            items[0]["patchDescriptor"]["patchId"].startswith("repair:"),
+            str(items[0]["patchDescriptor"].get("patchId")))
+
+
 def main() -> int:
     cases = [v for k, v in sorted(globals().items()) if k.startswith("case_")]
     for c in cases:

@@ -268,6 +268,9 @@ Reglas:
   incluir al menos un id de failedItem.targetEvidenceIds.
 - Eliminá imports reportados como no whitelisted; no los reemplaces por otros
   imports inventados.
+- No uses imports wildcard ni de paquete completo (p. ej. "jakarta.*",
+  "org.springframework.*"): el runner los descarta y el linter los rechaza como
+  IMPORT_PKG_NOT_WHITELISTED (G6_LINTER_FAIL). Solo FQCNs concretos.
 - Si no hay evidenceIds suficientes para justificar el repair, marcá el item
   como "abandoned" con reason claro.
 - El body reparado solo puede llamar métodos del SUT si el nombre aparece en
@@ -276,26 +279,30 @@ Reglas:
   de dominio salvo que el FQCN exacto aparezca en failedItem.allowedImports.
 - Si no se puede reparar con evidencia, marcá el item como "abandoned" con reason.
 
-Contrato obligatorio de patchDescriptor para repair:
-- Cada item reparado debe tener status "repaired" y patchDescriptor canonico.
+Contrato de patchDescriptor para repair (el runner hidrata la metadata estructural):
+- Cada item reparado debe tener status "repaired" y patchDescriptor con methods.
+- El runner reconstruye schemaVersion, patchId, sut, testClass, testPackage,
+  template y allowedImports desde el failedItem; concentrate en los methods. No
+  hace falta que los completes, pero si los mandás:
 - patchDescriptor NO es un archivo completo. No uses operation, targetFile,
   language, content, coveredMethod ni testMethods.
-- patchDescriptor debe tener schemaVersion, patchId, cycle, sut, testClass,
-  testPackage, template, allowedImports, methods.
-- patchDescriptor.testClass debe ser EXACTAMENTE failedItem.canonicalTestClass.
+- patchDescriptor.testClass (si lo mandás) debe ser EXACTAMENTE
+  failedItem.canonicalTestClass.
 - No mantengas ni inventes variantes como *CtorTest, *ConstructorTest,
   *GeneratedTest o *UnitTest.
-- patchDescriptor.allowedImports debe contener solo imports de failedItem.allowedImports.
+- allowedImports debe contener solo FQCNs concretos de failedItem.allowedImports;
+  nada de wildcards/imports de paquete.
 - Cada method.evidenceIds debe contener solo ids de failedItem.allowedEvidenceIds.
 - Cada method.evidenceIds debe citar también failedItem.targetEvidenceIds cuando
   failedItem.targetEvidenceRequired sea true.
 - Si el body llama un método sobre una variable del tipo SUT, ese método debe
   estar listado en failedItem.evidenceRefs con kind="method".
-- En repair, patchId debe empezar con "repair:".
+- Si mandás patchId, debe empezar con "repair:".
 - Cada method debe tener name, annotations, body, evidenceIds.
-- Si el error anterior fue "patchDescriptor missing required keys" o
-  "full-file patch keys", no repares Java: reescribi la respuesta con el formato
-  correcto del patchDescriptor.
+- Ya no necesitás preocuparte por "patchDescriptor missing required keys"
+  (schemaVersion/sut): el runner los rellena. Si el error anterior fue
+  "full-file patch keys", reescribí la respuesta con methods, sin claves de archivo
+  completo.
 
 Cuando termines, no expliques nada: solo escribí response-repair-r1.json.
 ```

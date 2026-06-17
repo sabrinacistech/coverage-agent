@@ -177,13 +177,19 @@ y copiarlo sin scrollear la consola. Para repair, el prompt usa
    ```
 
    Claude Code escribe `response-repair-r1.json` (`repaired` + `patchDescriptor`,
-   o `abandoned`/`skipped`/`failed`). El runner re-aplica y re-testea.
+   o `abandoned`/`skipped`/`failed`). **Igual que en generación, Python hidrata el
+   descriptor** desde el `failedItem` antes de validarlo: rellena `schemaVersion`,
+   `sut`, `testClass`/`testPackage`, `template` y `allowedImports` cuando el modelo
+   los omite, así un repair al que le falta `schemaVersion`/`sut` ya **no corta la
+   ronda** (ver §"Contrato de repair"). El runner re-aplica y re-testea.
    En repair aplica la misma regla: `patchDescriptor.testClass` debe ser
    `failedItem.canonicalTestClass`. Si el intento anterior usó una variante
    rechazada, queda informada como `failedItem.rejectedTestClass`, pero no debe
    reutilizarse.
    Repair también recibe `failedItem.allowedImports`; cualquier import fuera de
-   esa lista se considera respuesta inválida antes del patcher.
+   esa lista se descarta al hidratar, y **los imports wildcard / de paquete
+   completo (`pkg.*`) están prohibidos** — el runner los elimina y nunca llegan al
+   linter (que los rechazaría como `IMPORT_PKG_NOT_WHITELISTED` / `G6_LINTER_FAIL`).
    Lo mismo aplica a `failedItem.allowedEvidenceIds`: si el repair no puede citar
    evidencia válida, debe abandonar el item en vez de inventar símbolos.
    Si `failedItem.targetEvidenceRequired` es true, cada método reparado también
@@ -227,8 +233,9 @@ Reglas:
 - **Python es la única fuente de verdad** de todo metadato estructural:
   `schemaVersion` (=1), `patchId` (`patch:<slug>`), `sut` (=`target.sut`),
   `testClass` (=`target.canonicalTestClass`), `testPackage`, `template`
-  (=`target.template`) y `allowedImports` (=whitelist del target; el patcher
-  resuelve los imports que falten desde los bodies y poda los no usados).
+  (=`target.template`) y `allowedImports` (=whitelist concreta del target, **sin
+  wildcards/imports de paquete**; el patcher resuelve los imports que falten desde
+  los bodies y poda los no usados, dejando el bloque de imports mínimo).
 - **Validación por item, no por batch.** Un item inválido queda
   `GENERATION_FAILED` solo él; los `generated` válidos, `skipped` y
   `NEED_MORE_CONTEXT` hermanos no se ven afectados. Solo un envelope roto
@@ -286,10 +293,35 @@ fallo por item: `COMPLETION_SCHEMA_ERROR`, `PATCH_DESCRIPTOR_HYDRATION_ERROR`,
 `UNKNOWN_TARGET_ID`, `DUPLICATED_TARGET_ID`, `MISSING_METHODS`,
 `INVALID_EVIDENCE_ID`, `TARGET_EVIDENCE_REQUIRED`, `OMITTED_FROM_RESPONSE`.
 
-> **Deuda conocida (transición):** el flujo de **repair** todavía espera que el LLM
-> devuelva un `patchDescriptor` completo (`response-repair-rN.json`). La hidratación
-> por ahora cubre solo generación; `_validate_patch_descriptor` queda intacto y lo
-> comparten ambos flujos. Migrar repair a hidratación es trabajo futuro.
+---
+
+## Contrato de repair: Python también hidrata el `patchDescriptor`
+
+El flujo de **repair** sigue el mismo principio que generación: **Python es la
+fuente de verdad de la metadata estructural**. El LLM escribe `response-repair-rN
+.json` con `status` (`repaired`/`abandoned`/`skipped`/`failed`/`NEED_MORE_CONTEXT`)
+y, para `repaired`, los `methods` corregidos dentro de `patchDescriptor`. Antes de
+validar, `validate_repair_response` pasa cada item por `hydrate_repair_descriptor`,
+que reconstruye desde el `failedItem`:
+
+- `schemaVersion` → siempre `1`.
+- `sut` → se copia del `failedItem` si falta o viene vacío.
+- `patchId` → se sintetiza (`repair:<slug>:r<round>`) **solo si falta**. Un
+  `patchId` presente con prefijo incorrecto (p. ej. `patch:`) se sigue rechazando.
+- `testClass`/`testPackage`/`template` → backfill desde `failedItem.canonicalTestClass`
+  / `failedItem.template` cuando el modelo los omite.
+- `allowedImports` → whitelist concreta del `failedItem`, **sin wildcards** (`pkg.*`);
+  el patcher resuelve los imports faltantes desde los bodies y poda los no usados.
+
+El descriptor hidratado se escribe de vuelta en el item, así el patcher aplica la
+versión canónica. Resultado: el error histórico `patchDescriptor missing required
+keys: ['schemaVersion', 'sut']` ya **no aparece** y un modelo que olvida un campo
+estructural ya no rompe la ronda de repair.
+
+> **Guardrails que se mantienen:** un valor **presente pero incorrecto** (sut,
+> testClass o patchId con prefijo equivocado, variante `*CtorTest`, import fuera de
+> whitelist, evidencia inválida) se sigue rechazando — la hidratación solo rellena
+> lo **ausente**, nunca pisa una decisión explícita errónea del modelo.
 
 ---
 

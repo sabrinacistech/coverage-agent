@@ -677,6 +677,41 @@ def _import_policy(allowed_imports: list[str] | None) -> dict:
     }
 
 
+def _sanitize_allowed_imports(
+    imports: list[str] | None, *, whitelist: list[str] | None = None
+) -> list[str]:
+    """Return the patcher-safe subset of *imports*: concrete FQCNs only.
+
+    Drops:
+      * wildcard / whole-package imports (``com.foo.*`` or a trailing ``*``) — the
+        linter rejects any non-whitelisted ``pkg.*`` as IMPORT_PKG_NOT_WHITELISTED
+        (surfaced as the G6_LINTER_FAIL gate), and the applier's prune pass
+        cannot prove a wildcard unused so it would survive straight to the gate;
+      * blanks / non-strings / duplicates (order preserved).
+
+    When *whitelist* is given, entries outside it are dropped too — so a repair
+    descriptor can never smuggle a non-whitelisted import past the gate. Python is
+    the single source of truth for imports: we ship the full concrete whitelist and
+    let test_patch_applier prune the unused ones, yielding a minimal import block.
+    """
+    allowed = set(whitelist) if whitelist is not None else None
+    out: list[str] = []
+    seen: set[str] = set()
+    for imp in imports or []:
+        if not isinstance(imp, str):
+            continue
+        imp = imp.strip()
+        if not imp or imp.endswith("*"):   # blank or wildcard/whole-package
+            continue
+        if allowed is not None and imp not in allowed:
+            continue
+        if imp in seen:
+            continue
+        seen.add(imp)
+        out.append(imp)
+    return out
+
+
 def _evidence_policy(allowed_evidence_ids: list[str] | None) -> dict:
     return {
         "rule": "Every method.evidenceIds entry must exist in allowedEvidenceIds.",
@@ -1302,11 +1337,14 @@ def build_canonical_patch_descriptor(
 
     The LLM never supplies schemaVersion/patchId/sut/testClass/template/allowedImports
     — Python is the single source of truth for all structural metadata; only the
-    method names/bodies/evidence come from the model. ``allowedImports`` is the FULL
-    target whitelist on purpose: the patcher auto-resolves any body-required import
-    (test_patch_applier._ensure_required_imports) and prunes the unused ones
-    (_prune_unused_imports), so shipping the whole whitelist compiles without an
-    unused-import lint hit, and is trivially a subset of target.allowedImports."""
+    method names/bodies/evidence come from the model. ``allowedImports`` is the full
+    target whitelist (minus wildcard/whole-package entries — see
+    _sanitize_allowed_imports) on purpose: the patcher auto-resolves any body-required
+    import (test_patch_applier._ensure_required_imports) and prunes the unused ones
+    (_prune_unused_imports), so shipping the whole concrete whitelist compiles without
+    an unused-import lint hit, and is trivially a subset of target.allowedImports. The
+    wildcard filter keeps a non-whitelisted ``pkg.*`` from ever reaching the linter
+    (IMPORT_PKG_NOT_WHITELISTED / G6_LINTER_FAIL), which prune cannot strip."""
     sut = target.get("sut") or ""
     test_class = target.get("canonicalTestClass") or (_suggested_test_class(sut) if sut else "")
     test_package = test_class.rsplit(".", 1)[0] if "." in test_class else ""
@@ -1327,7 +1365,7 @@ def build_canonical_patch_descriptor(
         "testClass": test_class,
         "testPackage": test_package,
         "template": target.get("template"),
-        "allowedImports": list(target.get("allowedImports") or []),
+        "allowedImports": _sanitize_allowed_imports(target.get("allowedImports")),
         "fields": [],
         "methods": norm_methods,
     }
@@ -1540,8 +1578,16 @@ def build_repair_request(
             ],
         },
         "importPolicy": {
-            "rule": "Each repaired patchDescriptor.allowedImports must be a subset of failedItem.allowedImports.",
+            "rule": "Each repaired patchDescriptor.allowedImports must be a subset of "
+                    "failedItem.allowedImports. Use ONLY concrete FQCNs — never a "
+                    "wildcard / whole-package import (e.g. 'jakarta.*', "
+                    "'org.springframework.*'); those are rejected as "
+                    "IMPORT_PKG_NOT_WHITELISTED (G6_LINTER_FAIL). The runner rebuilds "
+                    "schemaVersion/patchId/sut/testClass/testPackage/allowedImports "
+                    "from the failed item, so do not invent or omit them; only the "
+                    "method bodies need to change.",
             "forbiddenByDefault": list(_COMMON_FORBIDDEN_IMPORTS),
+            "noWildcardImports": True,
         },
         "evidencePolicy": {
             "rule": "Each repaired method.evidenceIds must be a non-empty subset of failedItem.allowedEvidenceIds.",
@@ -1569,6 +1615,61 @@ def build_repair_request(
     }
 
 
+def hydrate_repair_descriptor(
+    patch: Any, requested: dict, *, target_id: str, repair_round: int
+) -> dict:
+    """Backfill the canonical structural metadata of a repaired patchDescriptor.
+
+    Just like generation (build_canonical_patch_descriptor), Python — not the LLM —
+    owns schemaVersion / patchId / sut / testClass / testPackage / template /
+    allowedImports for a repair. The repair model only contributes methods (and
+    optional fields); everything structural is rebuilt from the *requested* failed
+    item (the source of truth). This removes the entire class of
+    'patchDescriptor missing required keys: [schemaVersion, sut]' repair failures —
+    the model can no longer break the round by forgetting a structural key — and
+    guarantees the imports shipped to the patcher are concrete, whitelisted FQCNs
+    (no wildcard / package import that would trip G6_LINTER_FAIL).
+    """
+    out = dict(patch) if isinstance(patch, dict) else {}
+
+    # Python owns schemaVersion — never trust/echo the model's value.
+    out["schemaVersion"] = 1
+
+    # patchId: synthesize one only when the model omitted it. A PRESENT-but-wrong
+    # prefix (e.g. a generation-style 'patch:' id) is left intact so validation
+    # still rejects it — that guardrail catches a model echoing the wrong role.
+    pid = out.get("patchId")
+    if not (isinstance(pid, str) and pid.strip()):
+        out["patchId"] = f"repair:{_patch_id_slug(target_id)}:r{repair_round}"
+
+    # sut: copy from the original target when the model omitted it.
+    sut = out.get("sut")
+    sut_ok = (isinstance(sut, dict) and sut.get("fqcn")) or (
+        isinstance(sut, str) and sut.strip()
+    )
+    if not sut_ok and requested.get("sut"):
+        out["sut"] = requested["sut"]
+
+    # testClass / testPackage: canonical class from the failed item.
+    canonical = requested.get("canonicalTestClass")
+    tc = out.get("testClass")
+    if not (isinstance(tc, str) and tc.strip()) and canonical:
+        out["testClass"] = canonical
+    tc = out.get("testClass")
+    if not out.get("testPackage") and isinstance(tc, str) and "." in tc:
+        out["testPackage"] = tc.rsplit(".", 1)[0]
+
+    if not out.get("template") and requested.get("template"):
+        out["template"] = requested["template"]
+
+    # Imports: ship the full concrete whitelist (applier prunes the unused ones),
+    # dropping wildcard / non-whitelisted entries. Ignore whatever the model sent.
+    out["allowedImports"] = _sanitize_allowed_imports(
+        requested.get("allowedImports"), whitelist=requested.get("allowedImports")
+    )
+    return out
+
+
 def validate_repair_response(
     resp: dict,
     requested_ids: set[str],
@@ -1577,7 +1678,12 @@ def validate_repair_response(
     repair_round: int,
     requested_items: list[dict] | None = None,
 ) -> list[dict]:
-    """Validate a repair response. Same contract as generation, with repair statuses."""
+    """Validate a repair response. Same contract as generation, with repair statuses.
+
+    For every ``repaired`` item the patchDescriptor is first hydrated
+    (hydrate_repair_descriptor) so Python — not the model — supplies schemaVersion /
+    patchId / sut / testClass / imports, then validated. The hydrated descriptor is
+    written back into the item so the patcher applies the canonical version."""
     if not isinstance(resp, dict):
         raise BatchResponseError("response is not a JSON object")
     if resp.get("schemaVersion") != SCHEMA_REPAIR_RESPONSE:
@@ -1604,8 +1710,16 @@ def validate_repair_response(
             raise BatchResponseError(f"invalid repair status {status!r} for {tid!r}")
         if status == "repaired":
             requested = requested_by_id.get(tid, {})
+            # Python owns the structural metadata: rebuild it from the requested
+            # failed item so a model that forgot schemaVersion/sut/imports cannot
+            # break the round. Write it back so the patcher applies this version.
+            patch = hydrate_repair_descriptor(
+                it.get("patchDescriptor"), requested,
+                target_id=tid, repair_round=repair_round,
+            )
+            it["patchDescriptor"] = patch
             _validate_patch_descriptor(
-                it.get("patchDescriptor"),
+                patch,
                 target_id=tid,
                 expected_prefix="repair:",
                 expected_sut=requested.get("sut") or None,

@@ -750,7 +750,15 @@ def apply_patch(
     test_class: str = patch["testClass"]
     fields: list[dict] = patch.get("fields") or []
     methods: list[dict] = patch.get("methods") or []
-    allowed_imports: list[str] = patch.get("allowedImports") or []
+    # Defensive: never inject wildcard / whole-package imports (``pkg.*``). The
+    # linter rejects any non-whitelisted ``pkg.*`` as IMPORT_PKG_NOT_WHITELISTED
+    # (G6_LINTER_FAIL) and _prune_unused_imports cannot prove a wildcard unused, so
+    # one slipping into the descriptor would survive straight to the gate. Concrete
+    # FQCNs only; the prune pass below trims them down to the ones actually used.
+    allowed_imports: list[str] = [
+        i.strip() for i in (patch.get("allowedImports") or [])
+        if isinstance(i, str) and i.strip() and not i.strip().endswith("*")
+    ]
 
     test_path = _resolve_test_file(patch, repo)
     _assert_not_production(test_path, repo)
