@@ -261,6 +261,10 @@ def _step_input_signature(step: str, args, out_dir: Path) -> list[str] | None:
         return parts
     if step == "planning":
         parts.append(f"mode={args.coverage_mode}")
+        # --plan-limit changes the plan size, so it must bust the cache: without
+        # this, switching --plan-limit (e.g. 0 → 50) would HIT_CACHE and reuse the
+        # stale plan, silently ignoring the new limit.
+        parts.append(f"plan-limit={getattr(args, 'plan_limit', 0)}")
         for name in (
             "coverage-targets.json",
             "classification-index.json",

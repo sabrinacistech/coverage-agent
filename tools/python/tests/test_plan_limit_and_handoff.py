@@ -175,6 +175,27 @@ def case_run_pipeline_passes_plan_limit_to_planner() -> None:
         raise AssertionError(f"run_pipeline did not pass --plan-limit 37 to planner: {cmd}")
 
 
+def case_plan_limit_busts_planning_cache() -> None:
+    # The planning cache signature MUST incorporate --plan-limit, or switching the
+    # limit (e.g. 0 → 50) would HIT_CACHE and silently reuse a stale plan.
+    class _Args:
+        coverage_mode = "coverage"
+        sut = None
+        plan_limit = 0
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td)
+        # Minimal input so the signature can be enumerated.
+        _write(out / "coverage-targets.json", {"targets": []})
+        a0 = _Args()
+        a50 = _Args(); a50.plan_limit = 50
+        sig0 = run_pipeline._step_input_signature("planning", a0, out)
+        sig50 = run_pipeline._step_input_signature("planning", a50, out)
+        if sig0 == sig50:
+            raise AssertionError("planning cache signature ignores --plan-limit (stale-plan bug)")
+        if not any("plan-limit=0" in p for p in sig0):
+            raise AssertionError(f"plan-limit not in signature: {sig0}")
+
+
 def case_run_all_help_exposes_plan_limit() -> None:
     # run_all_deterministic is an orchestration script; assert its CLI surfaces
     # --plan-limit (the pass-through to run_pipeline is exercised by the help text
@@ -264,6 +285,7 @@ def main() -> int:
         ("legacy-batch-size-resolves-with-warning", case_legacy_batch_size_resolves_with_warning),
         ("plan-limit-wins-over-batch-size",        case_plan_limit_wins_over_batch_size),
         ("run-pipeline-passes-plan-limit",         case_run_pipeline_passes_plan_limit_to_planner),
+        ("plan-limit-busts-planning-cache",        case_plan_limit_busts_planning_cache),
         ("run-all-help-exposes-plan-limit",        case_run_all_help_exposes_plan_limit),
         ("select-batch-takes-first-n-unprocessed", case_select_batch_takes_first_n_unprocessed),
         ("processed-targets-json-skips-done",      case_processed_targets_json_skips_done),
