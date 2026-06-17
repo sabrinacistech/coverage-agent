@@ -12,6 +12,10 @@
 > 📦 **Generación por batches (proyectos grandes)** → [`docs/batch-handoff.md`](docs/batch-handoff.md):
 > `--generation-mode handoff-batch --batch-size 10`, repair solo para fallidos,
 > estado persistente por target, y el budget pausado durante el handoff manual.
+>
+> 📊 **Telemetría física y FinOps** → [`docs/telemetry-and-finops.md`](docs/telemetry-and-finops.md):
+> tabla de compresión de workspace, costo USD + tokens por ítem/ronda en
+> `costs-telemetry.json`, y tiempo por interacción.
 
 ---
 

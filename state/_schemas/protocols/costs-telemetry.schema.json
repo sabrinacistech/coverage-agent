@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "costs-telemetry.schema.json",
+  "title": "Costs Telemetry — FinOps per-run token + USD accounting",
+  "description": "Accumulated tokens, USD cost and duration per LLM interaction for one run. Written atomically (tmp+rename) by orchestrator/cost_telemetry.py at <run_dir>/costs-telemetry.json. Totals are the sum over interactions[]. cost_usd uses orchestrator/cost_telemetry._PRICING (USD per 1M tokens) overridable via COVAGENT_PRICE_<KEY>_IN/OUT.",
+  "type": "object",
+  "required": ["schemaVersion", "runId", "total_accumulated_usd", "total_prompt_tokens", "total_completion_tokens", "interactions"],
+  "additionalProperties": true,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "runId": { "type": "string" },
+    "total_accumulated_usd": { "type": "number", "minimum": 0 },
+    "total_prompt_tokens": { "type": "integer", "minimum": 0 },
+    "total_completion_tokens": { "type": "integer", "minimum": 0 },
+    "total_duration_seconds": { "type": "number", "minimum": 0 },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "interactions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["role", "round", "tokens_in", "tokens_out", "cost_usd", "duration_seconds"],
+        "additionalProperties": true,
+        "properties": {
+          "targetId": { "type": ["string", "null"] },
+          "role": { "type": "string", "enum": ["generation", "repair", "architecture"] },
+          "round": { "type": "integer", "minimum": 0, "description": "0 = generation; 1.. = repair round" },
+          "tokens_in": { "type": "integer", "minimum": 0 },
+          "tokens_out": { "type": "integer", "minimum": 0 },
+          "cost_usd": { "type": "number", "minimum": 0 },
+          "duration_seconds": { "type": "number", "minimum": 0 },
+          "model": { "type": ["string", "null"] },
+          "source": { "type": "string", "enum": ["api_usage", "size_estimate"], "description": "api_usage = measured from the API/response usage block; size_estimate = derived from payload size (~4 chars/token)" },
+          "estimated": { "type": "boolean", "description": "true when tokens were estimated, not measured" },
+          "ts": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  }
+}

@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import batch_protocol as bp
-from . import config, one_cycle
+from . import config, cost_telemetry, one_cycle, workspace_volumetry
 
 # budget_enforcer lives in the deterministic core (tools/python), invoked by path.
 sys.path.insert(0, str(config.TOOLS_PYTHON))
@@ -1626,6 +1626,39 @@ def _process_repair(
     return applied
 
 
+def _record_llm_telemetry(
+    run_dir: Path, *, run_id: str, role: str, rnd: int,
+    request: dict | None, response: dict | None, target_ids: list,
+    duration_seconds: float,
+) -> None:
+    """Register FinOps telemetry for ONE handoff + print a one-line console summary.
+
+    Never raises: a telemetry failure (bad payload, disk error) must never break
+    the run, so everything here is best-effort and swallowed with a warning."""
+    try:
+        model = config.model_for_role(role)
+    except Exception:  # noqa: BLE001 — rol desconocido no debe romper la telemetría
+        model = None
+    try:
+        recorded = cost_telemetry.record_handoff(
+            run_dir, run_id=run_id, role=role, rnd=rnd,
+            request=request or {}, response=response or {},
+            target_ids=list(target_ids or []),
+            duration_seconds=duration_seconds, model=model)
+    except Exception as exc:  # noqa: BLE001
+        _print(f"[finops] no se pudo registrar telemetría ({role} r{rnd}): {exc}")
+        return
+    if not recorded:
+        return
+    tin = sum(i["tokens_in"] for i in recorded)
+    tout = sum(i["tokens_out"] for i in recorded)
+    cost = round(sum(i["cost_usd"] for i in recorded), 6)
+    src = recorded[0].get("source")
+    flag = " (estimado)" if recorded[0].get("estimated") else ""
+    _print(f"[finops] {role} r{rnd}: {len(recorded)} target(s) · in={tin} out={tout} tok · "
+           f"${cost:.4f} · {duration_seconds:.3f}s · {src}{flag}")
+
+
 def run_batches(
     state_dir: Path, repo: Path, *,
     batch_size: int, max_repair_rounds: int, max_batches: int | None,
@@ -1647,6 +1680,14 @@ def run_batches(
     manifest = bp.new_manifest(run_id, str(repo), generation_mode="handoff-batch",
                                batch_size=batch_size, max_repair_rounds=max_repair_rounds)
     _save_manifest(run_dir, manifest)
+
+    # ── Volumetría del workspace (demostración de eficiencia de contexto) ─────────
+    # Tamaño físico real del repo SUT analizado, medido ANTES de generar nada. Se
+    # compara al final contra el contexto realmente enviado al LLM. Tolerante a
+    # fallos de FS por construcción (workspace_volumetry nunca levanta).
+    repo_bytes = workspace_volumetry.directory_size_bytes(repo)
+    _print(f"[efficiency] repo SUT real: {workspace_volumetry.human_mb(repo_bytes)} "
+           f"(excluye .git/target/node_modules/build) → {repo}")
 
     processed = set(one_cycle._processed_ids(state_dir))
     pending_count = sum(1 for it in plan_items if it.get("targetId") not in processed)
@@ -1750,9 +1791,11 @@ def run_batches(
         _write_json(req_path, req)
         _save_manifest(run_dir, manifest)
 
+        _gen_t0 = time.perf_counter()
         outcome, resp = _wait_for_response(
             req_path, resp_path, state_path=state_path, manifest=manifest,
             kind="generation", batch_id=batch_id)
+        _gen_dur = time.perf_counter() - _gen_t0
         if outcome == "quit":
             manifest["status"] = "STOPPED"
             _save_manifest(run_dir, manifest)
@@ -1793,6 +1836,12 @@ def run_batches(
         items = hydrated["items"]
         gen_diagnostics = hydrated["diagnostics"]
         gen_counts = hydrated["counts"]
+
+        # FinOps: contabiliza tokens + costo + duración de este handoff de generación
+        # (round 0). Tolerante: cualquier fallo de telemetría jamás corta el run.
+        _record_llm_telemetry(run_dir, run_id=run_id, role="generation", rnd=0,
+                              request=req, response=resp, target_ids=sendable_ids,
+                              duration_seconds=_gen_dur)
 
         fixture_plans = {t.get("targetId"): (t.get("fixturePlan") or {})
                          for t in request_targets}
@@ -1871,15 +1920,22 @@ def run_batches(
                 bp.bump_repair_round(manifest, tid)
             _save_manifest(run_dir, manifest)
 
+            _rep_t0 = time.perf_counter()
             outcome, rresp = _wait_for_response(
                 rreq_path, rresp_path, state_path=state_path, manifest=manifest,
                 kind="repair", batch_id=batch_id, repair_round=rnd)
+            _rep_dur = time.perf_counter() - _rep_t0
             if outcome == "quit":
                 manifest["status"] = "STOPPED"
                 _save_manifest(run_dir, manifest)
                 return RC_STOPPED
             if outcome == "skip":
                 break
+            # FinOps: tokens + costo + duración del handoff de repair (round = rnd).
+            _record_llm_telemetry(run_dir, run_id=run_id, role="repair", rnd=rnd,
+                                  request=rreq, response=rresp,
+                                  target_ids=sorted(requested_ids),
+                                  duration_seconds=_rep_dur)
             try:
                 ritems = bp.validate_repair_response(
                     rresp,
@@ -1959,6 +2015,32 @@ def run_batches(
         if rc_report != 0:
             _print(f"[batch] reporte final no pudo completarse (rc={rc_report}); "
                    "el manifest queda disponible.")
+
+    # ── Métrica de eficiencia de contexto (tabla prominente en STDOUT) ────────────
+    # Contexto enviado = bytes reales de los request-*.json (lo único que viajó al
+    # LLM). Carpeta de salida = run_dir completo (requests + responses + reportes +
+    # logs + telemetría). Todo tolerante a fallos de FS.
+    try:
+        context_bytes = workspace_volumetry.sum_file_sizes(run_dir.rglob("request-*.json"))
+        output_bytes = workspace_volumetry.directory_size_bytes(run_dir)
+        _print("\n" + workspace_volumetry.format_efficiency_table(repo_bytes, context_bytes))
+        _print(f"[efficiency] carpeta de salida del run: "
+               f"{workspace_volumetry.human_mb(output_bytes)} → {run_dir}")
+    except Exception as exc:  # noqa: BLE001 — la métrica nunca rompe el cierre del run
+        _print(f"[efficiency] no se pudo calcular la métrica de volumetría: {exc}")
+
+    # Resumen FinOps del run (si hubo interacciones contabilizadas).
+    try:
+        tele_path = cost_telemetry.telemetry_path(run_dir)
+        if tele_path.exists():
+            tele = _load_json(tele_path)
+            _print(f"[finops] run {run_id}: ${tele.get('total_accumulated_usd', 0.0):.4f} · "
+                   f"in={tele.get('total_prompt_tokens', 0)} "
+                   f"out={tele.get('total_completion_tokens', 0)} tok · "
+                   f"{len(tele.get('interactions', []))} interacción(es) · {tele_path.name}")
+    except Exception as exc:  # noqa: BLE001
+        _print(f"[finops] no se pudo leer el resumen de costos: {exc}")
+
     _print(f"[batch] manifest: {_manifest_path(run_dir)}")
     _print(f"[batch] totals: {json.dumps(manifest['totals'], ensure_ascii=False)}")
     return final_rc

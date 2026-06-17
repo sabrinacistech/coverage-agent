@@ -277,6 +277,11 @@ class LiteLLMProvider:
         if config.prompt_caching_enabled() and _supports_prompt_caching(model):
             messages = cache_system_messages(messages)
 
+        # FinOps + rendimiento: medimos estrictamente la latencia de la llamada a la
+        # API (request armado → JSON completo recibido) e interceptamos el payload de
+        # `usage` para contabilizar tokens y costo. Best-effort: nunca rompe la
+        # generación si la telemetría falla.
+        t0 = time.perf_counter()
         resp = litellm.completion(
             model=model,
             messages=messages,
@@ -284,7 +289,50 @@ class LiteLLMProvider:
             max_tokens=kwargs.pop("max_tokens", None),
             **kwargs,
         )
+        duration_seconds = time.perf_counter() - t0
+        _record_api_telemetry(state_dir, role=role, model=model, resp=resp,
+                              duration_seconds=duration_seconds)
         return resp.choices[0].message.content or ""
+
+
+# ── Telemetría FinOps de la ruta de API real ─────────────────────────────────────
+
+def _active_run_dir(state_dir) -> Path | None:
+    """El run-* más reciente bajo <state>/_llm/runs (donde acumula costs-telemetry).
+
+    LiteLLMProvider no conoce el run activo (su firma es estable), así que lo
+    resolvemos por mtime. Si no hay runs todavía, devolvemos None y no se registra
+    (la telemetría por-run vive en batch_runner para la ruta de handoff)."""
+    try:
+        runs = config.ide_dir(Path(state_dir)) / "runs"
+        cands = [p for p in runs.iterdir() if p.is_dir() and p.name.startswith("run-")]
+        return max(cands, key=lambda p: p.stat().st_mtime) if cands else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _record_api_telemetry(state_dir, *, role: str, model: str, resp, duration_seconds: float) -> None:
+    """Intercepta `resp.usage` y agrega una interacción al costs-telemetry del run.
+
+    Best-effort: cualquier fallo (sin run activo, payload sin usage, error de IO) se
+    ignora — la generación nunca debe romperse por la contabilidad."""
+    try:
+        from . import cost_telemetry
+
+        run_dir = _active_run_dir(state_dir)
+        if run_dir is None:
+            return
+        usage = cost_telemetry.extract_usage(getattr(resp, "usage", None))
+        if usage is None:
+            return
+        cost_telemetry.record_interaction(
+            run_dir, run_id=run_dir.name, target_id=None, role=role, rnd=0,
+            tokens_in=usage[0], tokens_out=usage[1],
+            duration_seconds=duration_seconds, model=model,
+            source="api_usage", estimated=False,
+        )
+    except Exception:  # noqa: BLE001 — telemetría jamás rompe la llamada al modelo
+        pass
 
 
 # ── Selección ─────────────────────────────────────────────────────────────────
