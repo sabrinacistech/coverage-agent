@@ -444,6 +444,101 @@ def case_budget_paused_during_handoff() -> None:
         _assert("budget resumed after run (no cyclePausedAt)", "cyclePausedAt" not in final)
 
 
+def _validation_result(state: Path, name: str = "validation-result.json") -> dict:
+    runs = sorted((state / "_llm" / "runs").glob("run-*"))
+    matches = [p for p in runs[-1].rglob(name)]
+    return json.loads(matches[0].read_text(encoding="utf-8"))
+
+
+def _gen_resp_new(batch_id: str, spec: dict[str, tuple]) -> dict:
+    """New-contract response (methods only, no patchDescriptor). spec maps tid →
+    (status, evidenceIds-or-None)."""
+    items = []
+    for tid, (st, ev) in spec.items():
+        it: dict = {"targetId": tid, "status": st}
+        if st == "generated":
+            it["methods"] = [{
+                "name": "shouldReturnValue_whenCalled",
+                "annotations": ["@Test"],
+                "body": ("// given\nObject v = new Object();\n// when\nObject a = v;\n"
+                         "// then\norg.junit.jupiter.api.Assertions.assertSame(v, a);"),
+                "evidenceIds": list(ev or []),
+            }]
+        else:
+            it["reason"] = "stub"
+        items.append(it)
+    return {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "r",
+            "batchId": batch_id, "role": "generation", "items": items}
+
+
+# ── D. validation-result.json is always written (counts + per-item diagnostics) ──
+
+def case_validation_result_written_with_counts_and_diagnostics() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        state = _setup(Path(td), 3)
+        good = "sym:com.acme.C0#m:12345678"
+        _install_stubs({
+            # New contract: C0 valid, C1 generated-invalid (bogus evidenceId),
+            # C2 skipped. One bad item must NOT drag the batch.
+            "gen_responses": [_gen_resp_new("batch-001", {
+                "com.acme.C0#m": ("generated", [good]),
+                "com.acme.C1#m": ("generated", ["sym:does-not-exist"]),
+                "com.acme.C2#m": ("skipped", None),
+            })],
+            "repair_responses": [], "test_rcs": [0], "surefire": {},
+        })
+        br.run_batches(state, Path(td), batch_size=10, max_repair_rounds=0, max_batches=None)
+        vr = _validation_result(state)
+        c = vr["counts"]
+        _assert("D validation-result has compile key", "compile" in c, repr(c))
+        _assert("D received counted", c["received"] == 3, repr(c))
+        _assert("D one generated valid", c["generatedValid"] == 1, repr(c))
+        _assert("D one generated invalid", c["generatedInvalid"] == 1, repr(c))
+        _assert("D one skipped", c["skipped"] == 1, repr(c))
+        _assert("D one applied", c["applied"] == 1, repr(c))
+        by_id = {it["targetId"]: it for it in vr["items"]}
+        _assert("D invalid item GENERATION_FAILED",
+                by_id["com.acme.C1#m"]["status"] == bp.GENERATION_FAILED,
+                str(by_id.get("com.acme.C1#m")))
+        _assert("D invalid item reason classified",
+                by_id["com.acme.C1#m"]["reason"] == bp.HYDRATION_INVALID_EVIDENCE,
+                str(by_id.get("com.acme.C1#m")))
+        m = _manifest(state)
+        _assert("D valid target reached PASSED",
+                m["targets"]["com.acme.C0#m"]["status"] == bp.PASSED,
+                m["targets"]["com.acme.C0#m"]["status"])
+
+
+def case_validation_result_written_on_invalid_envelope() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        state = _setup(Path(td), 2)
+        # A structurally broken response (wrong role) → batch aborts, but
+        # validation-result.json must STILL be written.
+        bad = {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "r",
+               "batchId": "batch-001", "role": "WRONG", "items": []}
+        _install_stubs({"gen_responses": [bad], "repair_responses": [],
+                        "test_rcs": [], "surefire": {}})
+        br.run_batches(state, Path(td), batch_size=10, max_repair_rounds=0, max_batches=None)
+        vr = _validation_result(state)
+        _assert("envelope-fail still writes counts", "compile" in vr["counts"], repr(vr["counts"]))
+        _assert("envelope-fail lists items", len(vr["items"]) == 2, repr(vr["items"]))
+        _assert("envelope-fail rc nonzero", vr["rc"] != 0, repr(vr["rc"]))
+
+
+# ── G. merged counts preserve the advance-rule key (compile) ─────────────────────
+
+def case_validation_counts_preserve_compile() -> None:
+    merged = br._validation_counts(
+        {"received": 5, "generatedValid": 3, "generatedInvalid": 1, "skipped": 1,
+         "needMoreContext": 0, "failed": 2, "omitted": 0, "duplicated": 0, "unknown": 0},
+        {"passed": 2, "failed": 1, "compile": 1}, applied=4)
+    _assert("G merged keeps compile", merged["compile"] == 1, repr(merged))
+    _assert("G merged passed from tests", merged["passed"] == 2, repr(merged))
+    _assert("G merged failed from tests (not gen)", merged["failed"] == 1, repr(merged))
+    _assert("G gen-failed kept distinct", merged["generationFailed"] == 2, repr(merged))
+    _assert("G empty counts has compile", "compile" in br._empty_validation_counts())
+
+
 def main() -> int:
     cases = [
         case_all_pass, case_repaired_round1, case_abandoned_after_rounds,
@@ -454,6 +549,9 @@ def main() -> int:
         case_generation_payload_ships_sut_source,
         case_repair_payload_reconstructs_source_and_compiler_errors,
         case_budget_paused_during_handoff,
+        case_validation_result_written_with_counts_and_diagnostics,
+        case_validation_result_written_on_invalid_envelope,
+        case_validation_counts_preserve_compile,
     ]
     for c in cases:
         _restore()  # each case installs its own stubs over the real edges

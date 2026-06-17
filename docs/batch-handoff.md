@@ -137,25 +137,23 @@ y copiarlo sin scrollear la consola. Para repair, el prompt usa
 `request-repair-rN.json` / `response-repair-rN.json` con el round real.
 
 1. En Claude Code, pedile que **lea `request-generation.json` y escriba
-   `response-generation.json`** con un item por target. Cada item:
-   - `status: "generated"` + `patchDescriptor` (valida contra
-     `patch-descriptor.schema.json`), o
+   `response-generation.json`** con un item por target. **El LLM NO arma el
+   `patchDescriptor`** (ver §"Contrato de generación"): por target devuelve solo
+   - `status: "generated"` + `methods[]` (cada método `{name, annotations, body,
+     evidenceIds}`), o
    - `status: "skipped"` + `reason` (p.ej. requiere un servicio externo), o
    - `status: "failed"` + `reason`, o
    - `status: "NEED_MORE_CONTEXT"` + `missingSymbols` + `reason` (ver §"`contextPolicy`").
 
-   Además, el `patchDescriptor.testClass` debe coincidir exactamente con
-   `target.canonicalTestClass`. El runner rechaza variantes inventadas como
-   `*CtorTest`, `*ConstructorTest`, `*GeneratedTest` o `*UnitTest` antes de llegar
-   al patcher, para evitar `G6_LINTER_FAIL` por clases de test no canónicas.
-   La misma estrategia aplica para imports: cada target lleva `allowedImports`,
-   `forbiddenImports` e `importPolicy`. El runner rechaza cualquier
-   `patchDescriptor.allowedImports` que no sea subconjunto de `target.allowedImports`
-   y también anotaciones conocidas que implican imports prohibidos, como
-   `@DisplayName`, `@Autowired` o `@SpringBootTest`.
-   Para G2, cada target también lleva `allowedEvidenceIds`, `evidenceRefs` y
-   `evidencePolicy`. El runner rechaza cualquier `methods[].evidenceIds` vacío o
-   fuera de `target.allowedEvidenceIds` antes de llegar al patcher. Además, cuando
+   Python hidrata el `patchDescriptor` canónico desde el target: fija
+   `schemaVersion`, `patchId`, `sut`, `testClass` (= `target.canonicalTestClass`),
+   `testPackage`, `template` y `allowedImports` (= whitelist del target). El modelo
+   nunca elige la clase de test ni los imports, así que desaparecen las variantes
+   inventadas (`*CtorTest`, etc.) y el error histórico `patchDescriptor missing
+   required keys`.
+   Para G2, cada target lleva `allowedEvidenceIds`, `evidenceRefs` y
+   `evidencePolicy`. La hidratación rechaza, **por item**, cualquier
+   `methods[].evidenceIds` vacío o fuera de `target.allowedEvidenceIds`. Cuando
    `target.targetEvidenceRequired` es true, cada test generado debe citar al menos
    un id de `target.targetEvidenceIds`; si esa lista está vacía, el LLM debe
    marcar el item como `skipped`/`failed` en vez de generar código contra un método
@@ -214,6 +212,87 @@ Tras aplicar + testear (y reparar):
 
 ---
 
+## Contrato de generación: el LLM NO arma el `patchDescriptor`
+
+El contrato evolucionó de *"el LLM devuelve un `patchDescriptor` completo"* a
+*"el LLM devuelve una completion mínima y **Python hidrata** el `patchDescriptor`
+canónico"*. Motivo: en pruebas reales el modelo omitía campos obligatorios
+(`schemaVersion`, `patchId`, `sut`) y eso fallaba el item — y, peor, **arrastraba
+todo el batch** a `GENERATION_FAILED`.
+
+Reglas:
+
+- **El LLM no debe devolver `patchDescriptor` ni `testSource`.** Devuelve solo
+  `status`, `methods`, `reason` y `missingSymbols`.
+- **Python es la única fuente de verdad** de todo metadato estructural:
+  `schemaVersion` (=1), `patchId` (`patch:<slug>`), `sut` (=`target.sut`),
+  `testClass` (=`target.canonicalTestClass`), `testPackage`, `template`
+  (=`target.template`) y `allowedImports` (=whitelist del target; el patcher
+  resuelve los imports que falten desde los bodies y poda los no usados).
+- **Validación por item, no por batch.** Un item inválido queda
+  `GENERATION_FAILED` solo él; los `generated` válidos, `skipped` y
+  `NEED_MORE_CONTEXT` hermanos no se ven afectados. Solo un envelope roto
+  (schemaVersion/role/batchId/`items` no-lista) aborta el batch.
+- **Compat de transición:** si el modelo todavía manda `patchDescriptor`, se usa
+  **solo** `patchDescriptor.methods`; el resto de su metadata se ignora.
+
+`request-generation.json` lleva un `responseCompletionContract` con el `itemShape`
+esperado. Ejemplo de `response-generation.json` (formato nuevo):
+
+```json
+{
+  "schemaVersion": "test-generation-batch-response-v1",
+  "runId": "run-...",
+  "batchId": "batch-001",
+  "role": "generation",
+  "items": [
+    {
+      "targetId": "tgt:0001",
+      "status": "generated",
+      "methods": [
+        {
+          "name": "shouldReturnValue_whenInputIsValid",
+          "annotations": ["@Test"],
+          "body": "// given\n...\n// when\n...\n// then\n...",
+          "evidenceIds": ["sym:com.acme.Foo#bar:abcd1234"]
+        }
+      ]
+    }
+  ]
+}
+```
+
+`patchDescriptor` que Python hidrata para ese item (lo que llega al patcher):
+
+```json
+{
+  "schemaVersion": 1,
+  "patchId": "patch:tgt-0001",
+  "sut": "com.acme.Foo",
+  "testClass": "com.acme.FooTest",
+  "testPackage": "com.acme",
+  "template": "unit",
+  "allowedImports": ["org.junit.jupiter.api.Test"],
+  "fields": [],
+  "methods": [ { "name": "shouldReturnValue_whenInputIsValid", "annotations": ["@Test"], "body": "...", "evidenceIds": ["sym:com.acme.Foo#bar:abcd1234"] } ]
+}
+```
+
+`validation-result.json` **se escribe siempre** (incluso si la respuesta es
+inválida o hay items omitidos), con `counts` (incluye `received`, `generatedValid`,
+`generatedInvalid`, `applied`, `passed`, `failed`, `compile`, `skipped`,
+`needMoreContext`, `omitted`) e `items[]` con el motivo por target. Razones de
+fallo por item: `COMPLETION_SCHEMA_ERROR`, `PATCH_DESCRIPTOR_HYDRATION_ERROR`,
+`UNKNOWN_TARGET_ID`, `DUPLICATED_TARGET_ID`, `MISSING_METHODS`,
+`INVALID_EVIDENCE_ID`, `TARGET_EVIDENCE_REQUIRED`, `OMITTED_FROM_RESPONSE`.
+
+> **Deuda conocida (transición):** el flujo de **repair** todavía espera que el LLM
+> devuelva un `patchDescriptor` completo (`response-repair-rN.json`). La hidratación
+> por ahora cubre solo generación; `_validate_patch_descriptor` queda intacto y lo
+> comparten ambos flujos. Migrar repair a hidratación es trabajo futuro.
+
+---
+
 ## Pre-flight evidence gate (task 2)
 
 **Antes de cualquier llamada al LLM**, el runner evalúa si cada target tiene
@@ -227,6 +306,14 @@ enviado al modelo y luego rechazado por G2 (un handoff desperdiciado).
 ```
 
 Motivo persistido: `"Falta de evidencia de tipos/parámetros en metadatos"`.
+
+Otros motivos de skip pre-flight:
+- `CLINIT_WITHOUT_ENUM_CONSTANTS` — un `<clinit>` sin evidencia de constantes de
+  enum, **o** el constructor sintético de un enum (`<init>` en un SUT enum) sin un
+  método testeable proyectado (`values`/`valueOf`/getter público). Un constructor
+  de **clase normal** nunca se ve afectado por esta regla.
+- `TARGET_METHOD_BODY_MISSING` — el cuerpo del método-bajo-prueba no viaja en la
+  proyección `sutSourceCode`.
 
 **Artefacto en disco:** `batches/<batch>/preflight-result.json` — lista de targets
 saltados con su motivo, disponible para auditoría.

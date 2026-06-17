@@ -212,12 +212,22 @@ GENERATION_RULES = [
     "tests, the symbol contract, execution feedback, or explicit evidence.",
     "Prefer small deterministic unit tests; mock external dependencies.",
     "Avoid starting a full Spring context unless strictly necessary.",
-    "Use the canonical test class exactly: patchDescriptor.testClass MUST equal "
-    "target.canonicalTestClass. Do not create suffix variants such as *CtorTest, "
-    "*ConstructorTest, *GeneratedTest, or *UnitTest.",
-    "Use ONLY target.allowedImports in patchDescriptor.allowedImports. Do not add "
-    "DisplayName, Autowired, SpringBootTest, Spring injection annotations, or "
-    "domain exceptions unless they are explicitly listed in target.allowedImports.",
+    # Completion contract — the LLM returns a MINIMAL completion; Python builds the
+    # canonical patchDescriptor (schemaVersion/patchId/sut/testClass/testPackage/
+    # template/allowedImports) from the target. This removes the whole class of
+    # "patchDescriptor missing required keys" failures and forbids the model from
+    # overriding any structural metadata.
+    "Do NOT return a patchDescriptor, testSource, or full test file. For each target "
+    "return ONLY: targetId, status, methods, reason, missingSymbols. The runner "
+    "builds the canonical patchDescriptor (test class, package, imports, patchId) "
+    "from the target — never set or override the test class, package or imports "
+    "yourself. The canonical test class is target.canonicalTestClass.",
+    "Return methods ONLY for items with status 'generated'. Each method is "
+    "{name, annotations, body, evidenceIds}; annotations default to [\"@Test\"].",
+    "Use ONLY symbols whose imports are in target.allowedImports in your method "
+    "bodies and annotations. Do not use DisplayName, Autowired, SpringBootTest, "
+    "Spring injection annotations, or domain exceptions unless they are explicitly "
+    "listed in target.allowedImports.",
     "Use ONLY target.allowedEvidenceIds in every method.evidenceIds. If no "
     "allowedEvidenceIds justify a test method, mark that target skipped/failed "
     "instead of inventing symbols.",
@@ -234,8 +244,8 @@ GENERATION_RULES = [
     "'literal' uses the given value, 'new' constructs a real instance, 'mock' "
     "declares a Mockito mock (a local mock(Type.class) or a @Mock field, allowed "
     "only when Mockito is in target.allowedImports). Do NOT reference any variable "
-    "that is not declared locally in the test or in patchDescriptor.fields; never "
-    "invent a collaborator the fixturePlan did not list.",
+    "that is not declared locally in the test method body; never invent a "
+    "collaborator the fixturePlan did not list.",
     "If target.fixturePlan.complete is false, do NOT improvise the missing "
     "construction: respond with status NEED_MORE_CONTEXT and put the entries of "
     "target.fixturePlan.unresolvedCollaborators in missingSymbols.",
@@ -344,6 +354,18 @@ def preflight_evidence_gate(target: dict) -> str | None:
     name = str(target.get("targetMethodName") or "").strip()
     if name == "<clinit>" and not _has_enum_constant_evidence(target):
         return PREFLIGHT_CLINIT_NO_CONSTANTS
+    # Enum synthetic constructor (task 3): an enum's <init> is a compiler-generated
+    # bytecode detail — EnumType(String name, int ordinal, ...) — that CANNOT be
+    # called from a test; enums are exercised via values()/valueOf()/getters, not by
+    # construction. Skip it ONLY when the SUT is an enum (guarded by
+    # _has_enum_constant_evidence, so a NORMAL class constructor — <init> on a
+    # non-enum SUT — is never affected), and allow it through only when the request
+    # also projects a genuinely testable enum method (values/valueOf/public getter),
+    # which would let a useful test be written. <clinit> keeps its constants-only
+    # rule above (a values() method alone does not unlock it).
+    if (name == "<init>" and _has_enum_constant_evidence(target)
+            and not _has_testable_enum_method(target)):
+        return PREFLIGHT_CLINIT_NO_CONSTANTS
     if _target_body_missing(target):
         return PREFLIGHT_BODY_MISSING_REASON
     return None
@@ -368,6 +390,27 @@ def _has_enum_constant_evidence(target: dict) -> bool:
     ctx = target.get("context") or {}
     if isinstance(ctx, dict) and ctx.get("enumConstants"):
         return True
+    return False
+
+
+# Enum methods that make an enum target genuinely testable from the request alone:
+# the implicit values()/valueOf(...) plus any public getter (get*/is*).
+_TESTABLE_ENUM_METHODS = frozenset({"values", "valueof"})
+
+
+def _has_testable_enum_method(target: dict) -> bool:
+    """True when the request projects a genuinely testable enum method — values(),
+    valueOf(...) or a public getter — so a useful test can be written even though the
+    target itself is the enum constructor. Used to avoid OVER-skipping an enum
+    <init> that does carry a testable surface."""
+    for ref in target.get("evidenceRefs") or []:
+        if not isinstance(ref, dict) or str(ref.get("kind") or "").lower() != "method":
+            continue
+        nm = str(ref.get("name") or "")
+        if nm.lower() in _TESTABLE_ENUM_METHODS:
+            return True
+        if (nm.startswith("get") or nm.startswith("is")) and len(nm) > 2:
+            return True
     return False
 
 
@@ -905,6 +948,29 @@ def build_generation_request(
                 "Do not derive testClass from the target method name.",
             ],
         },
+        # Minimal-completion contract (the LLM does NOT build the patchDescriptor):
+        # it returns only status + methods + reason + missingSymbols, and Python
+        # hydrates the canonical patchDescriptor (orchestrator.batch_protocol.
+        # hydrate_generation_response). This is the machine-readable shape the model
+        # must follow; expectedResponse below is the concrete per-target echo.
+        "responseCompletionContract": {
+            "schemaVersion": "test-generation-completion-v1",
+            "rule": "Do not return patchDescriptor. Do not return testSource. Return "
+                    "only status, methods, reason and missingSymbols. The runner "
+                    "builds the canonical patchDescriptor.",
+            "itemShape": {
+                "targetId": "<targetId>",
+                "status": "generated|skipped|failed|NEED_MORE_CONTEXT",
+                "methods": [
+                    {"name": "method_condition_expected",
+                     "annotations": ["@Test"],
+                     "body": "// given\n...\n// when\n...\n// then\n...",
+                     "evidenceIds": []}
+                ],
+                "reason": "",
+                "missingSymbols": [],
+            },
+        },
         "expectedResponse": {
             "schemaVersion": SCHEMA_GENERATION_RESPONSE,
             "runId": run_id,
@@ -913,8 +979,7 @@ def build_generation_request(
             "items": [
                 {"targetId": t["targetId"],
                  "status": "generated|skipped|failed|NEED_MORE_CONTEXT",
-                 "patchDescriptor": {},
-                 "missingSymbols": [], "reason": ""}
+                 "methods": [], "reason": "", "missingSymbols": []}
                 for t in out_targets
             ],
         },
@@ -1108,19 +1173,18 @@ def _validate_patch_descriptor(
             )
 
 
-def validate_generation_response(resp: dict, batch_targets: list[dict], *, batch_id: str) -> list[dict]:
-    """Validate a generation response against the batch it answers.
+def validate_generation_envelope(resp: dict, *, batch_id: str) -> list[dict]:
+    """Validate ONLY the response envelope (the batch-level contract), returning items.
 
-    Minimal-schema checks (raise BatchResponseError on a structural breach):
+    These are the ONLY breaches that may abort the whole batch in the hydration flow:
+    a malformed/foreign response wrapper the runner cannot trust at all —
+      * ``resp`` is a JSON object,
       * schemaVersion / role / batchId match the request,
-      * ``items`` is a list,
-      * every item names a target that belongs to THIS batch (unknown ⇒ reject),
-      * each item.status ∈ {generated, skipped, failed},
-      * a ``generated`` item carries a canonical patchDescriptor.
+      * ``items`` is a list.
 
-    A per-item ``skipped``/``failed`` is VALID — it must not fail the batch; the
-    caller maps it to SKIPPED / GENERATION_FAILED. Returns the validated items.
-    """
+    Everything per-item (unknown/duplicate targetId, status, methods, descriptor) is
+    decided by hydrate_generation_response WITHOUT aborting the batch. Keeping the
+    envelope separate is what lets a single bad item fail only itself."""
     if not isinstance(resp, dict):
         raise BatchResponseError("response is not a JSON object")
     if resp.get("schemaVersion") != SCHEMA_GENERATION_RESPONSE:
@@ -1133,6 +1197,27 @@ def validate_generation_response(resp: dict, batch_targets: list[dict], *, batch
     items = resp.get("items")
     if not isinstance(items, list):
         raise BatchResponseError("items must be a list")
+    return items
+
+
+def validate_generation_response(resp: dict, batch_targets: list[dict], *, batch_id: str) -> list[dict]:
+    """Validate a generation response against the batch it answers (LEGACY/compat path).
+
+    Minimal-schema checks (raise BatchResponseError on a structural breach):
+      * schemaVersion / role / batchId match the request,
+      * ``items`` is a list,
+      * every item names a target that belongs to THIS batch (unknown ⇒ reject),
+      * each item.status ∈ {generated, skipped, failed},
+      * a ``generated`` item carries a canonical patchDescriptor.
+
+    A per-item ``skipped``/``failed`` is VALID — it must not fail the batch; the
+    caller maps it to SKIPPED / GENERATION_FAILED. Returns the validated items.
+
+    NOTE: this is the OLD contract where the LLM ships the patchDescriptor. The
+    hydration flow (validate_generation_envelope + hydrate_generation_response) is
+    the new path; this function is retained for backward compatibility and reuses
+    the same envelope checks so the two never drift."""
+    items = validate_generation_envelope(resp, batch_id=batch_id)
 
     target_by_id = {t.get("targetId"): t for t in batch_targets}
     known = set(target_by_id)
@@ -1166,6 +1251,240 @@ def validate_generation_response(resp: dict, batch_targets: list[dict], *, batch
                 target_evidence_required=bool(target.get("targetEvidenceRequired")),
             )
     return items
+
+
+# ── Generation-response hydration (LLM completion → canonical patchDescriptor) ───
+# The contract evolved from "the LLM returns a full patchDescriptor" to "the LLM
+# returns a MINIMAL completion (status + methods + reason + missingSymbols) and
+# Python builds the canonical patchDescriptor from the target". This removes the
+# whole class of "patchDescriptor missing required keys" failures (the model used
+# to forget schemaVersion/patchId/sut) and lets a single bad ITEM fail ONLY itself
+# instead of dragging the whole batch (every valid/skipped/NEED_MORE_CONTEXT
+# sibling) into GENERATION_FAILED. Python is the single source of truth for every
+# structural field; only the method bodies/evidence come from the model.
+
+# Per-item hydration/validation failure reasons (persisted in validation-result.json).
+HYDRATION_COMPLETION_SCHEMA_ERROR = "COMPLETION_SCHEMA_ERROR"
+HYDRATION_DESCRIPTOR_ERROR = "PATCH_DESCRIPTOR_HYDRATION_ERROR"
+HYDRATION_UNKNOWN_TARGET = "UNKNOWN_TARGET_ID"
+HYDRATION_DUPLICATED_TARGET = "DUPLICATED_TARGET_ID"
+HYDRATION_MISSING_METHODS = "MISSING_METHODS"
+HYDRATION_INVALID_EVIDENCE = "INVALID_EVIDENCE_ID"
+HYDRATION_TARGET_EVIDENCE_REQUIRED = "TARGET_EVIDENCE_REQUIRED"
+HYDRATION_OMITTED = "OMITTED_FROM_RESPONSE"
+
+
+def _patch_id_slug(target_id: str) -> str:
+    """Deterministic slug for a canonical patchId (``patch:<slug>``)."""
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", str(target_id or "")).strip("-").lower()
+    return slug or "target"
+
+
+def _completion_methods(item: dict) -> Any:
+    """The method completions, accepting both the new and the legacy shapes.
+
+    New format: ``item['methods']``. Legacy/transition format:
+    ``item['patchDescriptor']['methods']`` — every OTHER patchDescriptor field the
+    LLM may still send (schemaVersion/patchId/sut/testClass/template/allowedImports)
+    is deliberately ignored; Python rebuilds them from the target."""
+    methods = item.get("methods")
+    if methods is None:
+        legacy = item.get("patchDescriptor")
+        if isinstance(legacy, dict):
+            methods = legacy.get("methods")
+    return methods
+
+
+def build_canonical_patch_descriptor(
+    target: dict, methods: list, *, patch_id_prefix: str = "patch:"
+) -> dict:
+    """Construct the canonical patchDescriptor deterministically from the TARGET.
+
+    The LLM never supplies schemaVersion/patchId/sut/testClass/template/allowedImports
+    — Python is the single source of truth for all structural metadata; only the
+    method names/bodies/evidence come from the model. ``allowedImports`` is the FULL
+    target whitelist on purpose: the patcher auto-resolves any body-required import
+    (test_patch_applier._ensure_required_imports) and prunes the unused ones
+    (_prune_unused_imports), so shipping the whole whitelist compiles without an
+    unused-import lint hit, and is trivially a subset of target.allowedImports."""
+    sut = target.get("sut") or ""
+    test_class = target.get("canonicalTestClass") or (_suggested_test_class(sut) if sut else "")
+    test_package = test_class.rsplit(".", 1)[0] if "." in test_class else ""
+    norm_methods: list[dict] = []
+    for m in methods:
+        if not isinstance(m, dict):
+            continue
+        norm_methods.append({
+            "name": m.get("name"),
+            "annotations": list(m.get("annotations") or ["@Test"]),
+            "body": m.get("body"),
+            "evidenceIds": list(m.get("evidenceIds") or []),
+        })
+    return {
+        "schemaVersion": 1,
+        "patchId": f"{patch_id_prefix}{_patch_id_slug(target.get('targetId') or sut)}",
+        "sut": sut,
+        "testClass": test_class,
+        "testPackage": test_package,
+        "template": target.get("template"),
+        "allowedImports": list(target.get("allowedImports") or []),
+        "fields": [],
+        "methods": norm_methods,
+    }
+
+
+def _classify_descriptor_error(message: str) -> str:
+    """Map a _validate_patch_descriptor failure message to a stable per-item reason."""
+    low = message.lower()
+    if "targetevidenceids" in low or "target method evidence" in low:
+        return HYDRATION_TARGET_EVIDENCE_REQUIRED
+    if "evidenceid" in low:  # unknown / empty evidenceIds, unevidenced SUT calls
+        return HYDRATION_INVALID_EVIDENCE
+    if ".methods must be a non-empty list" in low:
+        return HYDRATION_MISSING_METHODS
+    return HYDRATION_DESCRIPTOR_ERROR
+
+
+def hydrate_generation_response(request: dict, response: dict) -> dict:
+    """Turn an LLM generation completion into apply-ready items + per-item diagnostics.
+
+    Pure function (no I/O). Validates EACH item independently:
+
+      * a structurally broken response (request/response not an object, targets/items
+        not a list) raises BatchResponseError — that aborts the batch (caller's job);
+      * a single bad ITEM never aborts the batch: it becomes status='failed' with a
+        classified reason and a diagnostic entry, so valid/skipped/NEED_MORE_CONTEXT
+        siblings are unaffected.
+
+    Returns ``{items, diagnostics, counts}``:
+      items        normalized for batch_runner._process_generation (status ∈
+                   generated/skipped/failed/NEED_MORE_CONTEXT; a valid 'generated'
+                   carries a canonical patchDescriptor). One item per REQUEST target
+                   (omitted targets included as failed/OMITTED_FROM_RESPONSE), so the
+                   runner needs no separate omission pass.
+      diagnostics  ``[{targetId, reason, message}]`` for every failed/omitted/unknown/
+                   duplicated item — the audit trail for validation-result.json.
+      counts       received/generatedValid/generatedInvalid/skipped/needMoreContext/
+                   failed/omitted/duplicated/unknown.
+    """
+    if not isinstance(request, dict):
+        raise BatchResponseError("request is not a JSON object")
+    if not isinstance(response, dict):
+        raise BatchResponseError("response is not a JSON object")
+    targets = request.get("targets")
+    if not isinstance(targets, list):
+        raise BatchResponseError("request.targets must be a list")
+    resp_items = response.get("items")
+    if not isinstance(resp_items, list):
+        raise BatchResponseError("response.items must be a list")
+
+    target_by_id = {t.get("targetId"): t for t in targets if isinstance(t, dict)}
+    counts = {"received": 0, "generatedValid": 0, "generatedInvalid": 0,
+              "skipped": 0, "needMoreContext": 0, "failed": 0,
+              "omitted": 0, "duplicated": 0, "unknown": 0}
+    diagnostics: list[dict] = []
+
+    # First pass: index the response by targetId, flagging unknown/duplicate items.
+    resp_by_id: dict[Any, dict] = {}
+    for raw in resp_items:
+        counts["received"] += 1
+        if not isinstance(raw, dict):
+            diagnostics.append({"targetId": None, "reason": HYDRATION_COMPLETION_SCHEMA_ERROR,
+                                "message": "response item is not an object"})
+            continue
+        tid = raw.get("targetId")
+        if tid not in target_by_id:
+            counts["unknown"] += 1
+            diagnostics.append({"targetId": tid, "reason": HYDRATION_UNKNOWN_TARGET,
+                                "message": f"targetId {tid!r} is not in this batch"})
+            continue
+        if tid in resp_by_id:
+            counts["duplicated"] += 1
+            diagnostics.append({"targetId": tid, "reason": HYDRATION_DUPLICATED_TARGET,
+                                "message": f"targetId {tid!r} appears more than once"})
+            continue
+        resp_by_id[tid] = raw
+
+    # Second pass: one normalized item per REQUEST target (the source of truth).
+    items: list[dict] = []
+    for tid, target in target_by_id.items():
+        raw = resp_by_id.get(tid)
+        if raw is None:
+            counts["omitted"] += 1
+            diagnostics.append({"targetId": tid, "reason": HYDRATION_OMITTED,
+                                "message": "target omitted from the response"})
+            items.append({"targetId": tid, "status": "failed",
+                          "reason": HYDRATION_OMITTED, "missingSymbols": []})
+            continue
+        status = raw.get("status")
+        reason = raw.get("reason") or ""
+        missing = raw.get("missingSymbols") or []
+        if _is_needs_context(status):
+            counts["needMoreContext"] += 1
+            items.append({"targetId": tid, "status": "NEED_MORE_CONTEXT",
+                          "reason": reason, "missingSymbols": missing})
+            continue
+        if status == "skipped":
+            counts["skipped"] += 1
+            items.append({"targetId": tid, "status": "skipped",
+                          "reason": reason, "missingSymbols": missing})
+            continue
+        if status == "failed":
+            counts["failed"] += 1
+            items.append({"targetId": tid, "status": "failed",
+                          "reason": reason or "model reported failed",
+                          "missingSymbols": missing})
+            continue
+        if status != "generated":
+            counts["generatedInvalid"] += 1
+            diagnostics.append({"targetId": tid, "reason": HYDRATION_COMPLETION_SCHEMA_ERROR,
+                                "message": f"invalid item status {status!r}"})
+            items.append({"targetId": tid, "status": "failed",
+                          "reason": HYDRATION_COMPLETION_SCHEMA_ERROR, "missingSymbols": []})
+            continue
+
+        # status == 'generated' → hydrate + validate THIS item only.
+        methods = _completion_methods(raw)
+        if not isinstance(methods, list) or not methods:
+            counts["generatedInvalid"] += 1
+            diagnostics.append({"targetId": tid, "reason": HYDRATION_MISSING_METHODS,
+                                "message": "generated item has no methods to hydrate"})
+            items.append({"targetId": tid, "status": "failed",
+                          "reason": HYDRATION_MISSING_METHODS, "missingSymbols": []})
+            continue
+        if any(not isinstance(m, dict) for m in methods):
+            counts["generatedInvalid"] += 1
+            diagnostics.append({"targetId": tid, "reason": HYDRATION_COMPLETION_SCHEMA_ERROR,
+                                "message": "each method must be an object"})
+            items.append({"targetId": tid, "status": "failed",
+                          "reason": HYDRATION_COMPLETION_SCHEMA_ERROR, "missingSymbols": []})
+            continue
+        patch = build_canonical_patch_descriptor(target, methods)
+        sut = target.get("sut") or None
+        try:
+            _validate_patch_descriptor(
+                patch, target_id=tid, expected_prefix="patch:",
+                expected_sut=sut,
+                expected_test_class=(target.get("canonicalTestClass")
+                                     or (_suggested_test_class(sut) if sut else None)),
+                expected_allowed_imports=target.get("allowedImports"),
+                expected_evidence_ids=target.get("allowedEvidenceIds"),
+                expected_evidence_refs=target.get("evidenceRefs"),
+                expected_target_evidence_ids=target.get("targetEvidenceIds"),
+                target_evidence_required=bool(target.get("targetEvidenceRequired")),
+            )
+        except BatchResponseError as exc:
+            counts["generatedInvalid"] += 1
+            why = _classify_descriptor_error(str(exc))
+            diagnostics.append({"targetId": tid, "reason": why, "message": str(exc)})
+            items.append({"targetId": tid, "status": "failed",
+                          "reason": why, "missingSymbols": []})
+            continue
+        counts["generatedValid"] += 1
+        items.append({"targetId": tid, "status": "generated",
+                      "patchDescriptor": patch, "reason": "", "missingSymbols": []})
+
+    return {"items": items, "diagnostics": diagnostics, "counts": counts}
 
 
 # ── Repair request envelope ──────────────────────────────────────────────────────

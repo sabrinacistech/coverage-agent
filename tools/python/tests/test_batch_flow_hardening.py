@@ -862,6 +862,51 @@ def case_preflight_clinit_requires_enum_constants() -> None:
             bp.preflight_evidence_gate(with_hint) is None)
 
 
+def case_preflight_enum_constructor_skipped() -> None:
+    """An enum's synthetic <init> (a bytecode detail) is skipped — but ONLY for an
+    enum SUT, and only when no testable enum method is projected."""
+    enum_ctor = {
+        "targetId": "com.acme.Status#<init>", "sut": "com.acme.Status",
+        "targetMethodName": "<init>",
+        "enumConstants": ["ACTIVE", "INACTIVE"],
+        "allowedEvidenceIds": ["const:com.acme.Status#ACTIVE"],
+        "evidenceRefs": [{"evidenceId": "const:com.acme.Status#ACTIVE",
+                          "kind": "enumConstant", "name": "ACTIVE"}],
+    }
+    _assert("enum <init> without testable method → skip",
+            bp.preflight_evidence_gate(enum_ctor) == bp.PREFLIGHT_CLINIT_NO_CONSTANTS,
+            str(bp.preflight_evidence_gate(enum_ctor)))
+    # With a public getter projected, a useful test exists → allowed through.
+    with_getter = dict(enum_ctor, evidenceRefs=enum_ctor["evidenceRefs"] + [
+        {"evidenceId": "sym:com.acme.Status#getLabel:1", "kind": "method",
+         "name": "getLabel"}])
+    _assert("enum <init> with public getter → generable",
+            bp.preflight_evidence_gate(with_getter) is None,
+            str(bp.preflight_evidence_gate(with_getter)))
+    # values()/valueOf() also unlock it.
+    with_values = dict(enum_ctor, evidenceRefs=enum_ctor["evidenceRefs"] + [
+        {"evidenceId": "sym:com.acme.Status#values:1", "kind": "method", "name": "values"}])
+    _assert("enum <init> with values() → generable",
+            bp.preflight_evidence_gate(with_values) is None,
+            str(bp.preflight_evidence_gate(with_values)))
+
+
+def case_preflight_normal_constructor_not_enum_skipped() -> None:
+    """REGRESSION GUARD: a NORMAL class constructor (<init> on a non-enum SUT) must
+    NOT be caught by the enum-constructor rule — only the body-missing rule applies."""
+    normal = {
+        "targetId": "com.acme.Widget#<init>", "sut": "com.acme.Widget",
+        "targetMethodName": "<init>",
+        "allowedEvidenceIds": ["ctor:com.acme.Widget:1"],
+        "evidenceRefs": [{"evidenceId": "ctor:com.acme.Widget:1", "kind": "constructor",
+                          "name": "<init>"}],
+        "sutSourceCode": "Widget(String name) { this.name = name; }",
+    }
+    _assert("normal constructor not skipped as enum",
+            bp.preflight_evidence_gate(normal) is None,
+            str(bp.preflight_evidence_gate(normal)))
+
+
 # ── repairCause.missingSymbols (task 4) ───────────────────────────────────────
 
 def case_repair_cause_missing_symbols() -> None:
@@ -971,6 +1016,8 @@ def main() -> int:
         case_preflight_body_missing,
         case_preflight_body_missing_constructor,
         case_preflight_clinit_requires_enum_constants,
+        case_preflight_enum_constructor_skipped,
+        case_preflight_normal_constructor_not_enum_skipped,
         case_repair_cause_missing_symbols,
         case_repair_cause_missing_symbols_from_compiler_details,
         case_batch_final_report_run_id_canonical,

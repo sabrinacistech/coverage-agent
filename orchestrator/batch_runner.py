@@ -196,9 +196,12 @@ def _build_handoff_prompt(kind: str, request: Path, response: Path,
         rules = (
             f'- schemaVersion "{schema}".\n'
             "- Un item por cada target del request.\n"
-            "- Por target: status \"generated\" + patchDescriptor válido, o \"skipped\"+reason, o \"failed\"+reason.\n"
+            "- NO devuelvas patchDescriptor ni testSource: el runner construye el "
+            "patchDescriptor canónico. Por target devolvé SOLO status + methods + reason + missingSymbols.\n"
+            "- Por target: status \"generated\" + methods[], o \"skipped\"+reason, o "
+            "\"failed\"+reason, o \"NEED_MORE_CONTEXT\"+missingSymbols.\n"
+            "- Cada método: {name, annotations (default [\"@Test\"]), body, evidenceIds}.\n"
             "- No modificar código productivo. No inventar imports/métodos/constructores/clases.\n"
-            "- patchDescriptor.allowedImports ⊆ target.allowedImports.\n"
             "- method.evidenceIds ⊆ target.allowedEvidenceIds."
         )
     else:
@@ -1261,6 +1264,56 @@ def _classify_batch(
     return {"passed": passed, "failed": failed, "compile": compile_failed}
 
 
+def _validation_counts(gen_counts: dict, test_counts: dict, *, applied: int) -> dict:
+    """Merge the per-item hydration counts with the test-run outcome into the
+    validation-result counts. ``compile`` is preserved verbatim because the advance
+    rule reads it; generation 'failed' (LLM-reported) is kept distinct from test
+    'failed' (a surefire failure) so the two are never conflated."""
+    return {
+        "received": gen_counts.get("received", 0),
+        "generatedValid": gen_counts.get("generatedValid", 0),
+        "generatedInvalid": gen_counts.get("generatedInvalid", 0),
+        "applied": applied,
+        "passed": test_counts.get("passed", 0),
+        "failed": test_counts.get("failed", 0),
+        "compile": test_counts.get("compile", 0),
+        "skipped": gen_counts.get("skipped", 0),
+        "needMoreContext": gen_counts.get("needMoreContext", 0),
+        "omitted": gen_counts.get("omitted", 0),
+        "generationFailed": gen_counts.get("failed", 0),
+        "duplicated": gen_counts.get("duplicated", 0),
+        "unknown": gen_counts.get("unknown", 0),
+    }
+
+
+def _empty_validation_counts(*, received: int = 0, omitted: int = 0) -> dict:
+    """Zeroed validation counts (shape-compatible with _validation_counts), for the
+    paths that never reached the hydrator (no sendable targets / unparseable
+    response). Carries ``compile`` so the advance rule never KeyErrors."""
+    return _validation_counts({"received": received, "omitted": omitted}, {}, applied=0)
+
+
+def _validation_items(manifest: dict, target_ids: list[str], diagnostics: list[dict]) -> list[dict]:
+    """Per-target rows for validation-result.json: the target's final lifecycle
+    status plus the hydration diagnostic (reason/message) when one exists."""
+    diag_by_id: dict = {}
+    for d in diagnostics or []:
+        tid = d.get("targetId")
+        if tid is not None and tid not in diag_by_id:
+            diag_by_id[tid] = d
+    out: list[dict] = []
+    for tid in target_ids:
+        rec = manifest.get("targets", {}).get(tid, {})
+        d = diag_by_id.get(tid, {})
+        out.append({
+            "targetId": tid,
+            "status": rec.get("status"),
+            "reason": rec.get("reason") or d.get("reason") or "",
+            "message": d.get("message", ""),
+        })
+    return out
+
+
 def _render_test_source_from_descriptor(patch: dict) -> str:
     """Best-effort reconstruction of the test that just failed from its patch
     descriptor, used when the patcher rejected the patch (gate/perimeter) before
@@ -1661,8 +1714,10 @@ def run_batches(
         if not sendable_ids:
             # Every target in this batch lacked evidence → nothing to generate.
             _write_json(paths.validation_result(batch_id),
-                        {"batchId": batch_id, "rc": 0, "counts": {"passed": 0, "failed": 0,
-                         "compile": 0}, "applied": {}, "preflightSkipped": preflight_skipped})
+                        {"batchId": batch_id, "rc": 0,
+                         "counts": _empty_validation_counts(),
+                         "items": [], "applied": {},
+                         "preflightSkipped": preflight_skipped})
             _save_manifest(run_dir, manifest)
             continue
 
@@ -1688,16 +1743,34 @@ def run_batches(
             _save_manifest(run_dir, manifest)
             continue
 
+        # Envelope first — the ONLY batch-level abort: a malformed/foreign response
+        # wrapper we cannot trust at all. A per-item problem never aborts here.
         try:
-            items = bp.validate_generation_response(resp, request_targets, batch_id=batch_id)
+            bp.validate_generation_envelope(resp, batch_id=batch_id)
         except bp.BatchResponseError as exc:
-            _print(f"[batch] response-generation inválida: {exc}; salto el batch.")
+            _print(f"[batch] response-generation inválida (envelope): {exc}; salto el batch.")
             for tid in sendable_ids:
                 bp.set_status(manifest, tid, bp.GENERATION_FAILED, note=str(exc))
                 processed.add(tid)
                 one_cycle.mark_processed(state_dir, tid)
+            # Always write validation-result.json — even on an unparseable response.
+            _write_json(paths.validation_result(batch_id), {
+                "batchId": batch_id, "rc": 1,
+                "counts": _empty_validation_counts(omitted=len(sendable_ids)),
+                "items": [{"targetId": tid, "status": bp.GENERATION_FAILED,
+                           "reason": bp.HYDRATION_COMPLETION_SCHEMA_ERROR,
+                           "message": str(exc)} for tid in sendable_ids],
+                "applied": {}, "preflightSkipped": preflight_skipped})
             _save_manifest(run_dir, manifest)
             continue
+
+        # Python builds the canonical patchDescriptor per item (the LLM no longer
+        # ships it); a single invalid item fails ONLY itself instead of dragging the
+        # whole batch into GENERATION_FAILED.
+        hydrated = bp.hydrate_generation_response(req, resp)
+        items = hydrated["items"]
+        gen_diagnostics = hydrated["diagnostics"]
+        gen_counts = hydrated["counts"]
 
         fixture_plans = {t.get("targetId"): (t.get("fixturePlan") or {})
                          for t in request_targets}
@@ -1720,9 +1793,11 @@ def run_batches(
             manifest["status"] = "STOPPED"
             _save_manifest(run_dir, manifest)
             return RC_STOPPED
-        counts = _classify_batch(manifest, repo=repo, applied=applied, rc=rc_tests)
+        test_counts = _classify_batch(manifest, repo=repo, applied=applied, rc=rc_tests)
+        counts = _validation_counts(gen_counts, test_counts, applied=len(applied))
         _write_json(paths.validation_result(batch_id),
                     {"batchId": batch_id, "rc": rc_tests, "counts": counts,
+                     "items": _validation_items(manifest, sendable_ids, gen_diagnostics),
                      "applied": applied, "preflightSkipped": preflight_skipped,
                      "fixtureComplianceWarnings": compliance_warnings})
         _save_manifest(run_dir, manifest)

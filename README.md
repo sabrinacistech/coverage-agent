@@ -169,14 +169,16 @@ Reglas:
 - La respuesta debe ser SOLO JSON válido.
 - Debe tener schemaVersion "test-generation-batch-response-v1".
 - Debe incluir un item por cada target del request.
-- Para cada target usar:
-  - status "generated" con patchDescriptor válido, o
+- NO devuelvas patchDescriptor ni testSource: el runner construye el
+  patchDescriptor canónico desde el target. Por target devolvé SOLO:
+  - status "generated" con methods[] (cada método: name, annotations, body, evidenceIds), o
   - status "skipped" con reason claro, o
-  - status "failed" con reason claro.
+  - status "failed" con reason claro, o
+  - status "NEED_MORE_CONTEXT" con missingSymbols + reason.
 - No modificar código productivo.
 - No inventar imports, métodos, constructores ni clases.
-- Respetar target.allowedImports, evidenceIds, context packs y reglas del request.
-- patchDescriptor.allowedImports debe ser subconjunto exacto de target.allowedImports.
+- No elijas la clase de test, el package ni los imports: los fija Python desde
+  target.canonicalTestClass y target.allowedImports.
 - Cada method.evidenceIds debe ser subconjunto exacto de target.allowedEvidenceIds.
 - Si target.targetEvidenceRequired es true, cada method.evidenceIds debe incluir
   al menos un id de target.targetEvidenceIds.
@@ -191,6 +193,8 @@ Reglas:
 - No uses @DisplayName, @Autowired, @SpringBootTest, imports Spring ni excepciones
   de dominio salvo que el FQCN exacto aparezca en target.allowedImports.
 - Cada método @Test debe tener // given, // when, // then.
+- El body de cada método contiene SOLO el cuerpo del método Java, no la clase
+  completa, no package, no imports.
 
 Regla importante para lambdas sintéticas:
 - Si el target trae context.syntheticCoverageTargets, NO lo saltees por ser lambda.
@@ -204,28 +208,8 @@ Ejemplo esperado para ClusterQueries.requireConfiguredCluster:
 - repository.findByAlias(alias) devuelve Optional.of(cluster) => retorna el cluster.
 - repository.findByAlias(alias) devuelve Optional.empty() => lanza ClusterNotFoundException.
 
-Contrato obligatorio de patchDescriptor:
-- patchDescriptor NO es un archivo completo. No uses operation, targetFile,
-  language, content, coveredMethod ni testMethods.
-- patchDescriptor debe usar el contrato canonico:
-  schemaVersion, patchId, cycle, sut, testClass, testPackage, template,
-  allowedImports, methods.
-- patchDescriptor.testClass debe ser EXACTAMENTE target.canonicalTestClass.
-- No inventes variantes como *CtorTest, *ConstructorTest, *GeneratedTest o
-  *UnitTest.
-- patchDescriptor.allowedImports debe contener solo imports de target.allowedImports.
-- Cada method.evidenceIds debe contener solo ids de target.allowedEvidenceIds.
-- Cada method.evidenceIds debe citar también target.targetEvidenceIds cuando el
-  target lo exige.
-- Si el body llama un método sobre una variable del tipo SUT, ese método debe
-  estar listado en target.evidenceRefs con kind="method".
-- patchId debe empezar con "patch:".
-- methods debe ser una lista no vacia. Cada metodo debe tener:
-  name, annotations, body, evidenceIds.
-- El body de cada metodo contiene SOLO el cuerpo del metodo Java, no la clase
-  completa, no package, no imports.
-
-Ejemplo minimo de shape, adaptando valores y evidenceIds al request real:
+Ejemplo minimo de shape (completion mínima; el runner hidrata el patchDescriptor),
+adaptando valores y evidenceIds al request real:
 
 {
   "schemaVersion": "test-generation-batch-response-v1",
@@ -236,26 +220,14 @@ Ejemplo minimo de shape, adaptando valores y evidenceIds al request real:
     {
       "targetId": "tgt:0001",
       "status": "generated",
-      "patchDescriptor": {
-        "schemaVersion": 1,
-        "patchId": "patch:abcdef",
-        "cycle": 1,
-        "sut": "com.acme.ClusterQueries",
-        "testClass": "com.acme.ClusterQueriesTest",
-        "testPackage": "com.acme",
-        "template": "junit5-mockito",
-        "allowedImports": [
-          "org.junit.jupiter.api.Test"
-        ],
-        "methods": [
-          {
-            "name": "requireConfiguredCluster_whenClusterExists_returnsCluster",
-            "annotations": ["@Test"],
-            "body": "// given\n// when\n// then",
-            "evidenceIds": ["sym:com.acme.ClusterQueries#requireConfiguredCluster:12345678"]
-          }
-        ]
-      }
+      "methods": [
+        {
+          "name": "requireConfiguredCluster_whenClusterExists_returnsCluster",
+          "annotations": ["@Test"],
+          "body": "// given\n// when\n// then",
+          "evidenceIds": ["sym:com.acme.ClusterQueries#requireConfiguredCluster:12345678"]
+        }
+      ]
     }
   ]
 }

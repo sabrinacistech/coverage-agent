@@ -111,7 +111,79 @@ def case_request_is_self_contained_payload() -> None:
             "failedItem.currentTestSource" in rreq["selfContainedPolicy"]["authoritativeFields"])
 
 
-# ── validate_generation_response ─────────────────────────────────────────────────
+def case_request_completion_contract_no_patch_descriptor() -> None:
+    # New contract: the LLM returns a minimal completion; Python hydrates the
+    # patchDescriptor. The request must NOT ask for a patchDescriptor and must ship
+    # the responseCompletionContract instead.
+    targets = bp.select_batch(_plan(2), set(), 10)
+    req = bp.build_generation_request("run-1", "batch-001", targets, batch_size=10)
+    rcc = req.get("responseCompletionContract")
+    _assert("request has responseCompletionContract", isinstance(rcc, dict), repr(rcc))
+    _assert("completion contract schema", rcc["schemaVersion"] == "test-generation-completion-v1")
+    _assert("completion itemShape has methods", "methods" in rcc["itemShape"])
+    _assert("completion itemShape has no patchDescriptor",
+            "patchDescriptor" not in rcc["itemShape"])
+    for it in req["expectedResponse"]["items"]:
+        _assert("expectedResponse item has no patchDescriptor",
+                "patchDescriptor" not in it, repr(it))
+        _assert("expectedResponse item has methods", "methods" in it, repr(it))
+
+
+def case_rules_do_not_reference_patch_descriptor_dotpath() -> None:
+    # No generation rule may still tell the model to build patchDescriptor.<field>
+    # (that contradicts "do not return patchDescriptor").
+    offenders = [r for r in bp.GENERATION_RULES if "patchdescriptor." in r.lower()]
+    _assert("no rule references patchDescriptor.<field>", not offenders, repr(offenders))
+    joined = " ".join(bp.GENERATION_RULES).lower()
+    _assert("rules forbid returning patchDescriptor", "do not return a patchdescriptor" in joined)
+
+
+# ── validate_generation_envelope (per-item split — hydration flow) ───────────────
+
+def _gen_resp(*items: dict, batch_id: str = "batch-001") -> dict:
+    return {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "role": "generation",
+            "batchId": batch_id, "items": list(items)}
+
+
+def case_envelope_accepts_well_formed_wrapper() -> None:
+    items = bp.validate_generation_envelope(
+        _gen_resp({"targetId": "x", "status": "generated", "methods": []}),
+        batch_id="batch-001")
+    _assert("envelope returns items", isinstance(items, list) and len(items) == 1, repr(items))
+
+
+def case_envelope_rejects_structural_breaches() -> None:
+    bad = [
+        ("not an object", "nope"),
+        ("schemaVersion", {"schemaVersion": "wrong", "role": "generation",
+                           "batchId": "batch-001", "items": []}),
+        ("role", {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "role": "repair",
+                  "batchId": "batch-001", "items": []}),
+        ("batchId", _gen_resp(batch_id="batch-999")),
+        ("items not list", {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE,
+                            "role": "generation", "batchId": "batch-001", "items": "x"}),
+    ]
+    for label, resp in bad:
+        try:
+            bp.validate_generation_envelope(resp, batch_id="batch-001")  # type: ignore[arg-type]
+            _assert(f"envelope rejects {label}", False, "did not raise")
+        except bp.BatchResponseError:
+            _assert(f"envelope rejects {label}", True)
+
+
+def case_envelope_does_not_require_patch_descriptor() -> None:
+    # The new contract: a generated item with NO patchDescriptor and an unknown
+    # targetId must NOT abort the batch at the envelope level (the hydrator decides
+    # per item). This is the behavioural contrast with validate_generation_response.
+    resp = _gen_resp({"targetId": "not-in-batch", "status": "generated", "methods": []})
+    try:
+        bp.validate_generation_envelope(resp, batch_id="batch-001")
+        _assert("envelope ignores per-item issues", True)
+    except bp.BatchResponseError as exc:
+        _assert("envelope ignores per-item issues", False, str(exc))
+
+
+# ── validate_generation_response (legacy/compat path) ────────────────────────────
 
 def case_response_skipped_item_does_not_break_batch() -> None:
     targets = bp.select_batch(_plan(2), set(), 10)
