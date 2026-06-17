@@ -1649,6 +1649,19 @@ def run_batches(
     _save_manifest(run_dir, manifest)
 
     processed = set(one_cycle._processed_ids(state_dir))
+    pending_count = sum(1 for it in plan_items if it.get("targetId") not in processed)
+    estimated_batches = (pending_count + batch_size - 1) // batch_size if pending_count else 0
+    _print(
+        f"[batch] batch_size={batch_size} | targets pendientes={pending_count} | "
+        f"batches estimados≈{estimated_batches}"
+    )
+    _print(
+        "[batch] guía batch_size:  "
+        "1-3 = debug/prueba inicial (lento, controlado)  |  "
+        "5 = recomendado proyectos medianos  |  "
+        "10 = targets simples (DTOs, value objects)  |  "
+        "15-20 = proyectos grandes (riesgo: el freno automático actúa si el pass-rate baja)"
+    )
     batch_no = 0
     final_rc = RC_DONE
 
@@ -1694,6 +1707,7 @@ def run_batches(
         enriched = _enrich_targets_with_imports(targets, state_dir=state_dir, repo=repo)
         request_targets: list[dict] = []
         preflight_skipped: list[dict] = []
+        preflight_sendable: list[dict] = []
         for t in enriched:
             reason = bp.preflight_evidence_gate(t)
             if reason:
@@ -1704,10 +1718,17 @@ def run_batches(
                 preflight_skipped.append({"targetId": tid, "sut": t.get("sut", ""),
                                           "reason": reason})
             else:
+                preflight_sendable.append({"targetId": t.get("targetId"),
+                                           "sut": t.get("sut", "")})
                 request_targets.append(t)
+        # Always write preflight-result.json so the user sees the complete picture
+        # for this batch: which targets were sent (sendable) and which were filtered (skipped).
+        _write_json(paths.preflight_result(batch_id), {
+            "batchId": batch_id,
+            "sendable": preflight_sendable,
+            "skipped": preflight_skipped,
+        })
         if preflight_skipped:
-            _write_json(paths.preflight_result(batch_id),
-                        {"batchId": batch_id, "skipped": preflight_skipped})
             _print(f"[preflight] {len(preflight_skipped)} target(s) saltados por falta "
                    f"de evidencia (no se envían al LLM).")
         sendable_ids = [t.get("targetId") for t in request_targets]
@@ -1722,7 +1743,8 @@ def run_batches(
             continue
 
         # ── generation handoff ──────────────────────────────────────────────────
-        req = bp.build_generation_request(run_id, batch_id, request_targets, batch_size=batch_size)
+        req = bp.build_generation_request(run_id, batch_id, request_targets,
+                                          batch_size=len(request_targets))
         req_path = paths.request_generation(batch_id)
         resp_path = paths.response_generation(batch_id)
         _write_json(req_path, req)
@@ -1946,8 +1968,18 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Driver de handoff por batches (handoff-batch).")
     ap.add_argument("--state-dir", required=True, type=Path)
     ap.add_argument("--repo", required=True, type=Path)
-    ap.add_argument("--batch-size", type=int, default=None,
-                    help="Targets por batch (default: config.batch_size / 10).")
+    ap.add_argument(
+        "--batch-size", type=int, default=None,
+        help=(
+            "Cantidad de targets enviados al LLM por handoff (default: config.batch_size). "
+            "Guía de selección: "
+            "1-3 = debug o prueba inicial, control máximo; "
+            "5 = recomendado para proyectos medianos (balance velocidad/riesgo); "
+            "10 = proyectos con targets simples (DTOs, value objects, enums con métodos); "
+            "15-20 = proyectos grandes con muchos targets, pero el freno automático se activa "
+            "si el pass-rate por batch es bajo — reducir si la corrida se detiene frecuentemente."
+        ),
+    )
     ap.add_argument("--max-repair-rounds", type=int, default=None,
                     help="Rondas de reparación por batch (default: config / 2).")
     ap.add_argument("--max-batches", type=int, default=None,

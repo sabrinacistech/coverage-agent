@@ -320,8 +320,15 @@ def case_preflight_skip_persisted() -> None:
             _assert("preflight: C0 PASSED", m["targets"]["com.acme.C0#m"]["status"] == bp.PASSED)
             pf = _run_dir(state) / "batches" / "batch-001" / "preflight-result.json"
             _assert("preflight-result.json written", pf.exists())
-            _assert("preflight-result lists C1",
-                    pf.exists() and "com.acme.C1#m" in pf.read_text(encoding="utf-8"))
+            pf_data = json.loads(pf.read_text(encoding="utf-8")) if pf.exists() else {}
+            _assert("preflight-result has sendable key", "sendable" in pf_data)
+            _assert("preflight-result has skipped key", "skipped" in pf_data)
+            _assert("preflight-result sendable contains C0",
+                    any(e.get("targetId") == "com.acme.C0#m"
+                        for e in pf_data.get("sendable", [])))
+            _assert("preflight-result skipped contains C1",
+                    any(e.get("targetId") == "com.acme.C1#m"
+                        for e in pf_data.get("skipped", [])))
     _with_stubs(body)
 
 
