@@ -55,6 +55,7 @@ from common import (  # noqa: F401
     validate,
 )
 import framework_imports  # shared symbol→import catalog (FIX side); test_linter is the GATE side
+from ast_patcher import _dedup_imports_by_simple_name  # assert-framework SimpleName de-dup
 
 # ── Safety constants ─────────────────────────────────────────────────────────
 _FORBIDDEN_SEGMENTS = ("src/main/java", "src\\main\\java")
@@ -461,7 +462,42 @@ def _render_from_template(tpl: str, patch: dict, stack: dict | None = None) -> s
             "",
             result,
         )
+
+    # Clean render guarantees: (1) no template placeholder may survive (a drifted
+    # template that adds a new ${X} must fail loudly, not ship a literal ${X} into
+    # Java), and (2) no redundant blank lines — the exclusive ${ASSERT_IMPORTS}
+    # collapses to "" for the junit-builtin stack, which would otherwise leave a
+    # double blank line in the import block (an IDE / SonarQube smell).
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    _assert_no_unresolved_placeholders(result)
     return result
+
+
+# Template tokens resolved by _render_from_template. Any survivor signals template
+# drift (a new placeholder with no substitution) and must fail the render rather
+# than emit a literal `${...}` into the compiled Java.
+_TEMPLATE_PLACEHOLDERS: tuple[str, ...] = (
+    "PACKAGE", "SUT_SIMPLE", "SUT_FQN", "ASSERT_IMPORTS", "ASSERT_NOT_NULL",
+    "COLLABORATORS", "TEST_BODY",
+)
+_UNRESOLVED_PLACEHOLDER_RE = re.compile(
+    r"\$\{(" + "|".join(_TEMPLATE_PLACEHOLDERS) + r")\}"
+)
+
+
+def _assert_no_unresolved_placeholders(text: str) -> None:
+    # Scan with comments / string literals blanked: several templates carry a
+    # `// Placeholders: ${PACKAGE}, ${TEST_BODY}, ...` documentation header whose
+    # tokens are inert (they compile as a comment) and must NOT trip the guard.
+    # Only a placeholder surviving in *code* is a real, ship-breaking defect.
+    scan = _strip_comments_and_strings(text)
+    leftover = sorted({m.group(0) for m in _UNRESOLVED_PLACEHOLDER_RE.finditer(scan)})
+    if leftover:
+        raise ValueError(
+            "UNRESOLVED_TEMPLATE_PLACEHOLDER: rendered test still contains "
+            f"{', '.join(leftover)} — the template has a placeholder the renderer "
+            "does not substitute. Fix the template or _render_from_template."
+        )
 
 
 # ── Extraction helpers ────────────────────────────────────────────────────────
@@ -811,6 +847,16 @@ def apply_patch(
     # fixtures) that the LLM left unimported — backfilled from the context-pack's
     # authorized import set so they cannot trip "cannot find symbol" either.
     new_text = _resolve_authorized_type_imports(new_text, authorized_imports)
+
+    # Assert-framework exclusivity: if both org.junit…Assertions and
+    # org.assertj…Assertions ended up imported (LLM declared both, or a mixed
+    # body), they collide on the simple name `Assertions` and the file won't
+    # compile. Keep the one matching the configured AssertionFramework, drop the
+    # loser, and FQN-rewrite the loser's call sites. Last text transform before
+    # the disk write (only code path that writes Java), so the winner is stable.
+    new_text = _dedup_imports_by_simple_name(
+        new_text, (stack or {}).get("assertFramework")
+    )
 
     # Last-resort backstop before touching disk: a raw newline/CR inside a Java
     # string literal is an "unclosed string literal" compile error. sanitize_java_

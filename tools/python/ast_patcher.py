@@ -27,6 +27,13 @@ import sys
 from pathlib import Path
 
 from common import atomic_write_text, load_json
+from framework_imports import (  # shared assert-framework source of truth
+    AssertionFramework,
+    OWNER_ASSERTJ,
+    OWNER_JUNIT5_ASSERT,
+    assertions_owner_for,
+    assertions_owner_methods,
+)
 
 IMPORT_RE = re.compile(r"^\s*import\s+(?:static\s+)?([\w\.]+(?:\.\*)?)\s*;\n?", re.MULTILINE)
 PACKAGE_RE = re.compile(r"^\s*package\s+[\w\.]+\s*;\s*\n", re.MULTILINE)
@@ -73,6 +80,147 @@ def add_import(text: str, imp: str, whitelist: dict) -> tuple[str, str | None]:
 def remove_import(text: str, imp: str) -> str:
     escaped = re.escape(imp)
     return re.sub(rf"^\s*import\s+(?:static\s+)?{escaped}\s*;\s*\n", "", text, flags=re.MULTILINE)
+
+
+# ── De-duplication by SimpleName (assert-framework exclusivity) ───────────────
+# A generated test may end up declaring BOTH `import org.junit.jupiter.api.
+# Assertions;` and `import org.assertj.core.api.Assertions;` (e.g. the LLM listed
+# both in allowedImports). They share the SimpleName `Assertions`, so any
+# `Assertions.assertEquals(...)` becomes an ambiguous reference and the file no
+# longer compiles. This pass runs as the last text transform before disk: it keeps
+# the import that matches the configured AssertionFramework and drops the loser,
+# rewriting the loser's qualified call sites to its FQN so they still resolve.
+
+# Qualified `Assertions.<method>` usage. Mirrors framework_imports' detector: the
+# `(?<![\w.])` lookbehind makes the rewrite idempotent — once a call is FQN'd to
+# `org.junit.jupiter.api.Assertions.x`, the inner `Assertions` is preceded by a
+# dot and no longer matches.
+_QUALIFIED_ASSERTIONS_RE = re.compile(r"(?<![\w.])Assertions\s*\.\s*(\w+)")
+# The two `Assertions` owners that can collide on the simple name. JUnit 4 asserts
+# through the differently-named `Assert`, so the collision is always jupiter↔assertj.
+_ASSERTIONS_OWNERS: tuple[str, ...] = (OWNER_ASSERTJ, OWNER_JUNIT5_ASSERT)
+
+
+def _mask_noise(text: str) -> str:
+    """Length-preserving blanking of comments and string/char literals.
+
+    Returns a string the SAME length as ``text`` with comment and literal regions
+    replaced by spaces, so regex match offsets computed on the mask line up exactly
+    with the original — letting us rewrite `Assertions.x` in real code while never
+    touching one that appears inside a comment or a string literal.
+    """
+    def _blank(m: re.Match[str]) -> str:
+        return " " * (m.end() - m.start())
+
+    text = re.sub(r"/\*.*?\*/", _blank, text, flags=re.DOTALL)   # block comments
+    text = re.sub(r"//[^\n]*", _blank, text)                      # line comments
+    text = re.sub(r'"(?:\\.|[^"\\\n])*"', _blank, text)           # string literals
+    text = re.sub(r"'(?:\\.|[^'\\\n])*'", _blank, text)           # char literals
+    return text
+
+
+def _has_plain_import(text: str, fqcn: str) -> bool:
+    return bool(re.search(rf"(?m)^[ \t]*import[ \t]+{re.escape(fqcn)}[ \t]*;", text))
+
+
+def _ensure_plain_import(text: str, fqcn: str) -> str:
+    """Insert ``import <fqcn>;`` after the last import (idempotent)."""
+    if _has_plain_import(text, fqcn):
+        return text
+    line = f"import {fqcn};\n"
+    imports = list(IMPORT_RE.finditer(text))
+    if imports:
+        pos = imports[-1].end()
+        return text[:pos] + line + text[pos:]
+    pkg = PACKAGE_RE.search(text)
+    if pkg:
+        return text[:pkg.end()] + "\n" + line + text[pkg.end():]
+    return line + text
+
+
+def _collapse_duplicate_imports(text: str) -> str:
+    """Drop exact-duplicate ``import`` lines, keeping the first occurrence."""
+    seen: set[str] = set()
+    out: list[str] = []
+    last = 0
+    for m in IMPORT_RE.finditer(text):
+        stmt = m.group(0).strip()
+        if stmt in seen:
+            out.append(text[last:m.start()])
+            last = m.end()
+        else:
+            seen.add(stmt)
+    out.append(text[last:])
+    return "".join(out)
+
+
+def _rewrite_qualified_to_fqn(
+    text: str, owner_fqcn: str, methods: frozenset[str]
+) -> str:
+    """Rewrite code-region `Assertions.<m>` → `<owner_fqcn>.<m>` for ``m`` in the
+    given dialect's ``methods`` set. Comments / string literals are left intact."""
+    if not methods:
+        return text
+    mask = _mask_noise(text)
+    out: list[str] = []
+    last = 0
+    for m in _QUALIFIED_ASSERTIONS_RE.finditer(mask):
+        if m.group(1) not in methods:
+            continue
+        start, end = m.start(), m.end()
+        # Same span in the real text; swap only the leading `Assertions` token,
+        # preserving any whitespace around the dot and the method name.
+        rewritten = re.sub(r"Assertions", owner_fqcn, text[start:end], count=1)
+        out.append(text[last:start])
+        out.append(rewritten)
+        last = end
+    out.append(text[last:])
+    return "".join(out)
+
+
+def _dedup_imports_by_simple_name(
+    text: str, assert_fw: "str | AssertionFramework | None" = None
+) -> str:
+    """Resolve a ``Assertions`` simple-name collision before writing to disk.
+
+    Precedence is the configured :class:`AssertionFramework`: AssertJ stacks keep
+    ``org.assertj.core.api.Assertions``; JUnit-builtin / Hamcrest stacks keep
+    ``org.junit.jupiter.api.Assertions``. The winning import is the only one left;
+    every qualified call belonging to the *losing* dialect is rewritten to that
+    dialect's FQN so it still compiles. No collision (≤1 owner involved) → the text
+    is returned unchanged, and a second pass is a no-op (idempotent).
+    """
+    text = _collapse_duplicate_imports(text)
+
+    present = [owner for owner in _ASSERTIONS_OWNERS if _has_plain_import(text, owner)]
+
+    # Which dialects does the body actually call through the bare `Assertions` type?
+    mask = _mask_noise(text)
+    used: set[str] = set()
+    for m in _QUALIFIED_ASSERTIONS_RE.finditer(mask):
+        method = m.group(1)
+        if method in assertions_owner_methods(OWNER_ASSERTJ):
+            used.add(OWNER_ASSERTJ)
+        elif method in assertions_owner_methods(OWNER_JUNIT5_ASSERT):
+            used.add(OWNER_JUNIT5_ASSERT)
+
+    candidates = set(present) | used
+    if len(candidates) < 2:
+        return text  # no collision possible — nothing to resolve
+
+    winner = assertions_owner_for(assert_fw)  # AssertJ vs JUnit, by config
+    if winner not in candidates:
+        # Configured winner isn't even in play (e.g. AssertJ-config but only JUnit
+        # present+used): keep the single coherent dialect rather than forcing one.
+        winner = next(iter(candidates)) if len(candidates) == 1 else (
+            OWNER_JUNIT5_ASSERT if OWNER_JUNIT5_ASSERT in candidates else OWNER_ASSERTJ
+        )
+
+    for loser in candidates - {winner}:
+        text = _rewrite_qualified_to_fqn(text, loser, assertions_owner_methods(loser))
+        text = remove_import(text, loser)
+    text = _ensure_plain_import(text, winner)
+    return text
 
 
 # ── New deterministic actions ────────────────────────────────────────────────
@@ -274,6 +422,12 @@ def main() -> int:
                     help="Required for addImport/removeImport/removeUnusedStub/convertMockSutToInjectMocks")
     ap.add_argument("--whitelist", default=None,
                     help="Path to import-whitelist.json (required for addImport)")
+    ap.add_argument("--assert-fw", default=None, dest="assert_fw",
+                    help=(
+                        "Configured assert framework (assertj|hamcrest|junit-builtin). "
+                        "Breaks an `Assertions` simple-name collision on addImport by "
+                        "AssertionFramework precedence before writing."
+                    ))
     args = ap.parse_args()
 
     if args.action in _ACTIONS_WITH_ARG and not args.arg:
@@ -290,6 +444,9 @@ def main() -> int:
         if err:
             print(json.dumps({"status": "BLOCKED", "reason": err}, indent=2))
             return 1
+        # addImport is the action that can introduce a second `Assertions` import;
+        # resolve any resulting simple-name collision deterministically before disk.
+        new_text = _dedup_imports_by_simple_name(new_text, args.assert_fw)
         report: dict = {"status": "OK", "changed": new_text != text}
     elif args.action == "removeImport":
         new_text = remove_import(text, args.arg)

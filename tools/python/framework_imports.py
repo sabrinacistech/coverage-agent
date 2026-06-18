@@ -21,6 +21,7 @@ real hallucination (those still fail G1/G2).
 """
 from __future__ import annotations
 
+import enum
 import re
 
 # ── Static helper owners (a bare `name(...)` call → `import static <owner>.<name>;`)
@@ -31,6 +32,102 @@ OWNER_HAMCREST = "org.hamcrest.MatcherAssert"
 OWNER_MOCKITO = "org.mockito.Mockito"
 OWNER_MATCHERS = "org.mockito.ArgumentMatchers"
 OWNER_BDD = "org.mockito.BDDMockito"
+
+
+# ── Assertion framework: the single source of truth for which assert dialect a
+#    generated test speaks. The LLM never chooses it — the deterministic stack
+#    (context-pack ``stack.assertFramework``) does. Modelled as an enum so the
+#    exclusivity rule ("never import BOTH org.junit…Assertions and
+#    org.assertj…Assertions") is enforced by a closed value set, not by ad-hoc
+#    string comparison scattered across the resolver and the patcher.
+class AssertionFramework(enum.Enum):
+    """The assert dialect a generated test is allowed to use.
+
+    Values mirror the historical ``stack.assertFramework`` strings so the enum is
+    a drop-in for the free-form parameter: ``assertj`` (default), ``hamcrest`` and
+    ``junit-builtin`` (JUnit 5's own ``org.junit.jupiter.api.Assertions``).
+    """
+
+    ASSERTJ = "assertj"
+    HAMCREST = "hamcrest"
+    JUNIT5 = "junit-builtin"
+
+    @classmethod
+    def coerce(cls, value: "str | AssertionFramework | None") -> "AssertionFramework":
+        """Normalise a config value (string / enum / None) into the enum.
+
+        Backwards compatible: an already-coerced enum passes through, ``None`` and
+        the historical "unspecified" sentinels (``""``, ``unknown``, ``none``,
+        ``default``, ``auto``) map to the AssertJ default (the Spring-starter
+        behaviour the template has always assumed), and the canonical strings plus
+        a few aliases (``junit5`` / ``junit`` / ``jupiter``) map to their member.
+        Any *other* non-empty string is a configuration error and raises
+        ``ValueError`` with the accepted set — the strict validation that turns a
+        typo'd ``assertFramework`` into a loud failure instead of silent AssertJ.
+        """
+        if isinstance(value, cls):
+            return value
+        if value is None:
+            return cls.ASSERTJ
+        if not isinstance(value, str):
+            raise TypeError(
+                f"assertFramework must be a str or AssertionFramework, got {type(value).__name__}"
+            )
+        key = value.strip().lower()
+        if key in _ASSERT_FW_UNSPECIFIED:
+            return cls.ASSERTJ
+        if key in _ASSERT_FW_ALIASES:
+            return _ASSERT_FW_ALIASES[key]
+        for member in cls:
+            if member.value == key:
+                return member
+        raise ValueError(
+            f"unknown assertFramework {value!r}; expected one of "
+            f"{[m.value for m in cls]} (or a known sentinel: "
+            f"{sorted(_ASSERT_FW_UNSPECIFIED)})"
+        )
+
+
+# Sentinels that mean "the detector did not pin a dialect" → AssertJ default.
+_ASSERT_FW_UNSPECIFIED: frozenset[str] = frozenset(
+    {"", "unknown", "none", "default", "auto"}
+)
+# Friendly aliases accepted for the JUnit-builtin dialect.
+_ASSERT_FW_ALIASES: dict[str, AssertionFramework] = {
+    "junit5": AssertionFramework.JUNIT5,
+    "junit": AssertionFramework.JUNIT5,
+    "jupiter": AssertionFramework.JUNIT5,
+}
+
+
+def assertions_owner_for(
+    fw: "str | AssertionFramework | None", test_fw: str = "junit5"
+) -> str:
+    """FQCN of the single ``Assertions`` class the configured dialect imports.
+
+    AssertJ → ``org.assertj.core.api.Assertions``. JUnit-builtin and Hamcrest →
+    JUnit's ``Assertions`` (``org.junit.Assert`` under a junit4 stack), since
+    Hamcrest has no ``Assertions`` type and JUnit's is always available. This is
+    the precedence applied when a simple-name collision must be broken.
+    """
+    framework = AssertionFramework.coerce(fw)
+    if framework is AssertionFramework.ASSERTJ:
+        return OWNER_ASSERTJ
+    return OWNER_JUNIT4_ASSERT if test_fw == "junit4" else OWNER_JUNIT5_ASSERT
+
+
+def assertions_owner_methods(owner_fqcn: str) -> frozenset[str]:
+    """The static method names that legitimately live on an ``Assertions`` owner.
+
+    Used by the de-dup pass to decide which qualified ``Assertions.<m>`` calls
+    belong to the *losing* dialect and therefore must be rewritten to its FQN.
+    """
+    if owner_fqcn == OWNER_ASSERTJ:
+        return ASSERTJ_METHODS
+    if owner_fqcn in (OWNER_JUNIT5_ASSERT, OWNER_JUNIT4_ASSERT):
+        return JUNIT_ASSERT_METHODS
+    return frozenset()
+
 
 JUNIT_ASSERT_METHODS: frozenset[str] = frozenset({
     "assertEquals", "assertNotEquals", "assertTrue", "assertFalse", "assertNull",
@@ -102,12 +199,19 @@ def strip_noise(text: str) -> str:
     return text
 
 
-def static_helper_registry(test_fw: str, assert_fw: str) -> dict[str, str]:
+def static_helper_registry(
+    test_fw: str, assert_fw: "str | AssertionFramework | None"
+) -> dict[str, str]:
     """Map bare helper name → owning class FQCN, parameterised by the stack.
 
-    JUnit-assert helpers point at JUnit4 vs JUnit5 per ``test_fw``; ``assertThat``
-    & friends point at AssertJ or Hamcrest per ``assert_fw`` (AssertJ is the
-    default, matching the deterministic template's import block).
+    JUnit-assert helpers point at JUnit4 vs JUnit5 per ``test_fw``; the assert
+    dialect helpers (``assertThat`` & friends) point at exactly ONE owner chosen
+    by ``assert_fw`` — AssertJ (default) maps the full AssertJ method set, Hamcrest
+    maps ``assertThat`` to ``MatcherAssert``, and JUnit-builtin maps no
+    ``assertThat`` family at all (JUnit has none). ``assert_fw`` is coerced through
+    :class:`AssertionFramework`, so an unknown value fails loudly instead of
+    silently degrading. The registry never carries two owners for one helper, so a
+    static import resolved from it can never collide on simple name.
     """
     junit_owner = OWNER_JUNIT4_ASSERT if test_fw == "junit4" else OWNER_JUNIT5_ASSERT
     reg: dict[str, str] = {}
@@ -119,11 +223,13 @@ def static_helper_registry(test_fw: str, assert_fw: str) -> dict[str, str]:
         reg[m] = OWNER_MATCHERS
     for m in BDD_METHODS:
         reg[m] = OWNER_BDD
-    if assert_fw == "hamcrest":
+    framework = AssertionFramework.coerce(assert_fw)
+    if framework is AssertionFramework.HAMCREST:
         reg["assertThat"] = OWNER_HAMCREST
-    elif assert_fw in ("assertj", "", "unknown") or assert_fw is None:
+    elif framework is AssertionFramework.ASSERTJ:
         for m in ASSERTJ_METHODS:
             reg[m] = OWNER_ASSERTJ
+    # AssertionFramework.JUNIT5 (junit-builtin): no assertThat-style static helper.
     return reg
 
 
@@ -137,18 +243,27 @@ def resolve_imports(
     owner.member;`` — exactly what a body's framework symbols require.
     """
     scan = strip_noise(text)
+    framework = AssertionFramework.coerce(assert_fw)
+    junit_owner = OWNER_JUNIT4_ASSERT if test_fw == "junit4" else OWNER_JUNIT5_ASSERT
     type_imports: list[str] = []
     static_imports: list[str] = []
 
-    # (a) `Assertions.<method>` qualified usage → import the right Assertions class.
+    # (a) `Assertions.<method>` qualified usage → import the ONE right Assertions
+    # class. A single body can mix dialects (`Assertions.assertThat` from AssertJ
+    # AND `Assertions.assertEquals` from JUnit); importing both would collide on
+    # the simple name `Assertions` and break compilation. So when more than one
+    # owner is implied, the configured AssertionFramework decides the winner and we
+    # emit only that import — never both. The loser's qualified calls are rewritten
+    # to their FQN downstream by ast_patcher._dedup_imports_by_simple_name.
+    needed_owners: list[str] = []
     for m in _QUALIFIED_ASSERTIONS_RE.finditer(scan):
-        method = m.group(1)
-        if method in ASSERTJ_METHODS:
-            type_imports.append(OWNER_ASSERTJ)
-        else:
-            type_imports.append(
-                OWNER_JUNIT4_ASSERT if test_fw == "junit4" else OWNER_JUNIT5_ASSERT
-            )
+        owner = OWNER_ASSERTJ if m.group(1) in ASSERTJ_METHODS else junit_owner
+        if owner not in needed_owners:
+            needed_owners.append(owner)
+    if len(needed_owners) == 1:
+        type_imports.append(needed_owners[0])  # single dialect → exact owner
+    elif needed_owners:
+        type_imports.append(assertions_owner_for(framework, test_fw))
 
     # (b) other framework TYPE tokens referenced bare or qualified.
     for token, fqcn in TYPE_IMPORTS.items():
