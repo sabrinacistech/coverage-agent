@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import batch_protocol as bp
-from . import config, cost_telemetry, one_cycle, workspace_volumetry
+from . import config, cost_telemetry, one_cycle, prompts, workspace_volumetry
 
 # budget_enforcer lives in the deterministic core (tools/python), invoked by path.
 sys.path.insert(0, str(config.TOOLS_PYTHON))
@@ -184,12 +184,44 @@ _PASTE_OPEN = "───────────── COPIÁ DESDE ACÁ (pegar 
 _PASTE_CLOSE = "───────────── COPIÁ HASTA ACÁ ─────────────"
 
 
+def _path_run_batch(request: Path) -> tuple[str, str]:
+    """(runId, batchId) derived from a request path under
+    ``run_dir/batches/<batchId>/request-*.json``. Best-effort: empty strings when
+    the path is shorter than expected (only used to fill the prompt template)."""
+    batch_id = request.parent.name
+    run_id = request.parents[2].name if len(request.parents) >= 3 else ""
+    return run_id, batch_id
+
+
 def _build_handoff_prompt(kind: str, request: Path, response: Path,
                           repair_round: int | None = None) -> str:
-    """Pure: the ready-to-paste handoff prompt with ABSOLUTE paths already
-    interpolated from the real request/response Paths — never the placeholder
+    """The ready-to-paste handoff prompt with ABSOLUTE paths already interpolated
+    from the real request/response Paths — never the placeholder
     ``run-YYYYMMDD-HHMMSS``. Distinguishes generation vs repair.
-    """
+
+    The text comes from the human-editable ``.md`` template under ``prompts/``
+    (see prompts/README.md); when the template is absent/unreadable we fall back
+    to the built-in prompt below so a missing file never stops a run."""
+    schema = (bp.SCHEMA_GENERATION_RESPONSE if kind == "generation"
+              else bp.SCHEMA_REPAIR_RESPONSE)
+    run_id, batch_id = _path_run_batch(request)
+    rendered = prompts.render_handoff_prompt(
+        kind,
+        request_path=str(request),
+        response_path=str(response),
+        schema_version=schema,
+        run_id=run_id,
+        batch_id=batch_id,
+        repair_round=repair_round,
+    )
+    if rendered is not None:
+        return rendered
+    return _build_handoff_prompt_fallback(kind, request, response, repair_round)
+
+
+def _build_handoff_prompt_fallback(kind: str, request: Path, response: Path,
+                                   repair_round: int | None = None) -> str:
+    """Built-in handoff prompt used only when the ``prompts/`` template is missing."""
     if kind == "generation":
         title = "Resolvé el handoff batch de coverage-agent."
         schema = bp.SCHEMA_GENERATION_RESPONSE

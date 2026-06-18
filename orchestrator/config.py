@@ -24,6 +24,10 @@ ARCH_ROOT = Path(__file__).resolve().parents[1]
 TOOLS_PYTHON = ARCH_ROOT / "tools" / "python"
 AGENTS_DIR = ARCH_ROOT / "agents"
 SCHEMAS_DIR = ARCH_ROOT / "state" / "_schemas"
+# Plantillas de prompt de handoff (.md) editables por humanos. El runner las lee
+# y completa con las rutas reales del batch (ver prompts/README.md). Override por
+# entorno para apuntar a un set de prompts alternativo.
+PROMPTS_DIR = Path(os.environ.get("COVAGENT_PROMPTS_DIR") or (ARCH_ROOT / "prompts"))
 
 # ── Routing de modelos por rol ────────────────────────────────────────────────
 # Formato LiteLLM "<provider>/<model>". Se sobreescriben por entorno para no

@@ -136,6 +136,14 @@ El mismo prompt se escribe también a disco en
 y copiarlo sin scrollear la consola. Para repair, el prompt usa
 `request-repair-rN.json` / `response-repair-rN.json` con el round real.
 
+El **texto** del prompt no está hardcodeado: vive en plantillas `.md` editables por
+humanos en [`prompts/`](../prompts/README.md) (`handoff-generation.md`,
+`handoff-repair.md`). El runner las carga (`orchestrator/prompts.render_handoff_prompt`)
+y las completa con las rutas reales del batch (`${REQUEST_PATH}`, `${RESPONSE_PATH}`,
+`${SCHEMA_VERSION}`, `${RUN_ID}`, `${BATCH_ID}`, `${REPAIR_ROUND}`). Para mejorar el
+prompt que guía al LLM, editá el `.md` —sin tocar Python—; si la plantilla falta, el
+runner usa un prompt mínimo embebido como fallback.
+
 1. En Claude Code, pedile que **lea `request-generation.json` y escriba
    `response-generation.json`** con un item por target. **El LLM NO arma el
    `patchDescriptor`** (ver §"Contrato de generación"): por target devuelve solo
