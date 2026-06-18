@@ -1041,22 +1041,59 @@ def _enum_constants_from_source(source: str) -> list[str]:
     return out
 
 
-def _enum_constants(repo: Path | None, sut: str, pack: dict) -> list[str]:
-    """Enum-constant names for an enum SUT (task 3), DERIVED from the production
-    source so a <clinit>/enum target is testable batch-only instead of being skipped
-    for want of enum-constant evidence. Returns [] when the SUT is not classified as
-    an enum, the repo/source is absent, or no constants can be parsed (never invents).
+def _load_symbol_contract(state_dir: Path | None, fqcn: str) -> dict:
+    """Load the persisted, schema-validated symbol-contract for an FQCN
+    (``state/symbol-contracts/<fqcn>.json``) or {} when absent/unreadable. This is
+    the state_validator-checked artifact, so its ``kind`` is the canonical type
+    classification (no drift with the planner/classifier)."""
+    if state_dir is None or not fqcn:
+        return {}
+    path = state_dir / "symbol-contracts" / f"{fqcn}.json"
+    if not path.exists():
+        return {}
+    try:
+        loaded = _load_json(path)
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
-    Source precondition: no upstream artifact carries the constant NAMES — neither
-    the symbol-contract, the semantic-index (classes.json/methods.json) nor the
-    context-pack project them; only ``kind: enum`` plus the values()/valueOf()
-    methods are indexed. So the production .java is the single source of truth here.
-    This rides on the SAME precondition the hermetic payload already requires:
-    ``_read_sut_source`` reads ``src/main/java/<fqcn>.java`` for every target. If the
-    source is genuinely absent the enum degrades to a skip (the safe failure — better
-    skipped than hallucinated), exactly as a body-less target does today."""
+
+def _is_enum_sut(sut: str, pack: dict, *, state_dir: Path | None = None) -> bool:
+    """True when the SUT is an enum. Prefers the schema-validated symbol-contract
+    (``kind == "enum"``) — the canonical source of truth, already validated by
+    state_validator — and falls back to the context-pack ``classification.type`` when
+    no contract is on disk, so the legacy behaviour is preserved verbatim."""
+    contract = _load_symbol_contract(state_dir, sut)
+    kind = contract.get("kind")
+    if isinstance(kind, str) and kind:
+        return kind == "enum"
     classification = pack.get("classification") if isinstance(pack.get("classification"), dict) else {}
-    if classification.get("type") != "enum":
+    return classification.get("type") == "enum"
+
+
+def _enum_constants(repo: Path | None, sut: str, pack: dict, *,
+                    state_dir: Path | None = None) -> list[str]:
+    """Enum-constant NAMES for an enum SUT (task 3), so a value/valueOf/getter target
+    is testable batch-only instead of being skipped for want of enum-constant
+    evidence. Returns [] when the SUT is not an enum, the repo/source is absent, or no
+    constants parse (never invents — the pre-flight gate then skips the target so it
+    never reaches the model).
+
+    Enum CLASSIFICATION is taken from the schema-validated symbol-contract
+    (``kind: enum``) when present — the canonical, state_validator-checked source —
+    and falls back to the context-pack classification otherwise (retro-compat). This
+    is what the failing run needed: ``_is_enum_sut`` no longer depends on a possibly
+    absent/divergent context-pack ``classification.type``.
+
+    The constant NAMES, however, are carried by NO persisted artifact: the
+    symbol-contract schema is ``additionalProperties: false`` and the bytecode scanner
+    emits only constructors/methods (it drops the static enum-constant fields), and
+    neither the semantic-index nor the context-pack project the names. So the
+    production .java stays the single source of the NAMES — read here on the same
+    precondition the hermetic payload already relies on (``src/main/java/<fqcn>.java``
+    exists for every target). When the source is genuinely absent the enum degrades to
+    a clean pre-flight skip (better skipped than hallucinated)."""
+    if not _is_enum_sut(sut, pack, state_dir=state_dir):
         return []
     if repo is None or not sut:
         return []
@@ -1188,9 +1225,14 @@ def _enrich_targets_with_imports(
         # collaborator's OWN context-pack to rescue an otherwise-unresolved value-object.
         row["fixturePlan"] = _build_fixture_plan(pack, sut, allowed_imports, state_dir=state_dir)
         # Enum-constant hint (task 3): an enum <clinit>/value target is only testable
-        # batch-only when the constant names travel in the request. Derived from the
-        # production source so the pre-flight does not skip every enum.
-        enum_constants = _enum_constants(repo, sut, pack)
+        # batch-only when the constant names travel in the request. Enum-ness comes
+        # from the schema-validated symbol-contract (kind: enum); the constant names
+        # are parsed from the production source (no artifact persists them). The
+        # sutIsEnum flag lets the pre-flight gate recognise an enum even when no
+        # constant could be derived (→ a clean skip instead of a wasted handoff).
+        if _is_enum_sut(sut, pack, state_dir=state_dir):
+            row["sutIsEnum"] = True
+        enum_constants = _enum_constants(repo, sut, pack, state_dir=state_dir)
         if enum_constants:
             row["enumConstants"] = enum_constants
         # Hermetic payload: ship the SUT verbatim + project-collaborator signatures
@@ -1235,6 +1277,18 @@ def _surefire_status(repo: Path, test_class: str) -> str | None:
         fail = (int(f.group(1)) if f else 0) + (int(e.group(1)) if e else 0)
         return "failed" if fail else "passed"
     return None
+
+
+def _is_need_more_context_skip(rec: dict) -> bool:
+    """True when a target ended SKIPPED because the model answered NEED_MORE_CONTEXT
+    (reason MISSING_CONTEXT) — or, defensively, a CLINIT_WITHOUT_ENUM_CONSTANTS skip.
+    Such a target was never a generation FAILURE — the system cleanly recognised it
+    lacked context — so it must NOT count against the batch pass-rate (Fix 3)."""
+    if rec.get("status") != bp.SKIPPED:
+        return False
+    reason = str(rec.get("reason") or "")
+    return (reason.startswith(bp.ABANDON_MISSING_CONTEXT)
+            or bp.PREFLIGHT_CLINIT_NO_CONSTANTS in reason)
 
 
 def _classify_batch(
@@ -1984,13 +2038,23 @@ def run_batches(
         budget_enforcer.reset(state_path)
 
         # ── advance decision ─────────────────────────────────────────────────────
-        # Pass rate is over the ATTEMPTED (sendable) targets; pre-flight skips do not
-        # count against it (they were never generated).
-        total = len(sendable_ids)
-        passed = sum(1 for tid in sendable_ids
+        # Pass rate is over the EFFECTIVE attempted targets. Pre-flight skips never
+        # entered sendable_ids; on top of that, a target the model itself answered
+        # NEED_MORE_CONTEXT for (SKIPPED/MISSING_CONTEXT) is excluded from the
+        # denominator — it did not "fail", the system cleanly recognised it lacked
+        # context. Counting it as a failure let an all-NMC batch (0/N) trip the < 50%
+        # brake and abort targets in LATER batches that had nothing to do with it.
+        effective_ids = [tid for tid in sendable_ids
+                         if not _is_need_more_context_skip(manifest["targets"].get(tid, {}))]
+        total = len(effective_ids)
+        passed = sum(1 for tid in effective_ids
                      if manifest["targets"].get(tid, {}).get("status") == bp.PASSED)
-        decision = bp.advance_decision(passed, total, had_global_compile_error=had_compile)
-        _print(f"[batch] {batch_id}: {passed}/{total} passed → {decision['action']} "
+        nmc = len(sendable_ids) - total
+        all_nmc = total == 0 and nmc > 0
+        decision = bp.advance_decision(passed, total, had_global_compile_error=had_compile,
+                                       all_need_more_context=all_nmc)
+        nmc_note = f" ({nmc} need-more-context excluded)" if nmc else ""
+        _print(f"[batch] {batch_id}: {passed}/{total} passed{nmc_note} → {decision['action']} "
                f"({decision['reason']})")
         _save_manifest(run_dir, manifest)
         if decision["action"] == bp.ADVANCE_STOP:

@@ -354,6 +354,18 @@ def preflight_evidence_gate(target: dict) -> str | None:
     name = str(target.get("targetMethodName") or "").strip()
     if name == "<clinit>" and not _has_enum_constant_evidence(target):
         return PREFLIGHT_CLINIT_NO_CONSTANTS
+    # Enum WITHOUT constant names (golden rule: never hand the model a target the
+    # system already knows it cannot solve). An enum's value/valueOf/getter targets
+    # are NOT named <clinit>/<init> — they are ordinary method targets that pass the
+    # evidence gate above — yet every meaningful test for them needs a constant name
+    # (Status.valueOf("ACTIVE"), Status.ACTIVE.getLabel(), …). When the SUT is an
+    # enum (detected from the request alone by its implicit values()/valueOf()
+    # surface) but NO constant NAME travels in the request, the model can only answer
+    # NEED_MORE_CONTEXT. Skip it here instead of burning a handoff. Guarded by
+    # _has_enum_value_method (values/valueOf) — NOT by the broader getter test — so a
+    # normal class with a getter and no enum constants is never caught.
+    if _is_enum_surface(target) and not _has_enum_constant_evidence(target):
+        return PREFLIGHT_CLINIT_NO_CONSTANTS
     # Enum synthetic constructor (task 3): an enum's <init> is a compiler-generated
     # bytecode detail — EnumType(String name, int ordinal, ...) — that CANNOT be
     # called from a test; enums are exercised via values()/valueOf()/getters, not by
@@ -396,6 +408,34 @@ def _has_enum_constant_evidence(target: dict) -> bool:
 # Enum methods that make an enum target genuinely testable from the request alone:
 # the implicit values()/valueOf(...) plus any public getter (get*/is*).
 _TESTABLE_ENUM_METHODS = frozenset({"values", "valueof"})
+
+
+def _has_enum_value_method(target: dict) -> bool:
+    """True when the request projects an enum's implicit values()/valueOf(...). These
+    two are a reliable enum fingerprint from the request alone — every enum exposes
+    them and an ordinary class essentially never declares both — so they classify the
+    SUT as an enum WITHOUT the false positives a plain getter (handled by
+    _has_testable_enum_method) would introduce."""
+    for ref in target.get("evidenceRefs") or []:
+        if not isinstance(ref, dict) or str(ref.get("kind") or "").lower() != "method":
+            continue
+        if str(ref.get("name") or "").lower() in _TESTABLE_ENUM_METHODS:
+            return True
+    return False
+
+
+def _is_enum_surface(target: dict) -> bool:
+    """True when the request lets us tell the SUT is an enum, using request fields
+    only (so the pre-flight gate stays self-contained). Signals: an explicit
+    ``sutIsEnum`` hint the runner derived from the schema-validated symbol-contract,
+    enum-constant evidence (kind enum/enumConstant), or the implicit values()/valueOf()
+    methods. Deliberately stricter than _has_testable_enum_method (no bare getter) so a
+    normal class is never misread as an enum."""
+    if target.get("sutIsEnum"):
+        return True
+    if _has_enum_constant_evidence(target):
+        return True
+    return _has_enum_value_method(target)
 
 
 def _has_testable_enum_method(target: dict) -> bool:
@@ -1833,20 +1873,31 @@ ADVANCE_REPAIR_THEN_CONTINUE = "repair-then-continue"
 ADVANCE_STOP = "stop"                  # too many failures / global compile error
 
 
-def advance_decision(passed: int, total: int, *, had_global_compile_error: bool = False) -> dict:
+def advance_decision(passed: int, total: int, *, had_global_compile_error: bool = False,
+                     all_need_more_context: bool = False) -> dict:
     """Decide what to do after applying+testing a batch.
 
     Rules (section 7):
       * global compile error → never advance until a repair round runs.
+      * every target answered NEED_MORE_CONTEXT → nothing failed, continue.
       * pass rate ≥ 80%      → repair the failures, then continue.
       * 50% ≤ pass rate < 80% → repair before continuing.
       * pass rate < 50%      → STOP and recommend a smaller --batch-size.
     A 100%-pass batch needs no repair → continue.
+
+    ``all_need_more_context`` is set by the runner when EVERY sendable target ended
+    SKIPPED because the model answered NEED_MORE_CONTEXT (so the effective denominator
+    collapsed to 0). Those targets did not FAIL — the system cleanly recognised they
+    lacked context — so the batch must not trip the < 50% brake and abort unrelated
+    later batches. It continues with no repair.
     """
     rate = (passed / total) if total else 1.0
     if had_global_compile_error:
         return {"action": ADVANCE_REPAIR_THEN_CONTINUE, "rate": rate,
                 "reason": "global compilation error — repair before advancing"}
+    if all_need_more_context and total == 0:
+        return {"action": ADVANCE_CONTINUE, "rate": rate,
+                "reason": "all targets were need-more-context — skipping batch, continuing"}
     if passed == total:
         return {"action": ADVANCE_CONTINUE, "rate": rate, "reason": "all targets passed"}
     if rate >= 0.80:

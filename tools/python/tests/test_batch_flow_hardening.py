@@ -914,6 +914,154 @@ def case_preflight_normal_constructor_not_enum_skipped() -> None:
             str(bp.preflight_evidence_gate(normal)))
 
 
+# ── Fix 1: enum method target without constants never reaches the LLM ─────────
+
+def case_preflight_enum_method_without_constants_skipped() -> None:
+    """Fix 1 — the exact target that broke the failing run: an enum's value/valueOf
+    method (NOT named <clinit>/<init>, so it passes the evidence gate) with NO
+    enum-constant name. Without a constant the model can only answer
+    NEED_MORE_CONTEXT, so the gate must skip it before the handoff."""
+    base = {"targetId": "com.acme.Status#valueOf", "sut": "com.acme.Status",
+            "targetMethodName": "valueOf",
+            "allowedEvidenceIds": ["sym:com.acme.Status#valueOf:1"],
+            "evidenceRefs": [{"evidenceId": "sym:com.acme.Status#valueOf:1",
+                              "kind": "method", "name": "valueOf"}],
+            "targetEvidenceRequired": True,
+            "targetEvidenceIds": ["sym:com.acme.Status#valueOf:1"]}
+    _assert("enum valueOf target without constants → skip",
+            bp.preflight_evidence_gate(base) == bp.PREFLIGHT_CLINIT_NO_CONSTANTS,
+            str(bp.preflight_evidence_gate(base)))
+    # The same target WITH the constant names is generable (regression guard).
+    with_const = dict(base, enumConstants=["ACTIVE", "INACTIVE"])
+    _assert("enum valueOf target with constants → generable",
+            bp.preflight_evidence_gate(with_const) is None,
+            str(bp.preflight_evidence_gate(with_const)))
+    # The runner-derived sutIsEnum flag alone (no values/valueOf ref) also trips it.
+    flagged = {"targetId": "com.acme.Color#ordinal", "sut": "com.acme.Color",
+               "targetMethodName": "ordinal", "sutIsEnum": True,
+               "allowedEvidenceIds": ["sym:com.acme.Color#ordinal:1"],
+               "evidenceRefs": [{"evidenceId": "sym:com.acme.Color#ordinal:1",
+                                 "kind": "method", "name": "ordinal"}],
+               "targetEvidenceRequired": True,
+               "targetEvidenceIds": ["sym:com.acme.Color#ordinal:1"]}
+    _assert("sutIsEnum target without constants → skip",
+            bp.preflight_evidence_gate(flagged) == bp.PREFLIGHT_CLINIT_NO_CONSTANTS,
+            str(bp.preflight_evidence_gate(flagged)))
+    # A NORMAL class method with a plain getter and no constants is NOT an enum →
+    # not caught (the rule is guarded by values()/valueOf(), not by a bare getter).
+    normal = {"targetId": "com.acme.Svc#getName", "sut": "com.acme.Svc",
+              "targetMethodName": "getName",
+              "allowedEvidenceIds": ["sym:com.acme.Svc#getName:1"],
+              "evidenceRefs": [{"evidenceId": "sym:com.acme.Svc#getName:1",
+                                "kind": "method", "name": "getName"}],
+              "targetEvidenceRequired": True,
+              "targetEvidenceIds": ["sym:com.acme.Svc#getName:1"]}
+    _assert("normal getter is not misread as enum",
+            bp.preflight_evidence_gate(normal) is None,
+            str(bp.preflight_evidence_gate(normal)))
+
+
+# ── Fix 2: enum classification from the schema-validated symbol-contract ──────
+
+def case_enum_constants_from_symbol_contract_kind() -> None:
+    """Fix 2 — enum-ness is taken from the schema-validated symbol-contract
+    (kind: enum), the canonical source, so _enum_constants works even when the
+    context-pack classification is absent/divergent (the failing-run condition). The
+    constant NAMES still come from the production source (no artifact persists them)."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        sut = "com.acme.Status"
+        state = root / "state"
+        (state / "symbol-contracts").mkdir(parents=True, exist_ok=True)
+        # A real symbol-contract: kind == "enum", schema carries NO constant names.
+        contract = {"schemaVersion": 1, "fqcn": sut, "kind": "enum",
+                    "instantiation": {"allowed": False, "strategy": "none"},
+                    "constructors": [], "methods": [], "builders": []}
+        (state / "symbol-contracts" / f"{sut}.json").write_text(
+            json.dumps(contract), encoding="utf-8")
+        src = root / "src" / "main" / "java" / "com" / "acme" / "Status.java"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("package com.acme;\npublic enum Status { ACTIVE, INACTIVE; }\n",
+                       encoding="utf-8")
+        # The context-pack has NO enum classification at all — only the contract knows.
+        pack_no_class = {"schemaVersion": 1, "sut": sut, "classification": {"type": "service"}}
+        _assert("contract kind=enum classifies as enum (pack says service)",
+                br._is_enum_sut(sut, pack_no_class, state_dir=state) is True)
+        _assert("enum constants derived via contract + source",
+                br._enum_constants(root, sut, pack_no_class, state_dir=state)
+                == ["ACTIVE", "INACTIVE"],
+                str(br._enum_constants(root, sut, pack_no_class, state_dir=state)))
+        # Retro-compat: no contract on disk → fall back to the pack classification.
+        other = "com.acme.Mode"
+        src2 = root / "src" / "main" / "java" / "com" / "acme" / "Mode.java"
+        src2.write_text("package com.acme;\npublic enum Mode { ON, OFF; }\n", encoding="utf-8")
+        pack_enum = {"schemaVersion": 1, "sut": other, "classification": {"type": "enum"}}
+        _assert("no contract → pack classification still works",
+                br._enum_constants(root, other, pack_enum, state_dir=state) == ["ON", "OFF"],
+                str(br._enum_constants(root, other, pack_enum, state_dir=state)))
+        # Enum per the contract but source absent → [] (Fix 1 then skips the target).
+        ghost = "com.acme.Ghost"
+        (state / "symbol-contracts" / f"{ghost}.json").write_text(
+            json.dumps({**contract, "fqcn": ghost}), encoding="utf-8")
+        _assert("enum with no source → [] (clean skip downstream)",
+                br._enum_constants(root, ghost, {}, state_dir=state) == [],
+                str(br._enum_constants(root, ghost, {}, state_dir=state)))
+
+
+# ── Fix 3: an all-NEED_MORE_CONTEXT batch continues, never STOPs ──────────────
+
+def case_all_need_more_context_batch_continues() -> None:
+    """Fix 3 — when every sendable target answers NEED_MORE_CONTEXT the batch must
+    NOT trip the < 50% brake: NMC targets are excluded from the pass-rate denominator,
+    the decision is CONTINUE, and the run is not STOPPED (so unrelated later targets
+    are not abandoned)."""
+    # Pure advance_decision contract.
+    dec = bp.advance_decision(0, 0, all_need_more_context=True)
+    _assert("all-NMC → advance continue",
+            dec["action"] == bp.ADVANCE_CONTINUE, str(dec))
+    _assert("all-NMC → dedicated reason",
+            "need-more-context" in dec["reason"], str(dec))
+    # The skip-classifier excludes a MISSING_CONTEXT skip but counts a real failure.
+    _assert("MISSING_CONTEXT skip excluded from pass-rate",
+            br._is_need_more_context_skip(
+                {"status": bp.SKIPPED, "reason": f"{bp.ABANDON_MISSING_CONTEXT}: no Dep"}) is True)
+    _assert("ordinary skip is NOT excluded",
+            br._is_need_more_context_skip(
+                {"status": bp.SKIPPED, "reason": "some other reason"}) is False)
+    _assert("a failed target is NOT excluded",
+            br._is_need_more_context_skip(
+                {"status": bp.TEST_FAILED, "reason": "boom"}) is False)
+
+    # End-to-end: a 2-target batch where both answer NMC must end RUNNING→DONE, not
+    # STOPPED (the rc=6 bug). Stub the LLM to answer NEED_MORE_CONTEXT for both.
+    def body() -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            state = _setup(root, {"com.acme.C0": _pack_with_evidence("com.acme.C0"),
+                                  "com.acme.C1": _pack_with_evidence("com.acme.C1")})
+            gen = {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "r",
+                   "batchId": "batch-001", "role": "generation",
+                   "items": [{"targetId": "com.acme.C0#m", "status": "NEED_MORE_CONTEXT",
+                              "missingSymbols": ["com.acme.Dep"], "reason": "no Dep"},
+                             {"targetId": "com.acme.C1#m", "status": "NEED_MORE_CONTEXT",
+                              "missingSymbols": ["com.acme.Dep"], "reason": "no Dep"}]}
+            br._apply_patch = lambda *a, **k: 0  # type: ignore
+            br._run_tests = lambda *a, **k: 0  # type: ignore
+            br.one_cycle._run_tool = lambda script, args: 0  # type: ignore
+            br._wait_for_response = lambda *a, **k: ("ok", gen)  # type: ignore
+            br.run_batches(state, root, batch_size=10, max_repair_rounds=0, max_batches=None)
+            m = _manifest(state)
+            _assert("all-NMC run not STOPPED",
+                    m.get("status") != "STOPPED", str(m.get("status")))
+            _assert("all-NMC run reaches DONE",
+                    m.get("status") == "DONE", str(m.get("status")))
+            _assert("both NMC targets SKIPPED",
+                    m["targets"]["com.acme.C0#m"]["status"] == bp.SKIPPED
+                    and m["targets"]["com.acme.C1#m"]["status"] == bp.SKIPPED,
+                    str(m["targets"]))
+    _with_stubs(body)
+
+
 # ── repairCause.missingSymbols (task 4) ───────────────────────────────────────
 
 def case_repair_cause_missing_symbols() -> None:
@@ -1025,6 +1173,9 @@ def main() -> int:
         case_preflight_clinit_requires_enum_constants,
         case_preflight_enum_constructor_skipped,
         case_preflight_normal_constructor_not_enum_skipped,
+        case_preflight_enum_method_without_constants_skipped,
+        case_enum_constants_from_symbol_contract_kind,
+        case_all_need_more_context_batch_continues,
         case_repair_cause_missing_symbols,
         case_repair_cause_missing_symbols_from_compiler_details,
         case_batch_final_report_run_id_canonical,
