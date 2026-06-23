@@ -114,6 +114,143 @@ def _generated_tests(state_dir: Path) -> list[dict]:
     return out
 
 
+# ── AI cost efficiency (FinOps) ─────────────────────────────────────────────────
+# Demonstrates, by auditing the state-dir, how curated context packaging slashed the
+# tokens-per-cycle versus the naive baseline of dumping the whole repo source into the
+# model every cycle (what an LLM with free repo/tool access would consume). Token math
+# uses the same ~4-chars/token heuristic as orchestrator.cost_telemetry; kept local so
+# this report stays dependency-free.
+_CHARS_PER_TOKEN = 4
+_EFFICIENCY_EXCLUDE_DIRS = frozenset({
+    ".git", "node_modules", "target", "build", "dist", "out",
+    ".idea", ".gradle", ".mvn", "__pycache__", ".pytest_cache",
+    ".venv", "venv", ".claude",
+})
+
+
+def _dir_size_bytes(root: Path, *, excludes: frozenset[str] = _EFFICIENCY_EXCLUDE_DIRS) -> int:
+    """Recursive physical size of *root* in bytes, tolerant to FS errors.
+
+    Excludes VCS/build/dependency dirs (by name, any level) and symlinks, so it
+    measures real *source* volume — the baseline a full-repo scan would ingest."""
+    try:
+        if not root.exists():
+            return 0
+        if root.is_file():
+            return root.stat().st_size
+    except OSError:
+        return 0
+    total = 0
+    for dirpath, dirnames, filenames in os.walk(root, onerror=lambda _e: None):
+        dirnames[:] = [d for d in dirnames if d not in excludes]
+        for name in filenames:
+            fp = os.path.join(dirpath, name)
+            try:
+                if os.path.islink(fp):
+                    continue
+                total += os.path.getsize(fp)
+            except OSError:
+                continue
+    return total
+
+
+def _tokens_from_bytes(n_bytes: int) -> int:
+    """~4 chars/token estimate (ceil), never negative."""
+    if n_bytes <= 0:
+        return 0
+    return -(-n_bytes // _CHARS_PER_TOKEN)
+
+
+def ai_cost_efficiency(state_dir: Path, repo: Path, run_dir: Path | None) -> dict:
+    """Audit the state-dir to quantify the context-packaging savings for this run.
+
+    Baseline = a traditional scan that ingests the entire repo source each cycle.
+    Actual   = the curated request payloads actually sent (request-*.json), with the
+    measured/estimated prompt tokens from costs-telemetry.json. Also aggregates the
+    agents' own ``executionMetadata.promptContextSizeEstimate`` self-assessment."""
+    repo_bytes = _dir_size_bytes(repo)
+    per_scan_tokens = _tokens_from_bytes(repo_bytes)  # one full-repo dump
+
+    sent_bytes = 0
+    num_requests = 0
+    self_assessment: dict[str, int] = {}
+    batches_dir = (run_dir / "batches") if run_dir else None
+    if batches_dir and batches_dir.exists():
+        for bd in sorted(p for p in batches_dir.glob("*") if p.is_dir()):
+            for req in [bd / "request-generation.json", *sorted(bd.glob("request-repair-*.json"))]:
+                try:
+                    if req.exists() and not req.is_symlink():
+                        sent_bytes += req.stat().st_size
+                        num_requests += 1
+                except OSError:
+                    continue
+            resp = _load_json_or(bd / "response-generation.json", {})
+            meta = resp.get("executionMetadata") if isinstance(resp, dict) else None
+            bucket = (meta or {}).get("promptContextSizeEstimate") if isinstance(meta, dict) else None
+            if not isinstance(bucket, str) or not bucket:
+                bucket = "UNKNOWN"
+            self_assessment[bucket] = self_assessment.get(bucket, 0) + 1
+
+    telem = _load_json_or(run_dir / "costs-telemetry.json", {}) if run_dir else {}
+    measured_prompt = int(telem.get("total_prompt_tokens", 0) or 0)
+    measured_completion = int(telem.get("total_completion_tokens", 0) or 0)
+    measured_usd = round(float(telem.get("total_accumulated_usd", 0.0) or 0.0), 6)
+    interactions = telem.get("interactions") or []
+    tokens_source = "measured"
+    if not interactions or any((i or {}).get("estimated") for i in interactions if isinstance(i, dict)):
+        tokens_source = "estimated" if interactions else "unavailable"
+
+    # A traditional (non-curated) agent re-ingests the WHOLE repo source on every LLM
+    # call — it has no per-target slicing. The coverage-agent makes the SAME calls but
+    # carries only a compact pack each time. ``scans`` = those LLM calls (apples-to-
+    # apples: same number of calls, full-repo context vs curated slice). Disclosed in
+    # the output so the comparison is auditable, not a black box.
+    scans = len(interactions) if interactions else max(num_requests, 1)
+    traditional_tokens = per_scan_tokens * scans
+    traditional_bytes = repo_bytes * scans
+
+    # Actual prompt tokens: prefer telemetry; else estimate from the bytes we sent.
+    actual_tokens = measured_prompt or _tokens_from_bytes(sent_bytes)
+    factor = round(traditional_tokens / actual_tokens, 1) if actual_tokens else 0.0
+    tokens_saved = max(0, traditional_tokens - actual_tokens)
+    savings_pct = round(100.0 * tokens_saved / traditional_tokens, 1) if traditional_tokens else 0.0
+    byte_factor = round(traditional_bytes / sent_bytes, 1) if sent_bytes else 0.0
+
+    # Estimate the traditional-scan USD with the run's own blended $/token, so we never
+    # hard-code prices here. 0.0 when there is no measured cost to anchor on.
+    total_measured_tokens = measured_prompt + measured_completion
+    blended_usd_per_token = (measured_usd / total_measured_tokens) if total_measured_tokens else 0.0
+    est_traditional_usd = round(traditional_tokens * blended_usd_per_token, 4)
+    usd_saved = round(max(0.0, est_traditional_usd - measured_usd), 4)
+
+    return {
+        "method": "state-dir audit (full-repo source re-scanned per LLM call vs curated payloads + costs-telemetry.json)",
+        "baseline": {
+            "approach": "traditional full-repo scan re-sent on each LLM interaction",
+            "repoSourceBytes": repo_bytes,
+            "perScanTokens": per_scan_tokens,
+            "scans": scans,
+            "estimatedPromptTokens": traditional_tokens,
+            "estimatedCostUsd": est_traditional_usd,
+        },
+        "actual": {
+            "approach": "curated compact context pack (coverage-agent)",
+            "contextSentBytes": sent_bytes,
+            "promptTokens": measured_prompt,
+            "completionTokens": measured_completion,
+            "tokensSource": tokens_source,
+            "costUsd": measured_usd,
+            "llmInteractions": len(interactions),
+        },
+        "tokenReductionFactor": factor,
+        "byteReductionFactor": byte_factor,
+        "tokensSavedPerRun": tokens_saved,
+        "savingsPct": savings_pct,
+        "estimatedCostSavedUsd": usd_saved,
+        "agentSelfAssessment": self_assessment,
+    }
+
+
 def build_report(
     *,
     state_dir: Path,
@@ -135,10 +272,11 @@ def build_report(
         if int(lines.get("delta", 0) or 0) or int(branches.get("delta", 0) or 0):
             changed_classes.append(item)
     return {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "kind": "batch-final-report",
         "runId": manifest.get("runId"),
         "repo": str(repo),
+        "aiCostEfficiency": ai_cost_efficiency(state_dir, repo, run_dir),
         "manifest": {
             "status": manifest.get("status"),
             "totals": manifest.get("totals", {}),
@@ -168,6 +306,47 @@ def _fmt_counter(counter: dict) -> str:
     return f"{counter.get('before', 0)} -> {counter.get('after', 0)} ({counter.get('delta', 0):+})"
 
 
+def _human_mb(n: int) -> str:
+    return f"{n / 1_048_576:.2f} MB"
+
+
+def _human_kb(n: int) -> str:
+    return f"{n / 1024:.2f} KB"
+
+
+def _render_ai_cost_efficiency(eff: dict) -> list[str]:
+    if not eff:
+        return []
+    base = eff.get("baseline", {})
+    act = eff.get("actual", {})
+    lines = [
+        "## AI Cost Efficiency",
+        "",
+        "_Empaquetado de contexto curado vs. escaneo tradicional del repo completo "
+        "(auditoría del state-dir)._",
+        "",
+        f"- Baseline (escaneo tradicional): {_human_mb(base.get('repoSourceBytes', 0))} de "
+        f"fuente reenviada en cada una de {base.get('scans', 0)} llamada(s) "
+        f"(~{base.get('perScanTokens', 0):,} tok/scan) → ~{base.get('estimatedPromptTokens', 0):,} "
+        f"tokens de prompt.",
+        f"- Real (compact pack curado): {_human_kb(act.get('contextSentBytes', 0))} enviados "
+        f"→ {act.get('promptTokens', 0):,} tokens de prompt ({act.get('tokensSource', 'n/a')}), "
+        f"{act.get('llmInteractions', 0)} interacción(es).",
+        f"- **Reducción de tokens: {eff.get('tokenReductionFactor', 0)}x** "
+        f"(ahorro ~{eff.get('tokensSavedPerRun', 0):,} tokens, {eff.get('savingsPct', 0)}%).",
+        f"- Reducción por bytes de contexto: {eff.get('byteReductionFactor', 0)}x.",
+        f"- Costo real: ${act.get('costUsd', 0)} · estimado tradicional: "
+        f"${base.get('estimatedCostUsd', 0)} · ahorro estimado: "
+        f"${eff.get('estimatedCostSavedUsd', 0)}.",
+    ]
+    self_assess = eff.get("agentSelfAssessment") or {}
+    if self_assess:
+        dist = ", ".join(f"{k}×{v}" for k, v in sorted(self_assess.items()))
+        lines.append(f"- Autoevaluación del agente (promptContextSizeEstimate): {dist}.")
+    lines.append("")
+    return lines
+
+
 def render_markdown(report: dict) -> str:
     totals = report["coverageDelta"]["totals"]
     lines = [
@@ -178,6 +357,9 @@ def render_markdown(report: dict) -> str:
         f"- JaCoCo: `{report['jacoco']['status']}` - {report['jacoco']['detail']}",
         f"- Delta: `{report['coverageDelta']['status']}` - {report['coverageDelta']['detail']}",
         "",
+    ]
+    lines += _render_ai_cost_efficiency(report.get("aiCostEfficiency") or {})
+    lines += [
         "## Coverage Delta",
         "",
         f"- Lines covered: {_fmt_counter(totals.get('lines') or {})}",

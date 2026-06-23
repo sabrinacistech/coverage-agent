@@ -25,10 +25,29 @@ from typing import Any
 
 # ── Schema version tags (the file protocol's contract) ─────────────────────────
 SCHEMA_GENERATION_REQUEST = "test-generation-batch-v1"
-SCHEMA_GENERATION_RESPONSE = "test-generation-batch-response-v1"
+# v2 adds the optional ``executionMetadata`` block (agent self-assessment of its
+# prompt-context size + intent). The runner EMITS v2 in every prompt; the validator
+# ACCEPTS both so a model still echoing v1 — or an older in-flight run — never aborts.
+SCHEMA_GENERATION_RESPONSE = "test-generation-batch-response-v2"
+SCHEMA_GENERATION_RESPONSE_ACCEPTED = frozenset({
+    "test-generation-batch-response-v1",
+    "test-generation-batch-response-v2",
+})
 SCHEMA_REPAIR_REQUEST = "test-repair-batch-v1"
 SCHEMA_REPAIR_RESPONSE = "test-repair-batch-response-v1"
 SCHEMA_MANIFEST = "test-batch-manifest-v1"
+
+# Coarse buckets the agent uses to self-assess how big the prompt context it
+# received was (executionMetadata.promptContextSizeEstimate). Advisory only — they
+# feed the FinOps "AI cost efficiency" indicator in the final report, never a gate.
+PROMPT_CONTEXT_SIZE_BUCKETS = (
+    "COMPACT_PACK_UNDER_10K",   # curated compact pack, < 10k tokens (the design goal)
+    "PACK_10K_50K",             # mid-size pack
+    "PACK_OVER_50K",            # large pack — investigate context bloat
+    "UNKNOWN",                  # model could not estimate its own window
+)
+# Canonical agent name for the generation role (executionMetadata.agentName default).
+GENERATION_AGENT_NAME = "test-body-agent"
 
 # ── Per-target lifecycle states (manifest.targets[id].status) ──────────────────
 PENDING = "PENDING"
@@ -1046,11 +1065,32 @@ def build_generation_request(
                 "missingSymbols": [],
             },
         },
+        # Optional self-assessment block (schema v2). The model reports how large the
+        # prompt context it received was and what it set out to cover; Python folds
+        # these into the FinOps "AI cost efficiency" indicator in the final report.
+        # Absence never fails the batch — it is advisory telemetry, not a gate.
+        "executionMetadataContract": {
+            "required": False,
+            "rule": "Optionally self-assess your context. If your model exposes its "
+                    "token-window usage, estimate which bucket the prompt fell into; "
+                    "otherwise use 'UNKNOWN'. This powers the run's cost-efficiency "
+                    "report — it never affects acceptance of your tests.",
+            "shape": {
+                "agentName": GENERATION_AGENT_NAME,
+                "promptContextSizeEstimate": "|".join(PROMPT_CONTEXT_SIZE_BUCKETS),
+                "generationIntent": "<one short line: what these tests aim to cover>",
+            },
+        },
         "expectedResponse": {
             "schemaVersion": SCHEMA_GENERATION_RESPONSE,
             "runId": run_id,
             "batchId": batch_id,
             "role": "generation",
+            "executionMetadata": {
+                "agentName": GENERATION_AGENT_NAME,
+                "promptContextSizeEstimate": PROMPT_CONTEXT_SIZE_BUCKETS[0],
+                "generationIntent": "",
+            },
             "targets": [
                 {"targetId": t["targetId"],
                  "status": "generated|skipped|failed|NEED_MORE_CONTEXT",
@@ -1254,17 +1294,20 @@ def validate_generation_envelope(resp: dict, *, batch_id: str) -> list[dict]:
     These are the ONLY breaches that may abort the whole batch in the hydration flow:
     a malformed/foreign response wrapper the runner cannot trust at all —
       * ``resp`` is a JSON object,
-      * schemaVersion / role / batchId match the request,
-      * ``targets`` is a list.
+      * schemaVersion is an accepted generation tag (v1 or v2),
+      * role / batchId match the request,
+      * ``targets`` is a list,
+      * ``executionMetadata`` — if present — is an object (its fields are advisory).
 
     Everything per-target (unknown/duplicate targetId, status, methods, descriptor) is
     decided by hydrate_generation_response WITHOUT aborting the batch. Keeping the
     envelope separate is what lets a single bad target fail only itself."""
     if not isinstance(resp, dict):
         raise BatchResponseError("response is not a JSON object")
-    if resp.get("schemaVersion") != SCHEMA_GENERATION_RESPONSE:
+    if resp.get("schemaVersion") not in SCHEMA_GENERATION_RESPONSE_ACCEPTED:
         raise BatchResponseError(
-            f"schemaVersion must be {SCHEMA_GENERATION_RESPONSE!r}, got {resp.get('schemaVersion')!r}")
+            f"schemaVersion must be one of {sorted(SCHEMA_GENERATION_RESPONSE_ACCEPTED)}, "
+            f"got {resp.get('schemaVersion')!r}")
     if resp.get("role") != "generation":
         raise BatchResponseError(f"role must be 'generation', got {resp.get('role')!r}")
     if resp.get("batchId") != batch_id:
@@ -1272,7 +1315,33 @@ def validate_generation_envelope(resp: dict, *, batch_id: str) -> list[dict]:
     targets = resp.get("targets")
     if not isinstance(targets, list):
         raise BatchResponseError("targets must be a list")
+    # executionMetadata is OPTIONAL (schema v2). A present-but-malformed block is the
+    # only metadata breach worth flagging at the envelope level; missing/partial is fine.
+    meta = resp.get("executionMetadata")
+    if meta is not None and not isinstance(meta, dict):
+        raise BatchResponseError("executionMetadata, when present, must be an object")
     return targets
+
+
+def extract_execution_metadata(resp: Any) -> dict:
+    """Normalize the optional ``executionMetadata`` self-assessment from a response.
+
+    Tolerant by design (advisory telemetry): always returns a dict with the three
+    known keys, coercing missing/typed-wrong values to safe defaults. Feeds the
+    FinOps "AI cost efficiency" indicator in the final report."""
+    meta = resp.get("executionMetadata") if isinstance(resp, dict) else None
+    if not isinstance(meta, dict):
+        meta = {}
+    bucket = meta.get("promptContextSizeEstimate")
+    if bucket not in PROMPT_CONTEXT_SIZE_BUCKETS:
+        bucket = "UNKNOWN"
+    agent = meta.get("agentName")
+    intent = meta.get("generationIntent")
+    return {
+        "agentName": agent if isinstance(agent, str) and agent.strip() else GENERATION_AGENT_NAME,
+        "promptContextSizeEstimate": bucket,
+        "generationIntent": intent if isinstance(intent, str) else "",
+    }
 
 
 def validate_generation_response(resp: dict, batch_targets: list[dict], *, batch_id: str) -> list[dict]:

@@ -165,6 +165,60 @@ def case_prompt_template_and_validator_share_targets_container() -> None:
         _assert("validator rejects legacy 'items' envelope", True)
 
 
+def case_execution_metadata_v2_contract() -> None:
+    # Schema v2: the prompt advertises an optional executionMetadata self-assessment;
+    # the validator accepts v1 and v2, validates the block's shape only when present,
+    # and never aborts a batch for a missing/partial block.
+    targets = bp.select_batch(_plan(1), set(), 10)
+    req = bp.build_generation_request("run-1", "batch-001", targets, batch_size=10)
+    _assert("prompt emits schema v2", req["expectedResponse"]["schemaVersion"]
+            == "test-generation-batch-response-v2",
+            req["expectedResponse"]["schemaVersion"])
+    _assert("expectedResponse carries executionMetadata",
+            "executionMetadata" in req["expectedResponse"])
+    _assert("request documents the executionMetadata contract",
+            "executionMetadataContract" in req)
+
+    base = {"role": "generation", "batchId": "batch-001", "targets": []}
+    # v2 accepted
+    bp.validate_generation_envelope(
+        {"schemaVersion": "test-generation-batch-response-v2", **base}, batch_id="batch-001")
+    # v1 still accepted (a model/old run echoing v1 must not abort)
+    bp.validate_generation_envelope(
+        {"schemaVersion": "test-generation-batch-response-v1", **base}, batch_id="batch-001")
+    # unknown schema rejected
+    try:
+        bp.validate_generation_envelope(
+            {"schemaVersion": "bogus-v9", **base}, batch_id="batch-001")
+        _assert("unknown schema rejected", False, "should have raised")
+    except bp.BatchResponseError:
+        _assert("unknown schema rejected", True)
+
+    # executionMetadata present + well-formed → accepted; missing → accepted.
+    with_meta = {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, **base,
+                 "executionMetadata": {"agentName": "test-body-agent",
+                                       "promptContextSizeEstimate": "COMPACT_PACK_UNDER_10K",
+                                       "generationIntent": "x"}}
+    bp.validate_generation_envelope(with_meta, batch_id="batch-001")
+    bp.validate_generation_envelope({"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, **base},
+                                    batch_id="batch-001")
+    # present-but-not-an-object → rejected (only metadata breach worth aborting on).
+    try:
+        bp.validate_generation_envelope(
+            {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, **base, "executionMetadata": "nope"},
+            batch_id="batch-001")
+        _assert("malformed executionMetadata rejected", False, "should have raised")
+    except bp.BatchResponseError:
+        _assert("malformed executionMetadata rejected", True)
+
+    # extract_execution_metadata coerces unknown bucket → UNKNOWN, fills defaults.
+    norm = bp.extract_execution_metadata({"executionMetadata": {"promptContextSizeEstimate": "??"}})
+    _assert("unknown bucket coerced", norm["promptContextSizeEstimate"] == "UNKNOWN", norm)
+    _assert("agentName defaulted", norm["agentName"] == bp.GENERATION_AGENT_NAME, norm)
+    norm2 = bp.extract_execution_metadata({})
+    _assert("absent metadata → UNKNOWN", norm2["promptContextSizeEstimate"] == "UNKNOWN", norm2)
+
+
 def case_rules_do_not_reference_patch_descriptor_dotpath() -> None:
     # No generation rule may still tell the model to build patchDescriptor.<field>
     # (that contradicts "do not return patchDescriptor").

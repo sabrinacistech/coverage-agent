@@ -591,20 +591,38 @@ def _looks_like_method(header: str) -> bool:
     return bool(_METHOD_HEADER_TAIL.search(h))
 
 
+def _looks_like_constant(decl: str) -> bool:
+    """True for a ``static final`` field declaration WITH an initializer, e.g.
+    ``private static final int MAX_LEN = 200``. These carry behaviour the bodies
+    reference by name (truncation limits, sentinels, format strings); without the
+    value the generator cannot derive the boundary tests. Declarations containing a
+    ``{`` (array/collection initializers) are rejected here — they are captured by
+    the brace scanner as nested blocks, not as simple ``;``-terminated members."""
+    d = decl.strip()
+    if "=" not in d or "{" in d:
+        return False
+    head = d.split("=", 1)[0]
+    if "(" in head:  # a method signature default, not a field
+        return False
+    words = head.split()
+    return "static" in words and "final" in words
+
+
 def _extract_method_bodies(source: str, sut: str) -> str:
-    """Project ONLY the method & constructor bodies (with their signature as an
-    anchor) out of a Java source. Package/imports/class declaration/field
-    declarations are dropped on purpose — they are already carried by the other
-    request fields (allowedImports, evidenceRefs, constructors/methods,
+    """Project the method & constructor bodies (with their signature as an anchor)
+    plus any ``static final`` constants out of a Java source. Package/imports/class
+    declaration/instance fields are dropped on purpose — they are already carried by
+    the other request fields (allowedImports, evidenceRefs, constructors/methods,
     dependencySignatures). What is NOT anywhere else is the behaviour inside the
-    bodies, which is what the generator needs to derive expected outputs and
-    branch coverage.
+    bodies (to derive expected outputs and branch coverage) and the VALUE of the
+    constants those bodies branch on (e.g. a truncation ``MAX_LEN``).
 
     Implemented with a brace-matching scan at class-body depth (depth 1), so it
     is robust to nested control flow, strings and comments. Returns "" when the
-    SUT has no method bodies (e.g. a pure-field DTO or an abstract interface)."""
+    SUT has no method bodies nor constants (e.g. a pure-field DTO or interface)."""
     code = _JAVA_LINE_COMMENT.sub("", _JAVA_BLOCK_COMMENT.sub("", source))
     blocks: list[str] = []
+    constants: list[str] = []
     i, n = 0, len(code)
     depth = 0
     member_start = 0
@@ -643,15 +661,24 @@ def _extract_method_bodies(source: str, sut: str) -> str:
                 member_start = i + 1
             i += 1; continue
         if c == ";" and depth == 1:
+            decl = code[member_start:i]
+            if _looks_like_constant(decl):
+                constants.append(decl.strip() + ";")
             member_start = i + 1
             i += 1; continue
         i += 1
-    if not blocks:
+    if not blocks and not constants:
         return ""
-    # Concise marker only (the selfContainedPolicy already explains that this
-    # field is bodies-only); a long banner would dwarf a tiny SUT's actual code.
+    # Concise markers only (the selfContainedPolicy already explains that this field
+    # is a projection); a long banner would dwarf a tiny SUT's actual code.
     simple = sut.rsplit(".", 1)[-1]
-    return f"// {simple}: method/constructor bodies\n\n" + "\n\n".join(b.strip() for b in blocks)
+    out: list[str] = []
+    if constants:
+        out.append(f"// {simple}: constants\n" + "\n".join(constants))
+    if blocks:
+        out.append(f"// {simple}: method/constructor bodies\n\n"
+                   + "\n\n".join(b.strip() for b in blocks))
+    return "\n\n".join(out)
 
 
 def _read_sut_source(repo: Path | None, sut: str) -> tuple[str, bool]:

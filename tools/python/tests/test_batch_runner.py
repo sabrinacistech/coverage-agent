@@ -539,9 +539,36 @@ def case_validation_counts_preserve_compile() -> None:
     _assert("G empty counts has compile", "compile" in br._empty_validation_counts())
 
 
+def case_sut_source_projects_static_final_constants() -> None:
+    # A method that branches on a `static final` constant needs that constant's
+    # VALUE in the hermetic payload — otherwise the boundary test is ungeneratable.
+    src = (
+        "package com.acme;\n"
+        "public final class LogSanitizer {\n"
+        "    private static final int MAX_LEN = 200;\n"
+        "    private LogSanitizer() {}\n"
+        "    public static String sanitizeForLog(String in) {\n"
+        "        if (in == null) return \"\";\n"
+        "        if (in.length() > MAX_LEN) { return in.substring(0, MAX_LEN); }\n"
+        "        return in;\n"
+        "    }\n"
+        "}\n"
+    )
+    proj = br._extract_method_bodies(src, "com.acme.LogSanitizer")
+    _assert("constant value projected", "MAX_LEN = 200;" in proj, proj)
+    _assert("method body still projected", "sanitizeForLog" in proj, proj)
+    # An array/collection initializer must NOT be mis-captured nor break the scan.
+    src2 = ("class A {\n  static final int[] X = {1, 2, 3};\n"
+            "  int f() { return X.length; }\n}\n")
+    proj2 = br._extract_method_bodies(src2, "p.A")
+    _assert("array const skipped, body kept", "return X.length" in proj2, proj2)
+    _assert("array initializer not leaked as constant", "{1, 2, 3}" not in proj2, proj2)
+
+
 def main() -> int:
     cases = [
         case_all_pass, case_repaired_round1, case_abandoned_after_rounds,
+        case_sut_source_projects_static_final_constants,
         case_skipped_not_fatal, case_repair_payload_uses_canonical_test_class,
         case_runner_enriches_target_method_evidence,
         case_runner_marks_unevidenced_target_method,

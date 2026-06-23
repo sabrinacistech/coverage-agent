@@ -171,8 +171,11 @@ C:\repoVC\coverage_cluster-status-service\_llm\runs\run-YYYYMMDD-HHMMSS\batches\
 
 Reglas:
 - La respuesta debe ser SOLO JSON válido.
-- Debe tener schemaVersion "test-generation-batch-response-v1".
+- Debe tener schemaVersion "test-generation-batch-response-v2".
 - Debe incluir un target en la respuesta por cada target del request.
+- Opcional: incluí un bloque "executionMetadata" (agentName, promptContextSizeEstimate,
+  generationIntent) con tu autoevaluación de contexto. Es telemetría para el reporte de
+  eficiencia de costos; su ausencia nunca falla el batch.
 - NO devuelvas patchDescriptor ni testSource: el runner construye el
   patchDescriptor canónico desde el target. Por target devolvé SOLO:
   - status "generated" con methods[] (cada método: name, annotations, body, evidenceIds), o
@@ -216,10 +219,15 @@ Ejemplo minimo de shape (completion mínima; el runner hidrata el patchDescripto
 adaptando valores y evidenceIds al request real:
 
 {
-  "schemaVersion": "test-generation-batch-response-v1",
+  "schemaVersion": "test-generation-batch-response-v2",
   "runId": "run-YYYYMMDD-HHMMSS",
   "batchId": "batch-001",
   "role": "generation",
+  "executionMetadata": {
+    "agentName": "test-body-agent",
+    "promptContextSizeEstimate": "COMPACT_PACK_UNDER_10K",
+    "generationIntent": "Cluster validation and happy path coverage"
+  },
   "targets": [
     {
       "targetId": "tgt:0001",

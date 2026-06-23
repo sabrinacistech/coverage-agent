@@ -256,10 +256,15 @@ esperado. Ejemplo de `response-generation.json` (formato nuevo):
 
 ```json
 {
-  "schemaVersion": "test-generation-batch-response-v1",
+  "schemaVersion": "test-generation-batch-response-v2",
   "runId": "run-...",
   "batchId": "batch-001",
   "role": "generation",
+  "executionMetadata": {
+    "agentName": "test-body-agent",
+    "promptContextSizeEstimate": "COMPACT_PACK_UNDER_10K",
+    "generationIntent": "Cluster validation and happy path coverage"
+  },
   "targets": [
     {
       "targetId": "tgt:0001",
@@ -276,6 +281,12 @@ esperado. Ejemplo de `response-generation.json` (formato nuevo):
   ]
 }
 ```
+
+El bloque `executionMetadata` (schema **v2**, opcional) es la **autoevaluación de
+contexto** del agente: `agentName`, `promptContextSizeEstimate` (uno de
+`COMPACT_PACK_UNDER_10K` / `PACK_10K_50K` / `PACK_OVER_50K` / `UNKNOWN`) y
+`generationIntent`. Es telemetría que alimenta el indicador **AI Cost Efficiency**
+del reporte final; el validador acepta v1 y v2, y su ausencia nunca falla el batch.
 
 `patchDescriptor` que Python hidrata para ese target (lo que llega al patcher):
 

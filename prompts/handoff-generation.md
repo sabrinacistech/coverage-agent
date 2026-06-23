@@ -54,6 +54,17 @@ escribir el test ya está dentro de ese JSON. Cada target trae `sutSourceCode`
 La respuesta debe cumplir `schemaVersion` **"${SCHEMA_VERSION}"** y contener un array
 de resultados mapeado **uno a uno** con los `targets` del request.
 
+### Autoevaluación de contexto (`executionMetadata`, opcional)
+Incluí un bloque `executionMetadata` con tu **autoevaluación del contexto** que recibiste.
+Esto alimenta el indicador de *eficiencia de costos de IA* del reporte final y **nunca**
+afecta la aceptación de tus tests (es telemetría, no un gate):
+
+* `agentName`: `"test-body-agent"`.
+* `promptContextSizeEstimate`: estimá en qué bucket cayó el prompt que recibiste, según
+  el uso de tu ventana de tokens. Valores válidos: `COMPACT_PACK_UNDER_10K` (objetivo de
+  diseño), `PACK_10K_50K`, `PACK_OVER_50K`, o `UNKNOWN` si tu modelo no expone ese dato.
+* `generationIntent`: una línea breve sobre qué buscan cubrir estos tests.
+
 ### Matriz de estados por target
 Asigná a cada target uno de estos 4 estados:
 
@@ -76,6 +87,11 @@ Asigná a cada target uno de estos 4 estados:
   "runId": "${RUN_ID}",
   "batchId": "${BATCH_ID}",
   "role": "generation",
+  "executionMetadata": {
+    "agentName": "test-body-agent",
+    "promptContextSizeEstimate": "COMPACT_PACK_UNDER_10K",
+    "generationIntent": "Cluster validation and happy path coverage"
+  },
   "targets": [
     {
       "targetId": "ID_DEL_TARGET_1",

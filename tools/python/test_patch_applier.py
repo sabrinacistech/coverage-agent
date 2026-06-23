@@ -327,6 +327,26 @@ def _resolve_test_file(patch: dict, repo: Path) -> Path:
 
 # ── Template loading ──────────────────────────────────────────────────────────
 
+def _strip_template_doc_header(text: str) -> str:
+    """Drop the template's own ``// Deterministic template … / // Placeholders: …``
+    documentation header so it never ships inside the generated test file.
+
+    Only the leading run of ``//`` comment / blank lines is removed, and only up to
+    the first real code line (``package``/``import``/``class``/annotation). A license
+    header would be preserved as soon as a non-``//`` token appears — but our
+    templates start straight with the scaffolding banner, which is editor-facing
+    noise, not test code."""
+    lines = text.splitlines(keepends=True)
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if stripped == "" or stripped.startswith("//"):
+            i += 1
+            continue
+        break
+    return "".join(lines[i:])
+
+
 def _load_template(name: str, templates_dir: Path) -> str:
     for candidate in (
         templates_dir / f"{name}.java",
@@ -334,7 +354,7 @@ def _load_template(name: str, templates_dir: Path) -> str:
         templates_dir / "junit5-mockito.java",
     ):
         if candidate.exists():
-            return candidate.read_text(encoding="utf-8")
+            return _strip_template_doc_header(candidate.read_text(encoding="utf-8"))
     raise FileNotFoundError(
         f"Template '{name}' not found in {templates_dir}. "
         "Expected file: <name>.java or <name>.java.tpl"
