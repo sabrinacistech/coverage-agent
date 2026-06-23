@@ -115,8 +115,8 @@ def case_need_more_context_valid_in_generation() -> None:
     targets = [_target()]
     resp = {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
             "batchId": "batch-001", "role": "generation",
-            "items": [{"targetId": "com.acme.C0#m", "status": "NEED_MORE_CONTEXT",
-                       "missingSymbols": ["com.acme.Dep#build"], "reason": "no Dep ctor"}]}
+            "targets": [{"targetId": "com.acme.C0#m", "status": "NEED_MORE_CONTEXT",
+                         "missingSymbols": ["com.acme.Dep#build"], "reason": "no Dep ctor"}]}
     try:
         items = bp.validate_generation_response(resp, targets, batch_id="batch-001")
         _assert("NEED_MORE_CONTEXT accepted in generation", len(items) == 1)
@@ -127,8 +127,8 @@ def case_need_more_context_valid_in_generation() -> None:
 def case_need_more_context_valid_in_repair() -> None:
     resp = {"schemaVersion": bp.SCHEMA_REPAIR_RESPONSE, "runId": "run-1",
             "batchId": "batch-001", "role": "repair", "repairRound": 1,
-            "items": [{"targetId": "com.acme.C0#m", "status": "need_more_context",
-                       "missingSymbols": [], "reason": "x"}]}
+            "targets": [{"targetId": "com.acme.C0#m", "status": "need_more_context",
+                         "missingSymbols": [], "reason": "x"}]}
     try:
         bp.validate_repair_response(resp, {"com.acme.C0#m"}, batch_id="batch-001",
                                     repair_round=1, requested_items=[{"targetId": "com.acme.C0#m"}])
@@ -303,8 +303,8 @@ def case_preflight_skip_persisted() -> None:
             state = _setup(root, {"com.acme.C0": _pack_with_evidence("com.acme.C0"),
                                   "com.acme.C1": _pack_no_evidence("com.acme.C1")})
             gen = {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "r", "batchId": "batch-001",
-                   "role": "generation", "items": [{"targetId": "com.acme.C0#m", "status": "generated",
-                                                     "patchDescriptor": _patch("com.acme.C0")}]}
+                   "role": "generation", "targets": [{"targetId": "com.acme.C0#m", "status": "generated",
+                                                       "patchDescriptor": _patch("com.acme.C0")}]}
             br._apply_patch = lambda patch, *, state_dir, repo, repair_attempts=None: 0  # type: ignore
             br._run_tests = lambda repo, state_dir, tcs: 0  # type: ignore
             br.one_cycle._run_tool = lambda script, args: 0  # type: ignore
@@ -338,9 +338,9 @@ def case_need_more_context_skips_target() -> None:
             root = Path(td)
             state = _setup(root, {"com.acme.C0": _pack_with_evidence("com.acme.C0")})
             gen = {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "r", "batchId": "batch-001",
-                   "role": "generation", "items": [{"targetId": "com.acme.C0#m",
-                                                     "status": "NEED_MORE_CONTEXT",
-                                                     "missingSymbols": ["com.acme.Dep"], "reason": "no Dep"}]}
+                   "role": "generation", "targets": [{"targetId": "com.acme.C0#m",
+                                                       "status": "NEED_MORE_CONTEXT",
+                                                       "missingSymbols": ["com.acme.Dep"], "reason": "no Dep"}]}
             br._apply_patch = lambda *a, **k: 0  # type: ignore
             br._run_tests = lambda *a, **k: 0  # type: ignore
             br.one_cycle._run_tool = lambda script, args: 0  # type: ignore
@@ -361,8 +361,8 @@ def case_repair_loop_stops_without_diagnostics() -> None:
             root = Path(td)
             state = _setup(root, {"com.acme.C0": _pack_with_evidence("com.acme.C0")})
             gen = {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "r", "batchId": "batch-001",
-                   "role": "generation", "items": [{"targetId": "com.acme.C0#m", "status": "generated",
-                                                     "patchDescriptor": _patch("com.acme.C0")}]}
+                   "role": "generation", "targets": [{"targetId": "com.acme.C0#m", "status": "generated",
+                                                       "patchDescriptor": _patch("com.acme.C0")}]}
             calls = {"repair_waits": 0}
 
             def fake_wait(request, response, *, state_path, manifest, kind, batch_id, repair_round=None):
@@ -394,12 +394,12 @@ def case_repair_loop_stops_on_no_progress() -> None:
             root = Path(td)
             state = _setup(root, {"com.acme.C0": _pack_with_evidence("com.acme.C0")})
             gen = {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "r", "batchId": "batch-001",
-                   "role": "generation", "items": [{"targetId": "com.acme.C0#m", "status": "generated",
-                                                     "patchDescriptor": _patch("com.acme.C0")}]}
+                   "role": "generation", "targets": [{"targetId": "com.acme.C0#m", "status": "generated",
+                                                       "patchDescriptor": _patch("com.acme.C0")}]}
             # Model skips the repair (re-applies nothing) → NO_PROGRESS after the round.
             rep = {"schemaVersion": bp.SCHEMA_REPAIR_RESPONSE, "runId": "r", "batchId": "batch-001",
                    "role": "repair", "repairRound": 1,
-                   "items": [{"targetId": "com.acme.C0#m", "status": "skipped", "reason": "stub"}]}
+                   "targets": [{"targetId": "com.acme.C0#m", "status": "skipped", "reason": "stub"}]}
             waits = {"repair": 0}
 
             def fake_wait(request, response, *, state_path, manifest, kind, batch_id, repair_round=None):
@@ -787,8 +787,8 @@ def case_fixture_compliance_warnings_in_validation_result() -> None:
                 "org.junit.jupiter.api.Assertions.assertSame(v, a);")
             gen = {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "r",
                    "batchId": "batch-001", "role": "generation",
-                   "items": [{"targetId": "com.acme.C0#m", "status": "generated",
-                              "patchDescriptor": patch}]}
+                   "targets": [{"targetId": "com.acme.C0#m", "status": "generated",
+                                "patchDescriptor": patch}]}
             br._apply_patch = lambda patch, *, state_dir, repo, repair_attempts=None: 0  # type: ignore
             br._run_tests = lambda repo, state_dir, tcs: 0  # type: ignore
             br.one_cycle._run_tool = lambda script, args: 0  # type: ignore
@@ -1041,10 +1041,10 @@ def case_all_need_more_context_batch_continues() -> None:
                                   "com.acme.C1": _pack_with_evidence("com.acme.C1")})
             gen = {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "r",
                    "batchId": "batch-001", "role": "generation",
-                   "items": [{"targetId": "com.acme.C0#m", "status": "NEED_MORE_CONTEXT",
-                              "missingSymbols": ["com.acme.Dep"], "reason": "no Dep"},
-                             {"targetId": "com.acme.C1#m", "status": "NEED_MORE_CONTEXT",
-                              "missingSymbols": ["com.acme.Dep"], "reason": "no Dep"}]}
+                   "targets": [{"targetId": "com.acme.C0#m", "status": "NEED_MORE_CONTEXT",
+                                "missingSymbols": ["com.acme.Dep"], "reason": "no Dep"},
+                               {"targetId": "com.acme.C1#m", "status": "NEED_MORE_CONTEXT",
+                                "missingSymbols": ["com.acme.Dep"], "reason": "no Dep"}]}
             br._apply_patch = lambda *a, **k: 0  # type: ignore
             br._run_tests = lambda *a, **k: 0  # type: ignore
             br.one_cycle._run_tool = lambda script, args: 0  # type: ignore

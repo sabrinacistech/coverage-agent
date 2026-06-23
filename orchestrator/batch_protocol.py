@@ -198,7 +198,7 @@ SELF_CONTAINED_RULE = (
     "rejection (e.g. G2 orphan evidence) in failedItem.patcherErrorDetails. "
     "Treat these fields as the single source "
     "of truth. If a fact is not present in this JSON, it does not exist for you — "
-    "skip/abandon the item instead of reading the repository."
+    "skip/abandon the target instead of reading the repository."
 )
 
 GENERATION_RULES = [
@@ -222,7 +222,7 @@ GENERATION_RULES = [
     "builds the canonical patchDescriptor (test class, package, imports, patchId) "
     "from the target — never set or override the test class, package or imports "
     "yourself. The canonical test class is target.canonicalTestClass.",
-    "Return methods ONLY for items with status 'generated'. Each method is "
+    "Return methods ONLY for targets with status 'generated'. Each method is "
     "{name, annotations, body, evidenceIds}; annotations default to [\"@Test\"].",
     "Use ONLY symbols whose imports are in target.allowedImports in your method "
     "bodies and annotations. Do not use DisplayName, Autowired, SpringBootTest, "
@@ -293,13 +293,13 @@ REPAIR_RULES = [
     "SpringBootTest, Spring injection annotations, or domain exceptions unless "
     "they are explicitly listed in failedItem.allowedImports.",
     "Use ONLY failedItem.allowedEvidenceIds in every method.evidenceIds. If no "
-    "allowedEvidenceIds justify a repair, mark that item abandoned with a reason.",
+    "allowedEvidenceIds justify a repair, mark that target abandoned with a reason.",
     "The repaired Java body may call methods on the SUT only when those method "
     "names are listed in failedItem.evidenceRefs with kind='method'. Constructors "
     "alone do not authorize unevidenced SUT getters/methods.",
     "When failedItem.targetEvidenceRequired is true, every repaired test method "
     "MUST include at least one id from failedItem.targetEvidenceIds. If that list "
-    "is empty, abandon the item instead of repairing with invented symbols.",
+    "is empty, abandon the target instead of repairing with invented symbols.",
     *QUALITY_GATE_RULES,
 ]
 
@@ -760,7 +760,7 @@ def _evidence_policy(allowed_evidence_ids: list[str] | None) -> dict:
             "Do not cite evidenceIds not listed in this request.",
             "Do not use symbols, constructors, methods, exceptions, constants, or assertions without evidence.",
             "When targetEvidenceRequired is true, cite targetEvidenceIds in every generated/repaired method.",
-            "If evidence is insufficient, skip/abandon the item instead of guessing.",
+            "If evidence is insufficient, skip/abandon the target instead of guessing.",
         ],
     }
 
@@ -816,7 +816,7 @@ def _validate_sut_method_calls(
                     f"{target_id!r} patchDescriptor.methods[{method_index}].body "
                     f"calls {var}.{method_name}(), but {method_name!r} is not present "
                     "in evidenceRefs. Cite evidence for the method or skip/abandon "
-                    "the item instead of using unevidenced SUT symbols."
+                    "the target instead of using unevidenced SUT symbols."
                 )
 
 
@@ -1033,7 +1033,7 @@ def build_generation_request(
             "rule": "Do not return patchDescriptor. Do not return testSource. Return "
                     "only status, methods, reason and missingSymbols. The runner "
                     "builds the canonical patchDescriptor.",
-            "itemShape": {
+            "targetShape": {
                 "targetId": "<targetId>",
                 "status": "generated|skipped|failed|NEED_MORE_CONTEXT",
                 "methods": [
@@ -1051,7 +1051,7 @@ def build_generation_request(
             "runId": run_id,
             "batchId": batch_id,
             "role": "generation",
-            "items": [
+            "targets": [
                 {"targetId": t["targetId"],
                  "status": "generated|skipped|failed|NEED_MORE_CONTEXT",
                  "methods": [], "reason": "", "missingSymbols": []}
@@ -1188,7 +1188,7 @@ def _validate_patch_descriptor(
         if target_evidence_required and not required_target_evidence:
             raise BatchResponseError(
                 f"{target_id!r} requires target method evidence but targetEvidenceIds is empty. "
-                "Skip/fail the item instead of generating code for an unevidenced method."
+                "Skip/fail the target instead of generating code for an unevidenced method."
             )
         for idx, method in enumerate(methods):
             if not isinstance(method, dict):
@@ -1249,17 +1249,17 @@ def _validate_patch_descriptor(
 
 
 def validate_generation_envelope(resp: dict, *, batch_id: str) -> list[dict]:
-    """Validate ONLY the response envelope (the batch-level contract), returning items.
+    """Validate ONLY the response envelope (the batch-level contract), returning targets.
 
     These are the ONLY breaches that may abort the whole batch in the hydration flow:
     a malformed/foreign response wrapper the runner cannot trust at all —
       * ``resp`` is a JSON object,
       * schemaVersion / role / batchId match the request,
-      * ``items`` is a list.
+      * ``targets`` is a list.
 
-    Everything per-item (unknown/duplicate targetId, status, methods, descriptor) is
+    Everything per-target (unknown/duplicate targetId, status, methods, descriptor) is
     decided by hydrate_generation_response WITHOUT aborting the batch. Keeping the
-    envelope separate is what lets a single bad item fail only itself."""
+    envelope separate is what lets a single bad target fail only itself."""
     if not isinstance(resp, dict):
         raise BatchResponseError("response is not a JSON object")
     if resp.get("schemaVersion") != SCHEMA_GENERATION_RESPONSE:
@@ -1269,10 +1269,10 @@ def validate_generation_envelope(resp: dict, *, batch_id: str) -> list[dict]:
         raise BatchResponseError(f"role must be 'generation', got {resp.get('role')!r}")
     if resp.get("batchId") != batch_id:
         raise BatchResponseError(f"batchId mismatch: expected {batch_id!r}, got {resp.get('batchId')!r}")
-    items = resp.get("items")
-    if not isinstance(items, list):
-        raise BatchResponseError("items must be a list")
-    return items
+    targets = resp.get("targets")
+    if not isinstance(targets, list):
+        raise BatchResponseError("targets must be a list")
+    return targets
 
 
 def validate_generation_response(resp: dict, batch_targets: list[dict], *, batch_id: str) -> list[dict]:
@@ -1298,7 +1298,7 @@ def validate_generation_response(resp: dict, batch_targets: list[dict], *, batch
     known = set(target_by_id)
     for it in items:
         if not isinstance(it, dict):
-            raise BatchResponseError("each item must be an object")
+            raise BatchResponseError("each target must be an object")
         tid = it.get("targetId")
         if tid not in known:
             raise BatchResponseError(f"unknown targetId not in this batch: {tid!r}")
@@ -1309,7 +1309,7 @@ def validate_generation_response(resp: dict, batch_targets: list[dict], *, batch
         if _is_needs_context(status):
             continue
         if status not in _GEN_ITEM_STATUSES:
-            raise BatchResponseError(f"invalid item status {status!r} for {tid!r}")
+            raise BatchResponseError(f"invalid target status {status!r} for {tid!r}")
         if status == "generated":
             target = target_by_id.get(tid, {})
             sut = target.get("sut") or None
@@ -1452,9 +1452,9 @@ def hydrate_generation_response(request: dict, response: dict) -> dict:
     targets = request.get("targets")
     if not isinstance(targets, list):
         raise BatchResponseError("request.targets must be a list")
-    resp_items = response.get("items")
+    resp_items = response.get("targets")
     if not isinstance(resp_items, list):
-        raise BatchResponseError("response.items must be a list")
+        raise BatchResponseError("response.targets must be a list")
 
     target_by_id = {t.get("targetId"): t for t in targets if isinstance(t, dict)}
     counts = {"received": 0, "generatedValid": 0, "generatedInvalid": 0,
@@ -1468,7 +1468,7 @@ def hydrate_generation_response(request: dict, response: dict) -> dict:
         counts["received"] += 1
         if not isinstance(raw, dict):
             diagnostics.append({"targetId": None, "reason": HYDRATION_COMPLETION_SCHEMA_ERROR,
-                                "message": "response item is not an object"})
+                                "message": "response target is not an object"})
             continue
         tid = raw.get("targetId")
         if tid not in target_by_id:
@@ -1516,7 +1516,7 @@ def hydrate_generation_response(request: dict, response: dict) -> dict:
         if status != "generated":
             counts["generatedInvalid"] += 1
             diagnostics.append({"targetId": tid, "reason": HYDRATION_COMPLETION_SCHEMA_ERROR,
-                                "message": f"invalid item status {status!r}"})
+                                "message": f"invalid target status {status!r}"})
             items.append({"targetId": tid, "status": "failed",
                           "reason": HYDRATION_COMPLETION_SCHEMA_ERROR, "missingSymbols": []})
             continue
@@ -1526,7 +1526,7 @@ def hydrate_generation_response(request: dict, response: dict) -> dict:
         if not isinstance(methods, list) or not methods:
             counts["generatedInvalid"] += 1
             diagnostics.append({"targetId": tid, "reason": HYDRATION_MISSING_METHODS,
-                                "message": "generated item has no methods to hydrate"})
+                                "message": "generated target has no methods to hydrate"})
             items.append({"targetId": tid, "status": "failed",
                           "reason": HYDRATION_MISSING_METHODS, "missingSymbols": []})
             continue
@@ -1562,7 +1562,7 @@ def hydrate_generation_response(request: dict, response: dict) -> dict:
         items.append({"targetId": tid, "status": "generated",
                       "patchDescriptor": patch, "reason": "", "missingSymbols": []})
 
-    return {"items": items, "diagnostics": diagnostics, "counts": counts}
+    return {"targets": items, "diagnostics": diagnostics, "counts": counts}
 
 
 # ── Repair request envelope ──────────────────────────────────────────────────────
@@ -1601,7 +1601,7 @@ def build_repair_request(
         "missingContextPolicy": {
             "allowedStatus": "NEED_MORE_CONTEXT",
             "rule": "If repairing the test requires a symbol not present in this "
-                    "request, answer NEED_MORE_CONTEXT (or abandon the item); never "
+                    "request, answer NEED_MORE_CONTEXT (or abandon the target); never "
                     "invent symbols or read the repository.",
             "responseShape": {"status": "NEED_MORE_CONTEXT", "missingSymbols": [], "reason": ""},
         },
@@ -1624,7 +1624,7 @@ def build_repair_request(
                     "'org.springframework.*'); those are rejected as "
                     "IMPORT_PKG_NOT_WHITELISTED (G6_LINTER_FAIL). The runner rebuilds "
                     "schemaVersion/patchId/sut/testClass/testPackage/allowedImports "
-                    "from the failed item, so do not invent or omit them; only the "
+                    "from the failed target, so do not invent or omit them; only the "
                     "method bodies need to change.",
             "forbiddenByDefault": list(_COMMON_FORBIDDEN_IMPORTS),
             "noWildcardImports": True,
@@ -1645,7 +1645,7 @@ def build_repair_request(
             "batchId": batch_id,
             "role": "repair",
             "repairRound": repair_round,
-            "items": [
+            "targets": [
                 {"targetId": f.get("targetId"),
                  "status": "repaired|skipped|abandoned|failed|NEED_MORE_CONTEXT",
                  "patchDescriptor": {}, "missingSymbols": [], "reason": ""}
@@ -1733,16 +1733,16 @@ def validate_repair_response(
         raise BatchResponseError(f"role must be 'repair', got {resp.get('role')!r}")
     if resp.get("batchId") != batch_id:
         raise BatchResponseError(f"batchId mismatch: expected {batch_id!r}, got {resp.get('batchId')!r}")
-    items = resp.get("items")
+    items = resp.get("targets")
     if not isinstance(items, list):
-        raise BatchResponseError("items must be a list")
+        raise BatchResponseError("targets must be a list")
     requested_by_id = {i.get("targetId"): i for i in (requested_items or [])}
     for it in items:
         if not isinstance(it, dict):
-            raise BatchResponseError("each item must be an object")
+            raise BatchResponseError("each target must be an object")
         tid = it.get("targetId")
         if tid not in requested_ids:
-            raise BatchResponseError(f"repair item for a target not requested: {tid!r}")
+            raise BatchResponseError(f"repair target not requested: {tid!r}")
         status = it.get("status")
         if _is_needs_context(status):
             continue

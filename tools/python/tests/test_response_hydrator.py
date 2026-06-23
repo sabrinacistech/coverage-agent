@@ -66,7 +66,7 @@ def _request(*targets: dict) -> dict:
 
 
 def _response(*items: dict) -> dict:
-    return {"items": list(items)}
+    return {"targets": list(items)}
 
 
 # ── A. new format: minimal completion → canonical patchDescriptor ────────────────
@@ -78,7 +78,7 @@ def case_a_new_format_hydrates_canonical() -> None:
         _response({"targetId": "tgt:0001", "status": "generated",
                    "methods": [_method()]}),
     )
-    item = out["items"][0]
+    item = out["targets"][0]
     _assert("A status generated", item["status"] == "generated", item["status"])
     pd = item["patchDescriptor"]
     _assert("A schemaVersion==1", pd["schemaVersion"] == 1, repr(pd.get("schemaVersion")))
@@ -100,8 +100,8 @@ def case_f_no_patch_descriptor_required() -> None:
         _request(t),
         _response({"targetId": "tgt:0001", "status": "generated", "methods": [_method()]}),
     )
-    _assert("F no descriptor needed", out["items"][0]["status"] == "generated")
-    _assert("F has hydrated descriptor", "patchDescriptor" in out["items"][0])
+    _assert("F no descriptor needed", out["targets"][0]["status"] == "generated")
+    _assert("F has hydrated descriptor", "patchDescriptor" in out["targets"][0])
 
 
 def case_a_default_test_annotation() -> None:
@@ -111,7 +111,7 @@ def case_a_default_test_annotation() -> None:
     m.pop("annotations")
     out = bp.hydrate_generation_response(
         _request(t), _response({"targetId": "tgt:0001", "status": "generated", "methods": [m]}))
-    pd = out["items"][0]["patchDescriptor"]
+    pd = out["targets"][0]["patchDescriptor"]
     _assert("A default annotation", pd["methods"][0]["annotations"] == ["@Test"],
             repr(pd["methods"][0]["annotations"]))
 
@@ -134,8 +134,8 @@ def case_b_legacy_format_ignores_llm_metadata() -> None:
         },
     }
     out = bp.hydrate_generation_response(_request(t), _response(legacy_item))
-    pd = out["items"][0]["patchDescriptor"]
-    _assert("B status generated", out["items"][0]["status"] == "generated")
+    pd = out["targets"][0]["patchDescriptor"]
+    _assert("B status generated", out["targets"][0]["status"] == "generated")
     _assert("B schemaVersion forced 1", pd["schemaVersion"] == 1, repr(pd["schemaVersion"]))
     _assert("B sut from target not LLM", pd["sut"] == "com.acme.Foo", pd["sut"])
     _assert("B testClass canonical not LLM", pd["testClass"] == "com.acme.FooTest", pd["testClass"])
@@ -164,7 +164,7 @@ def case_c_invalid_item_isolated() -> None:
              "missingSymbols": ["com.acme.C#ctor"], "reason": "no constructor evidence"},
         ),
     )
-    by_id = {it["targetId"]: it for it in out["items"]}
+    by_id = {it["targetId"]: it for it in out["targets"]}
     _assert("C valid applied", by_id["tgt:0001"]["status"] == "generated",
             by_id["tgt:0001"]["status"])
     _assert("C invalid → failed", by_id["tgt:0002"]["status"] == "failed",
@@ -184,9 +184,9 @@ def case_c_missing_methods_failed() -> None:
     t = _target()
     out = bp.hydrate_generation_response(
         _request(t), _response({"targetId": "tgt:0001", "status": "generated", "methods": []}))
-    _assert("C empty methods → failed", out["items"][0]["status"] == "failed")
-    _assert("C empty methods reason", out["items"][0]["reason"] == bp.HYDRATION_MISSING_METHODS,
-            out["items"][0]["reason"])
+    _assert("C empty methods → failed", out["targets"][0]["status"] == "failed")
+    _assert("C empty methods reason", out["targets"][0]["reason"] == bp.HYDRATION_MISSING_METHODS,
+            out["targets"][0]["reason"])
 
 
 # ── omitted / unknown / duplicated targets are diagnosed, not fatal ──────────────
@@ -199,7 +199,7 @@ def case_omitted_target_failed() -> None:
         _response({"targetId": "tgt:0001", "status": "generated",
                    "methods": [_method("sym:com.acme.A#m:11111111")]}),
     )
-    by_id = {it["targetId"]: it for it in out["items"]}
+    by_id = {it["targetId"]: it for it in out["targets"]}
     _assert("omitted present as failed", by_id["tgt:0002"]["status"] == "failed")
     _assert("omitted reason", by_id["tgt:0002"]["reason"] == bp.HYDRATION_OMITTED)
     _assert("omitted counted", out["counts"]["omitted"] == 1, repr(out["counts"]))
@@ -229,7 +229,7 @@ def case_unknown_and_duplicate_diagnosed() -> None:
 def case_structural_errors_raise() -> None:
     t = _target()
     for label, bad in (("response not object", "nope"),
-                       ("items not list", {"items": "x"})):
+                       ("items not list", {"targets": "x"})):
         try:
             bp.hydrate_generation_response(_request(t), bad)  # type: ignore[arg-type]
             _assert(f"structural raises: {label}", False, "no exception")
@@ -245,7 +245,7 @@ def case_skipped_passthrough() -> None:
     out = bp.hydrate_generation_response(
         _request(t),
         _response({"targetId": "tgt:0001", "status": "skipped", "reason": "trivial getter"}))
-    _assert("skipped passthrough", out["items"][0]["status"] == "skipped")
+    _assert("skipped passthrough", out["targets"][0]["status"] == "skipped")
     _assert("skipped counted", out["counts"]["skipped"] == 1, repr(out["counts"]))
 
 

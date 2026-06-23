@@ -145,7 +145,7 @@ prompt que guía al LLM, editá el `.md` —sin tocar Python—; si la plantilla
 runner usa un prompt mínimo embebido como fallback.
 
 1. En Claude Code, pedile que **lea `request-generation.json` y escriba
-   `response-generation.json`** con un item por target. **El LLM NO arma el
+   `response-generation.json`** con un target por target del request. **El LLM NO arma el
    `patchDescriptor`** (ver §"Contrato de generación"): por target devuelve solo
    - `status: "generated"` + `methods[]` (cada método `{name, annotations, body,
      evidenceIds}`), o
@@ -176,7 +176,7 @@ runner usa un prompt mínimo embebido como fallback.
    - `status` imprime los totales del run.
    - `quit` corta el run (deja el manifest persistido).
 3. **Repair solo para fallidos:** si hay fallos, el runner escribe
-   `request-repair-r1.json` con **únicamente** los items fallidos (tipo de falla,
+   `request-repair-r1.json` con **únicamente** los targets fallidos (tipo de falla,
    archivo de test, error, salida de build, source actual, `repairCause` estructurado)
    y pide:
 
@@ -247,11 +247,11 @@ Reglas:
 - **Validación por item, no por batch.** Un item inválido queda
   `GENERATION_FAILED` solo él; los `generated` válidos, `skipped` y
   `NEED_MORE_CONTEXT` hermanos no se ven afectados. Solo un envelope roto
-  (schemaVersion/role/batchId/`items` no-lista) aborta el batch.
+  (schemaVersion/role/batchId/`targets` no-lista) aborta el batch.
 - **Compat de transición:** si el modelo todavía manda `patchDescriptor`, se usa
   **solo** `patchDescriptor.methods`; el resto de su metadata se ignora.
 
-`request-generation.json` lleva un `responseCompletionContract` con el `itemShape`
+`request-generation.json` lleva un `responseCompletionContract` con el `targetShape`
 esperado. Ejemplo de `response-generation.json` (formato nuevo):
 
 ```json
@@ -260,7 +260,7 @@ esperado. Ejemplo de `response-generation.json` (formato nuevo):
   "runId": "run-...",
   "batchId": "batch-001",
   "role": "generation",
-  "items": [
+  "targets": [
     {
       "targetId": "tgt:0001",
       "status": "generated",
@@ -277,7 +277,7 @@ esperado. Ejemplo de `response-generation.json` (formato nuevo):
 }
 ```
 
-`patchDescriptor` que Python hidrata para ese item (lo que llega al patcher):
+`patchDescriptor` que Python hidrata para ese target (lo que llega al patcher):
 
 ```json
 {
@@ -294,10 +294,10 @@ esperado. Ejemplo de `response-generation.json` (formato nuevo):
 ```
 
 `validation-result.json` **se escribe siempre** (incluso si la respuesta es
-inválida o hay items omitidos), con `counts` (incluye `received`, `generatedValid`,
+inválida o hay targets omitidos), con `counts` (incluye `received`, `generatedValid`,
 `generatedInvalid`, `applied`, `passed`, `failed`, `compile`, `skipped`,
-`needMoreContext`, `omitted`) e `items[]` con el motivo por target. Razones de
-fallo por item: `COMPLETION_SCHEMA_ERROR`, `PATCH_DESCRIPTOR_HYDRATION_ERROR`,
+`needMoreContext`, `omitted`) y `targets[]` con el motivo por target. Razones de
+fallo por target: `COMPLETION_SCHEMA_ERROR`, `PATCH_DESCRIPTOR_HYDRATION_ERROR`,
 `UNKNOWN_TARGET_ID`, `DUPLICATED_TARGET_ID`, `MISSING_METHODS`,
 `INVALID_EVIDENCE_ID`, `TARGET_EVIDENCE_REQUIRED`, `OMITTED_FROM_RESPONSE`.
 
@@ -393,7 +393,7 @@ Cada `request-generation.json` y `request-repair-rN.json` lleva al tope:
 "selfContainedPolicy": { ... }
 ```
 
-Cuando el LLM responde `NEED_MORE_CONTEXT` para un item:
+Cuando el LLM responde `NEED_MORE_CONTEXT` para un target:
 - En **generación**: el target se marca `SKIPPED` con `reason: "MISSING_CONTEXT: <motivo>"` y `missingSymbols` persistidos para auditoría.
 - En **repair**: el target se marca `ABANDONED` con el mismo patrón.
 
@@ -447,8 +447,8 @@ acceso al FS). Documentado como riesgo pendiente.
 
 ## Strict repair loop — admission gate (task 6)
 
-Antes de escribir `request-repair-rN.json`, el runner evalúa si cada item fallido
-es **accionable** para un nuevo handoff. Los items no accionables se abandonan
+Antes de escribir `request-repair-rN.json`, el runner evalúa si cada target fallido
+es **accionable** para un nuevo handoff. Los targets no accionables se abandonan
 directamente sin gastar tokens.
 
 ### Reglas de abandono
@@ -458,7 +458,7 @@ directamente sin gastar tokens.
 | `REPEATED_FAILURE_SIGNATURE` | La firma del fallo es idéntica a la del round anterior → el LLM ya intentó sin éxito esta causa exacta |
 | `PATCHER_REJECTED_WITHOUT_DIAGNOSTICS` | El patcher devolvió rc=3 pero no hay `patcherErrorDetails` ni `compilerErrorDetails` → sin causa semántica para reparar |
 | `NO_ACTIONABLE_LOGS` | No hay logs del compilador/patcher ni build output, y el resumen es genérico (`COMPILATION_ERROR`, `PATCH_REJECTED`, etc.) |
-| `NO_PROGRESS_AFTER_REPAIR` | El round de repair no re-aplicó ningún patch (el modelo saltó/falló todos los items) |
+| `NO_PROGRESS_AFTER_REPAIR` | El round de repair no re-aplicó ningún patch (el modelo saltó/falló todos los targets) |
 | `MISSING_CONTEXT` | El LLM respondió `NEED_MORE_CONTEXT` en repair |
 
 **`TEST_FAILURE` siempre recibe un round:** tiene reporte surefire y `currentTestSource`

@@ -239,7 +239,7 @@ def _request_slices(request: dict) -> dict[Any, dict]:
 
 def _response_items(response: dict) -> dict[Any, dict]:
     out: dict[Any, dict] = {}
-    items = response.get("items") if isinstance(response, dict) else None
+    items = response.get("targets") if isinstance(response, dict) else None
     if isinstance(items, list):
         for it in items:
             if isinstance(it, dict):

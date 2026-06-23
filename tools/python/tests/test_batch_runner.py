@@ -113,7 +113,7 @@ def _gen_resp(batch_id: str, statuses: dict[str, str]) -> dict:
             it["reason"] = "stub"
         items.append(it)
     return {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "r",
-            "batchId": batch_id, "role": "generation", "items": items}
+            "batchId": batch_id, "role": "generation", "targets": items}
 
 
 def _repair_resp(batch_id: str, rnd: int, statuses: dict[str, str]) -> dict:
@@ -126,7 +126,7 @@ def _repair_resp(batch_id: str, rnd: int, statuses: dict[str, str]) -> dict:
             it["reason"] = "stub"
         items.append(it)
     return {"schemaVersion": bp.SCHEMA_REPAIR_RESPONSE, "runId": "r",
-            "batchId": batch_id, "role": "repair", "repairRound": rnd, "items": items}
+            "batchId": batch_id, "role": "repair", "repairRound": rnd, "targets": items}
 
 
 def _install_stubs(monkey_state: dict) -> None:
@@ -468,10 +468,10 @@ def _gen_resp_new(batch_id: str, spec: dict[str, tuple]) -> dict:
             it["reason"] = "stub"
         items.append(it)
     return {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "r",
-            "batchId": batch_id, "role": "generation", "items": items}
+            "batchId": batch_id, "role": "generation", "targets": items}
 
 
-# ── D. validation-result.json is always written (counts + per-item diagnostics) ──
+# ── D. validation-result.json is always written (counts + per-target diagnostics) ──
 
 def case_validation_result_written_with_counts_and_diagnostics() -> None:
     with tempfile.TemporaryDirectory() as td:
@@ -496,7 +496,7 @@ def case_validation_result_written_with_counts_and_diagnostics() -> None:
         _assert("D one generated invalid", c["generatedInvalid"] == 1, repr(c))
         _assert("D one skipped", c["skipped"] == 1, repr(c))
         _assert("D one applied", c["applied"] == 1, repr(c))
-        by_id = {it["targetId"]: it for it in vr["items"]}
+        by_id = {it["targetId"]: it for it in vr["targets"]}
         _assert("D invalid item GENERATION_FAILED",
                 by_id["com.acme.C1#m"]["status"] == bp.GENERATION_FAILED,
                 str(by_id.get("com.acme.C1#m")))
@@ -515,13 +515,13 @@ def case_validation_result_written_on_invalid_envelope() -> None:
         # A structurally broken response (wrong role) → batch aborts, but
         # validation-result.json must STILL be written.
         bad = {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "r",
-               "batchId": "batch-001", "role": "WRONG", "items": []}
+               "batchId": "batch-001", "role": "WRONG", "targets": []}
         _install_stubs({"gen_responses": [bad], "repair_responses": [],
                         "test_rcs": [], "surefire": {}})
         br.run_batches(state, Path(td), batch_size=10, max_repair_rounds=0, max_batches=None)
         vr = _validation_result(state)
         _assert("envelope-fail still writes counts", "compile" in vr["counts"], repr(vr["counts"]))
-        _assert("envelope-fail lists items", len(vr["items"]) == 2, repr(vr["items"]))
+        _assert("envelope-fail lists targets", len(vr["targets"]) == 2, repr(vr["targets"]))
         _assert("envelope-fail rc nonzero", vr["rc"] != 0, repr(vr["rc"]))
 
 

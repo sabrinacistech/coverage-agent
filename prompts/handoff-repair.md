@@ -39,10 +39,10 @@ falló), `compilerErrorDetails` (salida exacta de javac/Maven), `patcherErrorDet
 ---
 
 ## 📐 ESQUEMA DE SALIDA (OUTPUT SCHEMA)
-La respuesta debe cumplir `schemaVersion` **"${SCHEMA_VERSION}"** y contener un item
+La respuesta debe cumplir `schemaVersion` **"${SCHEMA_VERSION}"** y contener un target
 por cada `failedItem` del request.
 
-### Matriz de estados por item
+### Matriz de estados por target
 1. **`repaired`** — el test se reparó con éxito.
    * Campos requeridos: `status`, `patchDescriptor` válido.
 2. **`abandoned`** / **`skipped`** / **`failed`** — no se pudo reparar.
@@ -57,7 +57,7 @@ por cada `failedItem` del request.
   "runId": "${RUN_ID}",
   "batchId": "${BATCH_ID}",
   "role": "repair",
-  "items": [
+  "targets": [
     {
       "targetId": "ID_DEL_TARGET_1",
       "status": "repaired",

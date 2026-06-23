@@ -172,7 +172,7 @@ C:\repoVC\coverage_cluster-status-service\_llm\runs\run-YYYYMMDD-HHMMSS\batches\
 Reglas:
 - La respuesta debe ser SOLO JSON válido.
 - Debe tener schemaVersion "test-generation-batch-response-v1".
-- Debe incluir un item por cada target del request.
+- Debe incluir un target en la respuesta por cada target del request.
 - NO devuelvas patchDescriptor ni testSource: el runner construye el
   patchDescriptor canónico desde el target. Por target devolvé SOLO:
   - status "generated" con methods[] (cada método: name, annotations, body, evidenceIds), o
@@ -220,7 +220,7 @@ adaptando valores y evidenceIds al request real:
   "runId": "run-YYYYMMDD-HHMMSS",
   "batchId": "batch-001",
   "role": "generation",
-  "items": [
+  "targets": [
     {
       "targetId": "tgt:0001",
       "status": "generated",

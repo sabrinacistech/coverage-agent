@@ -120,13 +120,49 @@ def case_request_completion_contract_no_patch_descriptor() -> None:
     rcc = req.get("responseCompletionContract")
     _assert("request has responseCompletionContract", isinstance(rcc, dict), repr(rcc))
     _assert("completion contract schema", rcc["schemaVersion"] == "test-generation-completion-v1")
-    _assert("completion itemShape has methods", "methods" in rcc["itemShape"])
-    _assert("completion itemShape has no patchDescriptor",
-            "patchDescriptor" not in rcc["itemShape"])
-    for it in req["expectedResponse"]["items"]:
+    _assert("completion targetShape has methods", "methods" in rcc["targetShape"])
+    _assert("completion targetShape has no patchDescriptor",
+            "patchDescriptor" not in rcc["targetShape"])
+    for it in req["expectedResponse"]["targets"]:
         _assert("expectedResponse item has no patchDescriptor",
                 "patchDescriptor" not in it, repr(it))
         _assert("expectedResponse item has methods", "methods" in it, repr(it))
+
+
+def case_prompt_template_and_validator_share_targets_container() -> None:
+    # Contract guard against the drift that produced COMPLETION_SCHEMA_ERROR
+    # ("items must be a list") and zero generated tests: the prompt's response
+    # template and the envelope validator MUST agree on the SAME top-level
+    # container key. Canonical term: `targets` (never `items`).
+    targets = bp.select_batch(_plan(2), set(), 10)
+    req = bp.build_generation_request("run-1", "batch-001", targets, batch_size=10)
+
+    # 1) The prompt template echoes the per-target completions under `targets`.
+    er = req["expectedResponse"]
+    _assert("expectedResponse uses 'targets' container", "targets" in er, list(er))
+    _assert("expectedResponse has no legacy 'items' container", "items" not in er, list(er))
+    rcc = req["responseCompletionContract"]
+    _assert("contract exposes 'targetShape'", "targetShape" in rcc, list(rcc))
+    _assert("contract has no legacy 'itemShape'", "itemShape" not in rcc, list(rcc))
+
+    # 2) The validator reads the EXACT key the template advertises.
+    container_key = "targets" if "targets" in er else "items"
+    good = {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "role": "generation",
+            "batchId": "batch-001", container_key: []}
+    try:
+        bp.validate_generation_envelope(good, batch_id="batch-001")
+        _assert("validator accepts the template's container", True)
+    except bp.BatchResponseError as exc:
+        _assert("validator accepts the template's container", False, str(exc))
+
+    # 3) The legacy `items` envelope (no `targets`) is rejected.
+    legacy = {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "role": "generation",
+              "batchId": "batch-001", "items": []}
+    try:
+        bp.validate_generation_envelope(legacy, batch_id="batch-001")
+        _assert("validator rejects legacy 'items' envelope", False, "should have raised")
+    except bp.BatchResponseError:
+        _assert("validator rejects legacy 'items' envelope", True)
 
 
 def case_rules_do_not_reference_patch_descriptor_dotpath() -> None:
@@ -142,7 +178,7 @@ def case_rules_do_not_reference_patch_descriptor_dotpath() -> None:
 
 def _gen_resp(*items: dict, batch_id: str = "batch-001") -> dict:
     return {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "role": "generation",
-            "batchId": batch_id, "items": list(items)}
+            "batchId": batch_id, "targets": list(items)}
 
 
 def case_envelope_accepts_well_formed_wrapper() -> None:
@@ -156,12 +192,12 @@ def case_envelope_rejects_structural_breaches() -> None:
     bad = [
         ("not an object", "nope"),
         ("schemaVersion", {"schemaVersion": "wrong", "role": "generation",
-                           "batchId": "batch-001", "items": []}),
+                           "batchId": "batch-001", "targets": []}),
         ("role", {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "role": "repair",
-                  "batchId": "batch-001", "items": []}),
+                  "batchId": "batch-001", "targets": []}),
         ("batchId", _gen_resp(batch_id="batch-999")),
         ("items not list", {"schemaVersion": bp.SCHEMA_GENERATION_RESPONSE,
-                            "role": "generation", "batchId": "batch-001", "items": "x"}),
+                            "role": "generation", "batchId": "batch-001", "targets": "x"}),
     ]
     for label, resp in bad:
         try:
@@ -190,7 +226,7 @@ def case_response_skipped_item_does_not_break_batch() -> None:
     resp = {
         "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
         "batchId": "batch-001", "role": "generation",
-        "items": [
+        "targets": [
             {"targetId": "com.acme.C0#m", "status": "generated",
              "patchDescriptor": _patch("com.acme.C0")},
             {"targetId": "com.acme.C1#m", "status": "skipped",
@@ -209,7 +245,7 @@ def case_response_unknown_target_rejected() -> None:
     resp = {
         "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
         "batchId": "batch-001", "role": "generation",
-        "items": [{"targetId": "com.acme.NOT_IN_BATCH#m", "status": "skipped"}],
+        "targets": [{"targetId": "com.acme.NOT_IN_BATCH#m", "status": "skipped"}],
     }
     try:
         bp.validate_generation_response(resp, targets, batch_id="batch-001")
@@ -223,7 +259,7 @@ def case_response_generated_without_patch_rejected() -> None:
     resp = {
         "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
         "batchId": "batch-001", "role": "generation",
-        "items": [{"targetId": "com.acme.C0#m", "status": "generated"}],
+        "targets": [{"targetId": "com.acme.C0#m", "status": "generated"}],
     }
     try:
         bp.validate_generation_response(resp, targets, batch_id="batch-001")
@@ -239,7 +275,7 @@ def case_response_full_file_patch_rejected_before_patcher() -> None:
     resp = {
         "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
         "batchId": "batch-001", "role": "generation",
-        "items": [{
+        "targets": [{
             "targetId": "com.acme.C0#m",
             "status": "generated",
             "patchDescriptor": {
@@ -264,7 +300,7 @@ def case_response_patch_missing_methods_rejected() -> None:
     resp = {
         "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
         "batchId": "batch-001", "role": "generation",
-        "items": [{"targetId": "com.acme.C0#m", "status": "generated",
+        "targets": [{"targetId": "com.acme.C0#m", "status": "generated",
                    "patchDescriptor": bad_patch}],
     }
     try:
@@ -281,7 +317,7 @@ def case_response_noncanonical_test_class_rejected() -> None:
     resp = {
         "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
         "batchId": "batch-001", "role": "generation",
-        "items": [{"targetId": "com.acme.C0#m", "status": "generated",
+        "targets": [{"targetId": "com.acme.C0#m", "status": "generated",
                    "patchDescriptor": bad_patch}],
     }
     try:
@@ -298,7 +334,7 @@ def case_response_nonwhitelisted_import_rejected() -> None:
     resp = {
         "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
         "batchId": "batch-001", "role": "generation",
-        "items": [{"targetId": "com.acme.C0#m", "status": "generated",
+        "targets": [{"targetId": "com.acme.C0#m", "status": "generated",
                    "patchDescriptor": bad_patch}],
     }
     try:
@@ -315,7 +351,7 @@ def case_response_nonwhitelisted_annotation_rejected() -> None:
     resp = {
         "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
         "batchId": "batch-001", "role": "generation",
-        "items": [{"targetId": "com.acme.C0#m", "status": "generated",
+        "targets": [{"targetId": "com.acme.C0#m", "status": "generated",
                    "patchDescriptor": bad_patch}],
     }
     try:
@@ -332,7 +368,7 @@ def case_response_unknown_evidence_rejected() -> None:
     resp = {
         "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
         "batchId": "batch-001", "role": "generation",
-        "items": [{"targetId": "com.acme.C0#m", "status": "generated",
+        "targets": [{"targetId": "com.acme.C0#m", "status": "generated",
                    "patchDescriptor": bad_patch}],
     }
     try:
@@ -349,7 +385,7 @@ def case_response_missing_target_evidence_rejected() -> None:
     resp = {
         "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
         "batchId": "batch-001", "role": "generation",
-        "items": [{"targetId": "com.acme.C0#m", "status": "generated",
+        "targets": [{"targetId": "com.acme.C0#m", "status": "generated",
                    "patchDescriptor": _patch("com.acme.C0")}],
     }
     try:
@@ -372,7 +408,7 @@ def case_response_must_cite_target_evidence() -> None:
     resp = {
         "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
         "batchId": "batch-001", "role": "generation",
-        "items": [{"targetId": "com.acme.C0#m", "status": "generated",
+        "targets": [{"targetId": "com.acme.C0#m", "status": "generated",
                    "patchDescriptor": bad_patch}],
     }
     try:
@@ -406,7 +442,7 @@ def case_response_sut_body_call_requires_evidence_ref() -> None:
     resp = {
         "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
         "batchId": "batch-001", "role": "generation",
-        "items": [{"targetId": "com.acme.MyException#<init>", "status": "generated",
+        "targets": [{"targetId": "com.acme.MyException#<init>", "status": "generated",
                    "patchDescriptor": patch}],
     }
     try:
@@ -455,7 +491,7 @@ def case_response_sut_body_call_allowed_with_evidence_ref() -> None:
     resp = {
         "schemaVersion": bp.SCHEMA_GENERATION_RESPONSE, "runId": "run-1",
         "batchId": "batch-001", "role": "generation",
-        "items": [{"targetId": "com.acme.MyException#<init>", "status": "generated",
+        "targets": [{"targetId": "com.acme.MyException#<init>", "status": "generated",
                    "patchDescriptor": patch}],
     }
     try:
@@ -469,7 +505,7 @@ def case_repair_patch_must_use_repair_prefix() -> None:
     resp = {
         "schemaVersion": bp.SCHEMA_REPAIR_RESPONSE, "runId": "run-1",
         "batchId": "batch-001", "role": "repair", "repairRound": 1,
-        "items": [{"targetId": "com.acme.C0#m", "status": "repaired",
+        "targets": [{"targetId": "com.acme.C0#m", "status": "repaired",
                    "patchDescriptor": _patch("com.acme.C0", prefix="patch")}],
     }
     try:
@@ -485,7 +521,7 @@ def case_repair_noncanonical_test_class_rejected() -> None:
     resp = {
         "schemaVersion": bp.SCHEMA_REPAIR_RESPONSE, "runId": "run-1",
         "batchId": "batch-001", "role": "repair", "repairRound": 1,
-        "items": [{"targetId": "com.acme.C0#m", "status": "repaired",
+        "targets": [{"targetId": "com.acme.C0#m", "status": "repaired",
                    "patchDescriptor": patch}],
     }
     requested = [{"targetId": "com.acme.C0#m", "sut": "com.acme.C0",
@@ -604,7 +640,7 @@ def _repaired_item78(patch: dict) -> dict:
     return {
         "schemaVersion": bp.SCHEMA_REPAIR_RESPONSE, "runId": "run-1",
         "batchId": "batch-001", "role": "repair", "repairRound": 1,
-        "items": [{"targetId": "tgt:0078", "status": "repaired", "patchDescriptor": patch}],
+        "targets": [{"targetId": "tgt:0078", "status": "repaired", "patchDescriptor": patch}],
     }
 
 

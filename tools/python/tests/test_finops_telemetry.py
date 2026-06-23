@@ -168,8 +168,8 @@ def case_record_handoff_estimate_split() -> None:
         run = Path(d)
         request = {"targets": [{"targetId": "a", "sutSourceCode": "x" * 400},
                                {"targetId": "b", "sutSourceCode": "y" * 40}]}
-        response = {"items": [{"targetId": "a", "methods": [1, 2, 3]},
-                              {"targetId": "b", "methods": []}]}
+        response = {"targets": [{"targetId": "a", "methods": [1, 2, 3]},
+                                {"targetId": "b", "methods": []}]}
         rec = ct.record_handoff(run, run_id="run-Y", role="generation", rnd=0,
                                 request=request, response=response,
                                 target_ids=["a", "b"], duration_seconds=2.0,
@@ -197,7 +197,7 @@ def case_record_handoff_uses_measured_usage() -> None:
         run = Path(d)
         request = {"targets": [{"targetId": "a"}, {"targetId": "b"}]}
         response = {"usage": {"input_tokens": 1000, "output_tokens": 300},
-                    "items": [{"targetId": "a"}, {"targetId": "b"}]}
+                    "targets": [{"targetId": "a"}, {"targetId": "b"}]}
         rec = ct.record_handoff(run, run_id="run-Z", role="generation", rnd=0,
                                 request=request, response=response,
                                 target_ids=["a", "b"], duration_seconds=1.0,

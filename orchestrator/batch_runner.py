@@ -227,7 +227,7 @@ def _build_handoff_prompt_fallback(kind: str, request: Path, response: Path,
         schema = bp.SCHEMA_GENERATION_RESPONSE
         rules = (
             f'- schemaVersion "{schema}".\n'
-            "- Un item por cada target del request.\n"
+            "- Un target en la respuesta por cada target del request.\n"
             "- NO devuelvas patchDescriptor ni testSource: el runner construye el "
             "patchDescriptor canónico. Por target devolvé SOLO status + methods + reason + missingSymbols.\n"
             "- Por target: status \"generated\" + methods[], o \"skipped\"+reason, o "
@@ -1379,7 +1379,7 @@ def _empty_validation_counts(*, received: int = 0, omitted: int = 0) -> dict:
     return _validation_counts({"received": received, "omitted": omitted}, {}, applied=0)
 
 
-def _validation_items(manifest: dict, target_ids: list[str], diagnostics: list[dict]) -> list[dict]:
+def _validation_targets(manifest: dict, target_ids: list[str], diagnostics: list[dict]) -> list[dict]:
     """Per-target rows for validation-result.json: the target's final lifecycle
     status plus the hydration diagnostic (reason/message) when one exists."""
     diag_by_id: dict = {}
@@ -1864,7 +1864,7 @@ def run_batches(
             _write_json(paths.validation_result(batch_id),
                         {"batchId": batch_id, "rc": 0,
                          "counts": _empty_validation_counts(),
-                         "items": [], "applied": {},
+                         "targets": [], "applied": {},
                          "preflightSkipped": preflight_skipped})
             _save_manifest(run_dir, manifest)
             continue
@@ -1908,18 +1908,18 @@ def run_batches(
             _write_json(paths.validation_result(batch_id), {
                 "batchId": batch_id, "rc": 1,
                 "counts": _empty_validation_counts(omitted=len(sendable_ids)),
-                "items": [{"targetId": tid, "status": bp.GENERATION_FAILED,
+                "targets": [{"targetId": tid, "status": bp.GENERATION_FAILED,
                            "reason": bp.HYDRATION_COMPLETION_SCHEMA_ERROR,
                            "message": str(exc)} for tid in sendable_ids],
                 "applied": {}, "preflightSkipped": preflight_skipped})
             _save_manifest(run_dir, manifest)
             continue
 
-        # Python builds the canonical patchDescriptor per item (the LLM no longer
-        # ships it); a single invalid item fails ONLY itself instead of dragging the
+        # Python builds the canonical patchDescriptor per target (the LLM no longer
+        # ships it); a single invalid target fails ONLY itself instead of dragging the
         # whole batch into GENERATION_FAILED.
         hydrated = bp.hydrate_generation_response(req, resp)
-        items = hydrated["items"]
+        gen_targets = hydrated["targets"]
         gen_diagnostics = hydrated["diagnostics"]
         gen_counts = hydrated["counts"]
 
@@ -1932,7 +1932,7 @@ def run_batches(
         fixture_plans = {t.get("targetId"): (t.get("fixturePlan") or {})
                          for t in request_targets}
         applied, compliance_warnings = _process_generation(
-            items, manifest, state_dir=state_dir, repo=repo,
+            gen_targets, manifest, state_dir=state_dir, repo=repo,
             batch_ids=sendable_ids, fixture_plans=fixture_plans)
         _save_manifest(run_dir, manifest)
 
@@ -1954,7 +1954,7 @@ def run_batches(
         counts = _validation_counts(gen_counts, test_counts, applied=len(applied))
         _write_json(paths.validation_result(batch_id),
                     {"batchId": batch_id, "rc": rc_tests, "counts": counts,
-                     "items": _validation_items(manifest, sendable_ids, gen_diagnostics),
+                     "targets": _validation_targets(manifest, sendable_ids, gen_diagnostics),
                      "applied": applied, "preflightSkipped": preflight_skipped,
                      "fixtureComplianceWarnings": compliance_warnings})
         _save_manifest(run_dir, manifest)
