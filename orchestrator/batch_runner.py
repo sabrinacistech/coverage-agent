@@ -2161,6 +2161,9 @@ def run_batches(
                    f"in={tele.get('total_prompt_tokens', 0)} "
                    f"out={tele.get('total_completion_tokens', 0)} tok · "
                    f"{len(tele.get('interactions', []))} interacción(es) · {tele_path.name}")
+            # Cuadro prominente de tokens IN/OUT (mismo estilo que la métrica de
+            # eficiencia), legible de un vistazo desde la consola.
+            _print("\n" + cost_telemetry.format_token_summary_table(tele))
     except Exception as exc:  # noqa: BLE001
         _print(f"[finops] no se pudo leer el resumen de costos: {exc}")
 

@@ -314,3 +314,102 @@ def record_handoff(
             source=source, estimated=estimated,
         ))
     return recorded
+
+
+# ── Reporte de tokens para STDOUT (cuadro tipo "métrica de eficiencia") ──────────
+
+def _box(title: str, rows: list[str]) -> str:
+    """Caja ASCII de ancho fijo (mismo estilo que workspace_volumetry)."""
+    inner = max([len(title)] + [len(r) for r in rows]) if rows else len(title)
+    bar = "+" + "-" * (inner + 2) + "+"
+    out = [bar, f"| {title.ljust(inner)} |", bar]
+    out += [f"| {r.ljust(inner)} |" for r in rows]
+    out.append(bar)
+    return "\n".join(out)
+
+
+def aggregate_by_role(interactions: list) -> dict[str, dict]:
+    """Suma tokens/costo/conteo por rol (generation/repair) desde las interacciones."""
+    agg: dict[str, dict] = {}
+    for it in interactions or []:
+        if not isinstance(it, dict):
+            continue
+        role = str(it.get("role") or "?")
+        a = agg.setdefault(role, {"in": 0, "out": 0, "usd": 0.0, "n": 0})
+        a["in"] += _as_int(it.get("tokens_in")) or 0
+        a["out"] += _as_int(it.get("tokens_out")) or 0
+        try:
+            a["usd"] += float(it.get("cost_usd") or 0.0)
+        except (TypeError, ValueError):
+            pass
+        a["n"] += 1
+    return agg
+
+
+def format_token_summary_table(telemetry: dict) -> str:
+    """Cuadro ASCII con el desglose de tokens IN/OUT del run (lee un costs-telemetry
+    ya cargado). Tolerante: un dict vacío produce un cuadro con ceros."""
+    tele = telemetry if isinstance(telemetry, dict) else {}
+    interactions = tele.get("interactions") or []
+    tin = _as_int(tele.get("total_prompt_tokens")) or 0
+    tout = _as_int(tele.get("total_completion_tokens")) or 0
+    total = tin + tout
+    try:
+        usd = float(tele.get("total_accumulated_usd") or 0.0)
+    except (TypeError, ValueError):
+        usd = 0.0
+    any_estimated = any((i or {}).get("estimated") for i in interactions if isinstance(i, dict))
+    if not interactions:
+        source = "sin datos"
+    else:
+        source = "estimado (size_estimate)" if any_estimated else "medido (usage)"
+
+    lw = 30  # ancho de etiqueta para alinear los valores
+    rows = [
+        f"{'Tokens de entrada (in):'.ljust(lw)}{tin:,} tok",
+        f"{'Tokens de salida (out):'.ljust(lw)}{tout:,} tok",
+        f"{'Tokens totales:'.ljust(lw)}{total:,} tok",
+        f"{'Interacciones LLM:'.ljust(lw)}{len(interactions)}",
+        f"{'Costo acumulado:'.ljust(lw)}${usd:.4f}",
+        f"{'Fuente de tokens:'.ljust(lw)}{source}",
+    ]
+    agg = aggregate_by_role(interactions)
+    if agg:
+        rows.append("- por rol " + "-" * (lw - 10))
+        for role in sorted(agg):
+            a = agg[role]
+            rows.append(
+                f"{(role + ':').ljust(lw)}in={a['in']:,} out={a['out']:,} "
+                f"(${a['usd']:.4f}, {a['n']} int.)"
+            )
+    return _box("RESUMEN FINOPS - TOKENS POR RUN (costs-telemetry.json)", rows)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI para ver el cuadro de tokens de cualquier run sin re-ejecutar el pipeline:
+        python -m orchestrator.cost_telemetry <run_dir | costs-telemetry.json>
+    """
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Reporte de tokens IN/OUT de un run (FinOps).")
+    ap.add_argument("path", help="run_dir o ruta directa a costs-telemetry.json")
+    args = ap.parse_args(argv)
+    p = Path(args.path)
+    if p.is_dir():
+        p = telemetry_path(p)
+    if not p.exists():
+        print(f"[finops] no existe: {p}")
+        return 1
+    try:
+        tele = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[finops] no se pudo leer {p}: {exc}")
+        return 1
+    print(format_token_summary_table(tele))
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())

@@ -209,6 +209,36 @@ def case_record_handoff_uses_measured_usage() -> None:
         _assert("measured totals out", data["total_completion_tokens"] == 300, str(data))
 
 
+def case_token_summary_table_totals_and_roles() -> None:
+    tele = {
+        "total_prompt_tokens": 66116, "total_completion_tokens": 5407,
+        "total_accumulated_usd": 1.3973,
+        "interactions": [
+            {"role": "generation", "tokens_in": 60000, "tokens_out": 5000,
+             "cost_usd": 1.30, "estimated": True},
+            {"role": "repair", "tokens_in": 6116, "tokens_out": 407,
+             "cost_usd": 0.0973, "estimated": True},
+        ],
+    }
+    box = ct.format_token_summary_table(tele)
+    _assert("box has title", "RESUMEN FINOPS" in box, box)
+    _assert("box shows in tokens (thousands)", "66,116 tok" in box, box)
+    _assert("box shows out tokens", "5,407 tok" in box, box)
+    _assert("box shows total", "71,523 tok" in box, box)
+    _assert("box shows cost", "$1.3973" in box, box)
+    _assert("box flags estimated source", "estimado" in box, box)
+    _assert("box has per-role generation", "generation:" in box, box)
+    _assert("box has per-role repair", "repair:" in box, box)
+
+    agg = ct.aggregate_by_role(tele["interactions"])
+    _assert("role agg in", agg["generation"]["in"] == 60000, str(agg))
+    _assert("role agg counts", agg["repair"]["n"] == 1, str(agg))
+
+    # Tolerant: empty telemetry yields a zeroed box, never raises.
+    empty = ct.format_token_summary_table({})
+    _assert("empty box renders", "0 tok" in empty and "sin datos" in empty, empty)
+
+
 def main() -> int:
     cases = [v for k, v in sorted(globals().items()) if k.startswith("case_")]
     for c in cases:
